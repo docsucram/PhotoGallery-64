@@ -346,3 +346,179 @@ When cropping or rotating an image:
 1. Normalized face bounding boxes $[x, y, w, h] \in [0.0, 1.0]$ are re-projected through the inverse transformation matrix to remain anchored to the person's physical features.
 2. The image's cached thumbnail in `thumbnails.db` is purged.
 3. The catalog database row is flagged with `metadata_dirty = 1` so background scanner workers rewrite updated EXIF/XMP tags losslessly without recompressing image pixels.
+
+---
+
+## 6. Multi-Photo Creation Studio Engine (`src/imaging/create_tools.py`)
+
+The multi-photo creation engine powers the three primary composite creation tools in the authentic Windows Live Photo Gallery `Create` ribbon tab:
+
+### 6.1. Microsoft ICE-Style Panorama Stitcher (`stitch_panorama`)
+Combines two or more overlapping photographs into a seamless wide-angle or 360-degree panorama:
+
+#### 1. Projection Geometry & Mode Selection
+- **Cylindrical / Spherical (`cv2.Stitcher_PANORAMA`):**
+  Projects source photographs onto a cylindrical or spherical surface. Ideal for standard wide-angle landscape sweeps and multi-row panoramas, maintaining natural perspective without extreme peripheral stretching.
+- **Planar / Perspective (`cv2.Stitcher_SCANS`):**
+  Enforces an affine/planar homography projection. Ideal for flat document scans, architectural facades, whiteboards, and artwork mosaics.
+
+#### 2. Multi-Band Feather Blending & Exposure Equalization
+Feature correspondences are detected across adjacent frames via ORB/AKAZE keypoints. The OpenCV stitching pipeline evaluates photometric gain compensation to equalize exposure shifts between frames, followed by multi-band Laplacian pyramid feather blending:
+$$I_{stitched}(x) = \sum_{l=0}^{L} \text{Blend}\left(\mathcal{L}_l(I_1), \mathcal{L}_l(I_2), \mathcal{G}_l(M)\right)$$
+where $\mathcal{L}_l$ represents the $l$-th level Laplacian band and $\mathcal{G}_l(M)$ is the Gaussian-blurred transition mask.
+
+#### 3. Largest Interior Rectangle Auto-Crop (The Signature ICE Feature)
+Stitched panoramas produce irregular, wavy black boundary voids caused by camera rotation and perspective warping. The engine computes the **largest axis-aligned interior rectangle** containing zero border pixels via 2D histogram dynamic programming (`compute_largest_interior_rectangle`):
+1. Compute binary valid-pixel mask $B(x, y) = 1$ if $\max(R, G, B) > 0$, else $0$.
+2. For each row $y$, update cumulative vertical consecutive-pixel heights:
+   $$H(x, y) = \begin{cases} H(x, y - 1) + 1 & \text{if } B(x, y) = 1 \\ 0 & \text{otherwise} \end{cases}$$
+3. For each row histogram $H(\cdot, y)$, evaluate maximum rectangular area using a linear-time monotonic stack:
+   $$\text{Area} = h \times (R_{index} - L_{index} + 1)$$
+4. Track rectangle $(x^*, y^*, w^*, h^*)$ that maximizes total area $\text{Area}^* = w^* \cdot h^*$.
+5. The stitched canvas is cleanly cropped to this maximal interior rectangle without user intervention.
+
+#### 4. Boundary Inpainting Fallback
+For remaining minor corner gaps or sky/water edges, optional Navier-Stokes / Telea inpainting (`cv2.inpaint`) fills peripheral missing pixels with edge-propagated texture:
+$$\nabla I \cdot \vec{n} = 0, \quad \Delta I = 0$$
+
+---
+
+### 6.2. Interactive Collage & "Then & Now" Studio (`render_collage_grid`, `render_polaroid_scatter`, `render_then_and_now`)
+Renders print-ready, high-resolution composites (up to $3840 \times 2160$ or 300 DPI A4) across three layout paradigms:
+
+#### 1. Modern Grid & Masonry Layouts
+Computes normalized coordinate slots $[x_0, y_0, x_1, y_1] \in [0.0, 1.0]$ for predefined layouts:
+- `2x1` / `1x2`: Side-by-side or stacked split.
+- `2x2`: Balanced 4-quadrant grid.
+- `3x2`: 6-photo album spread.
+- `Hero Center`: Prominent center hero photo flanked by dynamic peripheral thumbnails.
+- `Masonry`: Dynamic aspect-aware column packing.
+
+Images are center-cropped to cell aspect ratios, rendered with user-configurable border thickness ($0..40\text{px}$), antialiased corner rounding ($0..24\text{px}$), and a customizable background canvas color.
+
+#### 2. WLPG Polaroid Table Scatter Layout
+Emulates physical Polaroid instant prints casually scattered across a tactile surface (dark walnut, linen, or custom tint):
+1. Each photograph is embedded into an authentic white Polaroid frame with asymmetric bottom caption margin ($24\text{px}$ top/sides, $64\text{px}$ bottom).
+2. Frames are assigned randomized subtle rotation jitter $\theta_i \in [-12^\circ, +12^\circ]$ and soft Gaussian drop shadows ($\sigma = 12\text{px}$, opacity $0.45$).
+3. Optional metadata stamping: Renders the photo's `date_taken` and caption in authentic handwritten/sans typography onto the bottom Polaroid border.
+
+#### 3. "Then & Now" Chronological Comparison Card
+Automatically sequences 2 to 4 photos chronologically by EXIF `date_taken`:
+1. Sorts input photos by timestamp: $t_1 < t_2 < \dots < t_N$.
+2. Formats side-by-side split cards with high-contrast pill badges stamped at the top/bottom indicating the respective year or date (e.g., `"2014"` vs `"2026"`).
+3. Ensures matching vertical or horizontal framing for seamless temporal comparison.
+
+---
+
+### 6.3. Photo Fuse — Best-Face Group Shot Combiner (`align_burst_photos`, `fuse_face_patch`)
+Enables combining the best smiles or expressions from a burst of group photos into a single perfect group portrait:
+
+#### 1. Multi-Frame Burst Alignment
+1. Base frame $I_0$ serves as the photographic anchor.
+2. For secondary frame $I_k$ ($k \ge 1$):
+   - Extracts feature descriptors using ORB ($N = 2500$ keypoints) or SIFT.
+   - Computes robust feature matches via Fast Library for Approximate Nearest Neighbors (FLANN) or brute-force Hamming with Lowe's ratio test ($0.75$).
+   - Estimates perspective transformation matrix $H_k$ via RANSAC:
+     $$\min_{H_k} \sum_j \left\| p_{0, j} - H_k p_{k, j} \right\|^2$$
+   - Warps $I_k$ to the coordinate system of $I_0$:
+     $$I_k^{aligned} = \text{warpPerspective}(I_k, H_k, \text{shape}(I_0))$$
+
+#### 2. Poisson Seamless Cloning of Replacement Faces
+When the user selects a face rectangle from burst photo $k$ to replace the corresponding region in base photo $I_0$:
+1. Generates an elliptical binary replacement mask $M$ enclosing the target face patch with softened borders.
+2. Evaluates Poisson partial differential equation blending (`cv2.seamlessClone` in `NORMAL_CLONE` mode):
+   $$\Delta I_{fused} = \text{div}(\mathbf{v}) \quad \text{over } \Omega, \quad \text{with } I_{fused} = I_0 \text{ on } \partial\Omega$$
+   where the guidance vector field $\mathbf{v} = \nabla I_k^{aligned}$.
+3. Solves the Poisson equation across $\Omega$ to seamlessly match illumination, skin tones, and ambient lighting transitions between different burst frames while retaining the sharp facial features of the replacement shot.
+4. Near canvas boundaries where Poisson cloning matrices can destabilize, falls back to multi-band distance-transform cosine alpha blending.
+
+---
+
+## 7. Advanced Single-Photo Creative & Cinematic Engines (`src/imaging/creative_effects.py`)
+
+### 7.1. Google Photos-Style "Color Pop" (Subject Color Splash)
+Keeps the primary human subject in full vibrant color while converting the background to crisp, high-contrast monochrome:
+
+#### 1. Subject Foreground Segmentation (`estimate_subject_mask`)
+- Automatically seeds foreground/background trimaps using detected face/person bounding boxes:
+  - Subject bounding box: marked as Probable Foreground (`cv2.GC_PR_FGD`).
+  - Central head region: marked as Definite Foreground (`cv2.GC_FGD`).
+  - Peripheral outer border ($>10\%$ margin): marked as Definite Background (`cv2.GC_BGD`).
+- Solves min-cut/max-flow graph cut via GrabCut over 5 iterations.
+- If no face is detected, falls back to central saliency prior with bilateral color distance propagation:
+  $$S(x, y) = \exp\left(-\frac{(x - c_x)^2 + (y - c_y)^2}{2\sigma_r^2}\right) \cdot \exp\left(-\frac{\|I(x, y) - \mu_{center}\|^2}{2\sigma_c^2}\right)$$
+
+#### 2. Interactive Edge-Aware Bilateral Brush (`refine_mask_brush`)
+Allows the user to paint with "Keep Color (+)" or "Make B&W (-)" brushes. Rather than requiring pixel-perfect painting along hair or clothing edges, the brush uses bilateral photometric snapping:
+$$W_{brush}(x, y) = \exp\left(-\frac{(x - x_0)^2 + (y - y_0)^2}{2 R^2}\right) \cdot \exp\left(-\frac{\|I(x, y) - I(x_0, y_0)\|^2}{2\sigma_c^2}\right)$$
+Continuous mouse movement is interpolated via Bresenham line segments, guaranteeing unbroken brush strokes during rapid gestures.
+
+#### 3. Display Proxy Real-Time Rendering
+Interactive painting runs on a downscaled $1200\text{px}$ display proxy with a precomputed, contrast-adjusted B&W background buffer. Composite rendering executes in $<0.2\text{ms}$ ($>5000\text{ FPS}$):
+$$I_{preview}(x) = M(x) \cdot I_{proxy}(x) + (1.0 - M(x)) \cdot I_{proxy\_bw}(x)$$
+Upon saving, the proxy mask is upscaled to full camera resolution using bilinear interpolation and applied to the master array.
+
+---
+
+### 7.2. Portrait Depth Bokeh & Subject Fill Light
+Simulates high-end $f/1.4$ optical lenses and studio reflector fill illumination:
+
+#### 1. Depth-Aware Lens Bokeh (`apply_portrait_bokeh`)
+1. Generates continuous depth map $D(x, y) \in [0.0, 1.0]$ with foreground subject anchored at $D = 0$ and background transitioning to $D = 1$.
+2. Evaluates spatially varying lens blur using a normalized circular disc kernel (simulating a circular lens aperture):
+   $$R_{bokeh}(x, y) = \text{clip}\left(R_{max} \cdot D(x, y), 0, R_{max}\right)$$
+3. Blends multi-scale blurred background layers according to depth values, preserving razor-sharp foreground edges without edge-bleeding artifacts.
+
+#### 2. Subject Fill Light (`apply_subject_fill_light`)
+Simulates an on-axis photographic reflector or softbox lighting the subject:
+1. Isolates foreground luminance $L_{fg} = L^* \cdot M_{subject}$.
+2. Evaluates photographic highlight-safe gain curve:
+   $$L_{fg}' = L_{fg} + \text{gain} \cdot \left(1.0 - \frac{L_{fg}}{255.0}\right) \cdot \frac{L_{fg}}{128.0}$$
+3. Re-injects brightened luminance into the CIE LAB representation, elevating facial exposure and catchlights without blowing out the background.
+
+---
+
+### 7.3. "3D Cinematic Motion" Parallax MP4 Synthesis (`render_3d_cinematic_motion_video`)
+Transforms any still 2D photograph into a 3D animated camera parallax movement (similar to Google Photos Cinematic Photos):
+
+#### 1. Disocclusion Background Inpainting (`inpaint_disocclusion_background`)
+When the foreground subject shifts during virtual camera dolly/pan, previously occluded background pixels are revealed (disocclusion):
+1. Dilates the subject mask by $k = 18\text{px}$ to define the disocclusion zone.
+2. Inpaints the background plate using Fast Marching Telea inpainting (`cv2.inpaint`), creating a complete, clean background plate behind the subject.
+
+#### 2. Virtual Camera Parallax Transform (`render_3d_cinematic_motion_frame`)
+For normalized animation time $t \in [0.0, 1.0]$:
+- Virtual camera dolly zoom factor: $s(t) = 1.0 + 0.08 \cdot \sin(\pi t)$.
+- Foreground subject pan: $dx_{fg}(t) = 16 \cdot \cos(\pi t)$, $dy_{fg}(t) = 6 \cdot \sin(2\pi t)$.
+- Background inverse parallax shift: $dx_{bg}(t) = -8 \cdot \cos(\pi t)$, $dy_{bg}(t) = -3 \cdot \sin(2\pi t)$.
+- The synthesized frame layers the inpainted background and scaled foreground with alpha feathering:
+  $$I_{frame}(t) = \mathcal{W}_{bg}(I_{bg}, t) \cdot (1 - M_{warped}) + \mathcal{W}_{fg}(I_{fg}, t) \cdot M_{warped}$$
+Exported via `cv2.VideoWriter` to standard $1080\text{p}$, $30\text{ FPS}$ MP4 (H.264 / `mp4v` codec) with live preview looping in the studio dialog.
+
+---
+
+## 8. Vector Markup, Privacy Redaction & Loupe Callouts (`src/ui/markup_overlay.py`)
+
+Built directly into `SingleMediaViewer` for rapid annotation, documentation, and sensitive data protection:
+
+### 8.1. Privacy Redaction
+- **Mosaic Pixelation (`apply_pixelate`):**
+  Averages pixel blocks of size $B = 16\text{px}$ across the target bounding box:
+  $$I_{mosaic}(x, y) = \frac{1}{B^2} \sum_{i=0}^{B-1} \sum_{j=0}^{B-1} I\left(\lfloor x/B \rfloor B + i, \lfloor y/B \rfloor B + j\right)$$
+  Irreversibly obfuscates license plates, credit card numbers, passwords, and faces.
+- **Gaussian Scramble Blur (`apply_blur_redact`):**
+  Applies heavy Gaussian filter ($\sigma = 24.0$) across the designated rectangle.
+
+### 8.2. Vector Callouts & Loupe Magnification
+- **Antialiased Vector Arrows:** Directional arrows rendered with subpixel precision, custom stroke widths ($2..12\text{px}$), and fill colors.
+- **2.5x Detail Loupe Magnifier:** Renders an authentic circular magnifier overlay:
+  - Crops the center patch at $2.5\times$ magnification using bicubic interpolation.
+  - Encloses with a crisp circular white/blue bezel ($3\text{px}$) with an inner drop shadow.
+- **Styled Text Badges:** Resizable text callout pills with semi-opaque backgrounds for high legibility over both dark and light photographic regions.
+
+### 8.3. Lossless Master Flattening Pipeline (`flatten_markup_onto_image`)
+All vector elements are rendered into a dedicated interactive `QGraphicsScene` overlay on the viewport. When committed:
+1. Vector coordinates map to full camera pixel space via resolution scaling ratio $\frac{W_{master}}{W_{viewport}}$.
+2. A full-resolution `QPainter` session draws the vector primitives with high-quality antialiasing (`Antialiasing`, `SmoothPixmapTransform`).
+3. Backs up the original photo into `.OriginalFiles/` and writes the flattened result losslessly to disk.
+
