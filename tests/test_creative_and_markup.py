@@ -328,3 +328,12 @@ def test_portrait_bokeh_anatomical_mask_and_normalized_conv():
     # Lower jacket near bottom of photo (y = 96%) must be foreground
     assert mask[int(h * 0.96), int(w * 0.57)] > 0.8
 
+
+def test_main_window_qdialog_imported():
+    """Verifies that QDialog is defined in src.ui.main_window so dialog dispatch never fails with NameError."""
+    import src.ui.main_window as mw
+    assert hasattr(mw, "QDialog")
+    from PySide6.QtWidgets import QDialog
+    assert mw.QDialog is QDialog
+
+

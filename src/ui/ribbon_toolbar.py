@@ -38,6 +38,7 @@ from PySide6.QtGui import (
     QPen,
     QPixmap,
     QPolygonF,
+    QResizeEvent,
 )
 from PySide6.QtWidgets import (
     QAbstractButton,
