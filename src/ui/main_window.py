@@ -4078,6 +4078,14 @@ class PhotoGalleryMainWindow(QMainWindow):
             self.open_collage_dialog()
         elif action_id in ("photo_fuse", "fuse"):
             self.open_photo_fuse_dialog()
+        elif action_id in ("markup_redact", "markup"):
+            self.toggle_markup_mode()
+        elif action_id == "color_pop":
+            self.open_color_pop_dialog()
+        elif action_id == "portrait_bokeh":
+            self.open_portrait_bokeh_dialog()
+        elif action_id == "cinematic_motion":
+            self.open_cinematic_motion_dialog()
         elif action_id == "backup_catalog":
             self.backup_catalog_dialog()
         elif action_id == "open_settings":
@@ -4275,6 +4283,97 @@ class PhotoGalleryMainWindow(QMainWindow):
             except Exception:
                 pass
             self.lbl_sync_status.setText(f"✓ Created fused photo: {out_file.name}")
+
+    def toggle_markup_mode(self) -> None:
+        """Toggles the Quick Markup, Callouts & Privacy Redaction tool in the viewer."""
+        if self.central_stack.currentWidget() != self.media_viewer:
+            sel = self.grid_view.selected_media_ids() or list(self._selected_ids)
+            if sel:
+                self.open_single_viewer(sel[0])
+            else:
+                return
+
+        new_state = not getattr(self.media_viewer, "is_markup_mode", False)
+        self.media_viewer.set_markup_mode(new_state)
+
+    def _get_single_selected_photo_and_bgr(self) -> tuple[Path | None, Any | None]:
+        """Helper returning (file_path, image_bgr) for the active photo."""
+        import cv2
+        paths, details = self._get_selected_photo_paths_and_details()
+        if not paths and not details:
+            return None, None
+
+        p = paths[0] if paths else None
+        bgr = None
+        if details and "image_bgr" in details[0] and details[0]["image_bgr"] is not None:
+            bgr = details[0]["image_bgr"]
+        elif p and p.is_file():
+            bgr = cv2.imread(str(p))
+
+        return p, bgr
+
+    def open_color_pop_dialog(self) -> None:
+        """Launches the Google Photos-Style Color Pop Studio."""
+        from src.ui.create_studio_dialogs import ColorPopDialog
+
+        p, bgr = self._get_single_selected_photo_and_bgr()
+        if bgr is None:
+            QMessageBox.information(self, "Color Pop", "Please select a photo to apply Color Pop.")
+            return
+
+        dlg = ColorPopDialog(bgr, p, self)
+        if dlg.exec() == QDialog.Accepted and dlg.saved_file_path:
+            out_file = dlg.saved_file_path
+            self.scan_folder(out_file.parent, include_subfolders=False)
+            self.rebuild_and_run_query()
+            self._select_file_in_grid(out_file)
+            self.lbl_sync_status.setText(f"✓ Created Color Pop photo: {out_file.name}")
+
+    def open_portrait_bokeh_dialog(self) -> None:
+        """Launches the Portrait Depth Bokeh & Fill Light Studio."""
+        from src.ui.create_studio_dialogs import PortraitBokehDialog
+
+        p, bgr = self._get_single_selected_photo_and_bgr()
+        if bgr is None:
+            QMessageBox.information(self, "Portrait Blur", "Please select a photo to apply Portrait Bokeh.")
+            return
+
+        dlg = PortraitBokehDialog(bgr, p, self)
+        if dlg.exec() == QDialog.Accepted and dlg.saved_file_path:
+            out_file = dlg.saved_file_path
+            self.scan_folder(out_file.parent, include_subfolders=False)
+            self.rebuild_and_run_query()
+            self._select_file_in_grid(out_file)
+            self.lbl_sync_status.setText(f"✓ Created Portrait Bokeh photo: {out_file.name}")
+
+    def open_cinematic_motion_dialog(self) -> None:
+        """Launches the 3D Cinematic Motion Video Generator."""
+        from src.ui.create_studio_dialogs import CinematicMotionDialog
+
+        p, bgr = self._get_single_selected_photo_and_bgr()
+        if bgr is None:
+            QMessageBox.information(self, "3D Cinematic", "Please select a photo to generate 3D Cinematic Motion video.")
+            return
+
+        dlg = CinematicMotionDialog(bgr, p, self)
+        if dlg.exec() == QDialog.Accepted and dlg.saved_file_path:
+            out_file = dlg.saved_file_path
+            self.scan_folder(out_file.parent, include_subfolders=False)
+            self.rebuild_and_run_query()
+            self._select_file_in_grid(out_file)
+            self.lbl_sync_status.setText(f"✓ Created 3D Cinematic video: {out_file.name}")
+
+    def _select_file_in_grid(self, file_path: Path) -> None:
+        try:
+            conn = self.catalog_repo.engine.catalog_conn()
+            row = conn.execute(
+                "SELECT m.id FROM media m JOIN folders f ON f.id = m.folder_id WHERE f.path = ? AND m.filename = ?",
+                (str(file_path.parent), file_path.name),
+            ).fetchone()
+            if row:
+                self.grid_view.select_media_id(row[0])
+        except Exception:
+            pass
 
 
     def _open_settings_dialog(self, initial_tab: str | None = None) -> None:

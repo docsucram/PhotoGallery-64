@@ -4075,9 +4075,14 @@ class RibbonToolbar(QWidget):
         self.btn_edit_straighten.setToolTip("Straighten photo horizon / vertical alignment")
         self.btn_edit_straighten.clicked.connect(lambda: self.action_triggered.emit("straighten"))
 
+        self.btn_edit_markup = self._make_btn("Markup", "rename", self.grp_edit_adjust, large=False)
+        self.btn_edit_markup.setToolTip("Quick markup, callouts & privacy redaction")
+        self.btn_edit_markup.clicked.connect(lambda: self.action_triggered.emit("markup_redact"))
+
         self.stack_canvas_tools.addWidget(self.btn_edit_red_eye)
         self.stack_canvas_tools.addWidget(self.btn_edit_retouch)
         self.stack_canvas_tools.addWidget(self.btn_edit_straighten)
+        self.stack_canvas_tools.addWidget(self.btn_edit_markup)
         self.grp_edit_adjust.content_layout.addLayout(self.stack_canvas_tools)
 
         # Stack of 3 small buttons: Noise reduction, Color, Exposure
@@ -4573,6 +4578,24 @@ class RibbonToolbar(QWidget):
         btn_collage.clicked.connect(lambda: self.action_triggered.emit("collage"))
         self.btn_collage = btn_collage
         grp_tools.content_layout.addWidget(btn_collage)
+
+        btn_pop = self._make_btn("Color Pop", "color_spectrum", grp_tools, large=True)
+        btn_pop.setToolTip("Google Photos-Style Color Pop: keep subject in vibrant color while making background B&W.")
+        btn_pop.clicked.connect(lambda: self.action_triggered.emit("color_pop"))
+        self.btn_color_pop = btn_pop
+        grp_tools.content_layout.addWidget(btn_pop)
+
+        btn_bokeh = self._make_btn("Portrait Blur", "noise_reduction", grp_tools, large=True)
+        btn_bokeh.setToolTip("Simulate DSLR shallow depth-of-field lens bokeh with soft portrait subject fill light.")
+        btn_bokeh.clicked.connect(lambda: self.action_triggered.emit("portrait_bokeh"))
+        self.btn_portrait_bokeh = btn_bokeh
+        grp_tools.content_layout.addWidget(btn_bokeh)
+
+        btn_cinematic = self._make_btn("3D Cinematic", "slideshow", grp_tools, large=True)
+        btn_cinematic.setToolTip("Generate a 3D Cinematic Motion .mp4 virtual camera parallax video from a single photo.")
+        btn_cinematic.clicked.connect(lambda: self.action_triggered.emit("cinematic_motion"))
+        self.btn_cinematic_motion = btn_cinematic
+        grp_tools.content_layout.addWidget(btn_cinematic)
 
         hbox.addWidget(grp_tools)
 

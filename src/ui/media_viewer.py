@@ -68,6 +68,7 @@ from legacy_reference.imgBrowserv13 import (
     MouseOverlay,
 )
 from src.ui.crop_tool import CropOverlayItem, CropScene
+from src.ui.markup_overlay import MarkupFloatingToolbar, MarkupElement, flatten_markup_onto_image
 from src.ui.ribbon_toolbar import make_person_avatar_pixmap, make_wlpg_icon
 from src.imaging.opencv_engine import (
     PhotoAdjustmentRecipe,
@@ -1217,9 +1218,23 @@ class SingleMediaViewer(QWidget):
         self._adjust_toolbar.cancelled.connect(self.stop_face_adjust_mode)
         self._adjust_toolbar.hide()
 
+        # 6. Markup & Privacy Redact Toolbar
+        self.is_markup_mode: bool = False
+        self._markup_elements: list[MarkupElement] = []
+        self._markup_preview_items: list[Any] = []
+        self._markup_active: bool = False
+        self._markup_start_pt: QPointF | None = None
+        self._markup_current_item: Any | None = None
+
+        self.markup_toolbar = MarkupFloatingToolbar(self.graphics_view)
+        self.markup_toolbar.apply_requested.connect(self._commit_markup)
+        self.markup_toolbar.cancel_requested.connect(lambda: self.set_markup_mode(False))
+        self.markup_toolbar.undo_requested.connect(self._undo_markup)
+        self.markup_toolbar.hide()
+
     def _position_floating_toolbars(self) -> None:
         gw = self.graphics_view.width()
-        for tb in (self.crop_toolbar, self.retouch_toolbar, self.red_eye_toolbar):
+        for tb in (self.crop_toolbar, self.retouch_toolbar, self.red_eye_toolbar, self.markup_toolbar):
             if tb.isVisible():
                 sh = tb.sizeHint()
                 tb.setGeometry(max(10, (gw - sh.width()) // 2), 12, sh.width(), sh.height())
@@ -1794,6 +1809,155 @@ class SingleMediaViewer(QWidget):
 
         self._update_display_proxy()
         cmd = PixelArrayUndoCommand(self, before, self.master_np_rgb.copy(), "Fix Red Eye")
+        self.undo_stack.push(cmd)
+        self._render_current_recipe()
+        if self.current_media_id is not None:
+            self.pixel_edit_saved.emit(self.current_media_id, "")
+
+    # -------------------------------------------------------------------------
+    # Quick Markup, Callouts & Privacy Redaction Tool
+    # -------------------------------------------------------------------------
+    def set_markup_mode(self, enabled: bool) -> None:
+        self.is_markup_mode = bool(enabled)
+        if self.is_markup_mode:
+            self.stop_face_tagging_mode()
+            self.set_crop_mode(False)
+            self.set_retouch_mode(False)
+            self.set_red_eye_mode(False)
+            self._update_face_overlays_visibility()
+            self.graphics_view.setDragMode(ImageGraphicsView.NoDrag)
+            self.graphics_view.viewport().setCursor(Qt.CrossCursor)
+            self.markup_toolbar.show()
+            self._position_floating_toolbars()
+            self.markup_toolbar.raise_()
+        else:
+            self.markup_toolbar.hide()
+            self._clear_markup_overlays()
+            self._update_face_overlays_visibility()
+            if not self.is_crop_mode and not self.is_retouch_mode and not self.is_red_eye_mode:
+                self.graphics_view.viewport().unsetCursor()
+                self.graphics_view.setDragMode(ImageGraphicsView.ScrollHandDrag)
+
+    def _start_markup(self, sp: QPointF) -> None:
+        self._markup_active = True
+        self._markup_start_pt = sp
+        tool = self.markup_toolbar.active_tool
+        col = self.markup_toolbar.current_color
+
+        if tool in ("pixelate", "blur", "magnifier"):
+            item = QGraphicsRectItem(QRectF(sp, sp))
+            pen = QPen(col, 2.0, Qt.DashLine)
+            item.setPen(pen)
+            brush_col = QColor(col.red(), col.green(), col.blue(), 50)
+            item.setBrush(QBrush(brush_col))
+            self.scene.addItem(item)
+            self._markup_current_item = item
+        elif tool == "arrow":
+            item = QGraphicsLineItem(sp.x(), sp.y(), sp.x(), sp.y())
+            item.setPen(QPen(col, 4.0, Qt.SolidLine, Qt.RoundCap))
+            self.scene.addItem(item)
+            self._markup_current_item = item
+        elif tool == "text":
+            from PySide6.QtWidgets import QInputDialog
+            txt, ok = QInputDialog.getText(self, "Text Callout", "Enter label text:")
+            if ok and txt:
+                rect = QRectF(sp.x(), sp.y(), 100, 30)
+                el = MarkupElement(kind="text", rect=rect, text=txt, color=col)
+                self._markup_elements.append(el)
+                t_item = QGraphicsTextItem(txt)
+                t_item.setDefaultTextColor(col)
+                t_item.setPos(sp)
+                font = QFont("Segoe UI", 12, QFont.Bold)
+                t_item.setFont(font)
+                self.scene.addItem(t_item)
+                self._markup_preview_items.append(t_item)
+            self._markup_active = False
+
+    def _drag_markup(self, sp: QPointF) -> None:
+        if not self._markup_active or self._markup_current_item is None or self._markup_start_pt is None:
+            return
+        p1 = self._markup_start_pt
+        tool = self.markup_toolbar.active_tool
+        if tool in ("pixelate", "blur", "magnifier"):
+            r = QRectF(min(p1.x(), sp.x()), min(p1.y(), sp.y()), abs(sp.x() - p1.x()), abs(sp.y() - p1.y()))
+            self._markup_current_item.setRect(r)
+        elif tool == "arrow":
+            self._markup_current_item.setLine(p1.x(), p1.y(), sp.x(), sp.y())
+
+    def _finish_markup(self, sp: QPointF) -> None:
+        if not self._markup_active:
+            return
+        self._markup_active = False
+        p1 = self._markup_start_pt
+        if p1 is None:
+            return
+
+        tool = self.markup_toolbar.active_tool
+        col = self.markup_toolbar.current_color
+
+        if tool in ("pixelate", "blur", "magnifier"):
+            r = QRectF(min(p1.x(), sp.x()), min(p1.y(), sp.y()), abs(sp.x() - p1.x()), abs(sp.y() - p1.y()))
+            if r.width() >= 8 and r.height() >= 8:
+                el = MarkupElement(kind=tool, rect=r, color=col)
+                self._markup_elements.append(el)
+                if self._markup_current_item:
+                    self._markup_preview_items.append(self._markup_current_item)
+            else:
+                if self._markup_current_item:
+                    self.scene.removeItem(self._markup_current_item)
+        elif tool == "arrow":
+            import math
+            if math.hypot(sp.x() - p1.x(), sp.y() - p1.y()) >= 8:
+                el = MarkupElement(kind="arrow", start_pt=p1, end_pt=sp, color=col, stroke_width=4)
+                self._markup_elements.append(el)
+                if self._markup_current_item:
+                    self._markup_preview_items.append(self._markup_current_item)
+            else:
+                if self._markup_current_item:
+                    self.scene.removeItem(self._markup_current_item)
+
+        self._markup_current_item = None
+
+    def _undo_markup(self) -> None:
+        if self._markup_elements:
+            self._markup_elements.pop()
+        if self._markup_preview_items:
+            it = self._markup_preview_items.pop()
+            try:
+                self.scene.removeItem(it)
+            except Exception:
+                pass
+
+    def _clear_markup_overlays(self) -> None:
+        for it in self._markup_preview_items:
+            try:
+                self.scene.removeItem(it)
+            except Exception:
+                pass
+        self._markup_preview_items.clear()
+        self._markup_elements.clear()
+        if self._markup_current_item:
+            try:
+                self.scene.removeItem(self._markup_current_item)
+            except Exception:
+                pass
+            self._markup_current_item = None
+
+    def _commit_markup(self) -> None:
+        if not self._markup_elements or self.master_np_rgb is None:
+            self.set_markup_mode(False)
+            return
+
+        before = self.master_np_rgb.copy()
+        bgr = cv2.cvtColor(self.master_np_rgb, cv2.COLOR_RGB2BGR)
+        flattened_bgr = flatten_markup_onto_image(bgr, self._markup_elements)
+        self.master_np_rgb = cv2.cvtColor(flattened_bgr, cv2.COLOR_BGR2RGB)
+
+        self._clear_markup_overlays()
+        self.set_markup_mode(False)
+        self._update_display_proxy()
+
+        cmd = PixelArrayUndoCommand(self, before, self.master_np_rgb.copy(), "Markup & Privacy Redaction")
         self.undo_stack.push(cmd)
         self._render_current_recipe()
         if self.current_media_id is not None:
@@ -2917,6 +3081,20 @@ class SingleMediaViewer(QWidget):
                     self._finish_red_eye()
                     return True
 
+            if getattr(self, "is_markup_mode", False):
+                if event.type() == QEvent.MouseButtonPress and getattr(event, "button", lambda: None)() == Qt.LeftButton:
+                    sp = self.graphics_view.mapToScene(event.position().toPoint())
+                    self._start_markup(sp)
+                    return True
+                elif event.type() == QEvent.MouseMove and getattr(self, "_markup_active", False):
+                    sp = self.graphics_view.mapToScene(event.position().toPoint())
+                    self._drag_markup(sp)
+                    return True
+                elif event.type() == QEvent.MouseButtonRelease and getattr(event, "button", lambda: None)() == Qt.LeftButton and getattr(self, "_markup_active", False):
+                    sp = self.graphics_view.mapToScene(event.position().toPoint())
+                    self._finish_markup(sp)
+                    return True
+
         if event.type() == QEvent.KeyRelease and isinstance(event, QKeyEvent):
             if event.key() == Qt.Key_Backslash:
                 self.set_compare_mode(False)
@@ -2962,6 +3140,10 @@ class SingleMediaViewer(QWidget):
                     return True
                 elif self.is_red_eye_mode:
                     self.set_red_eye_mode(False)
+                    event.accept()
+                    return True
+                elif getattr(self, "is_markup_mode", False):
+                    self.set_markup_mode(False)
                     event.accept()
                     return True
                 else:

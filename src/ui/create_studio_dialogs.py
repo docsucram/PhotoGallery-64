@@ -61,6 +61,13 @@ from src.imaging.create_tools import (
     detect_faces_in_image,
     fuse_face,
 )
+from src.imaging.creative_effects import (
+    estimate_subject_mask,
+    apply_color_pop,
+    refine_mask_brush,
+    apply_portrait_bokeh_and_fill_light,
+    render_3d_cinematic_motion_video,
+)
 from src.ui.ribbon_toolbar import make_wlpg_icon
 
 
@@ -853,3 +860,477 @@ class PhotoFuseDialog(QDialog):
             self.accept()
         except Exception as e:
             QMessageBox.critical(self, "Save Error", f"Could not save photo:\n{e}")
+
+
+# =============================================================================
+# 4. Google Photos-Style "Color Pop" (Subject Color Splash) Dialog
+# =============================================================================
+
+class ColorPopDialog(QDialog):
+    """
+    Color Pop Dialog:
+    - Subject remains in full vibrant color while background is converted to high-contrast B&W.
+    - Seeding via GrabCut / face detection.
+    - Interactive edge-aware bilateral 'Keep Color (+)' and 'Make B&W (-)' brush.
+    """
+
+    def __init__(
+        self,
+        image_bgr: np.ndarray,
+        file_path: Path | None = None,
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.original_bgr = image_bgr.copy()
+        self.file_path = file_path
+        self.output_dir = file_path.parent if file_path else Path.home()
+        self.saved_file_path: Path | None = None
+
+        self.subject_mask = estimate_subject_mask(self.original_bgr)
+        self.brush_mode = "keep_color"  # "keep_color" or "make_bw"
+        self.brush_radius = 28
+        self.bg_contrast = 1.15
+        self.rendered_bgr: np.ndarray | None = None
+
+        self.setWindowTitle("Color Pop — Subject Color Splash")
+        self.resize(1000, 700)
+        self._init_ui()
+        self._render_effect()
+
+    def _init_ui(self) -> None:
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(14, 12, 14, 14)
+        layout.setSpacing(10)
+
+        # Header
+        lbl_title = QLabel("Color Pop: Vibrant Subject on Dramatic Black & White")
+        lbl_title.setStyleSheet("font-size: 16px; font-weight: bold; color: #1e395b;")
+        lbl_sub = QLabel("Paint with the bilateral snapping brush to add color or make areas black & white.")
+        lbl_sub.setStyleSheet("color: #555555; font-size: 12px;")
+        layout.addWidget(lbl_title)
+        layout.addWidget(lbl_sub)
+
+        # Toolbar
+        bar = QFrame()
+        bar.setStyleSheet("background: #f4f6fa; border: 1px solid #d0d7e5; border-radius: 4px; padding: 4px;")
+        bar_layout = QHBoxLayout(bar)
+        bar_layout.setContentsMargins(8, 4, 8, 4)
+        bar_layout.setSpacing(12)
+
+        self.btn_keep = QPushButton("Keep Color (+)")
+        self.btn_keep.setCheckable(True)
+        self.btn_keep.setChecked(True)
+        self.btn_keep.setStyleSheet("QPushButton:checked { background: #cce5ff; border: 1px solid #3399ff; font-weight: bold; }")
+        self.btn_keep.clicked.connect(lambda: self._set_brush_mode("keep_color"))
+        bar_layout.addWidget(self.btn_keep)
+
+        self.btn_bw = QPushButton("Make B&W (-)")
+        self.btn_bw.setCheckable(True)
+        self.btn_bw.setStyleSheet("QPushButton:checked { background: #e0e0e0; border: 1px solid #888888; font-weight: bold; }")
+        self.btn_bw.clicked.connect(lambda: self._set_brush_mode("make_bw"))
+        bar_layout.addWidget(self.btn_bw)
+
+        bar_layout.addWidget(QLabel("Brush Size:"))
+        self.sld_radius = QSlider(Qt.Horizontal)
+        self.sld_radius.setRange(8, 80)
+        self.sld_radius.setValue(self.brush_radius)
+        self.sld_radius.valueChanged.connect(self._on_radius_changed)
+        bar_layout.addWidget(self.sld_radius)
+
+        bar_layout.addWidget(QLabel("B&W Contrast:"))
+        self.sld_contrast = QSlider(Qt.Horizontal)
+        self.sld_contrast.setRange(80, 180)
+        self.sld_contrast.setValue(115)
+        self.sld_contrast.valueChanged.connect(self._render_effect)
+        bar_layout.addWidget(self.sld_contrast)
+
+        bar_layout.addStretch(1)
+
+        btn_reset_mask = QPushButton("Reset Mask")
+        btn_reset_mask.clicked.connect(self._reset_mask)
+        bar_layout.addWidget(btn_reset_mask)
+        layout.addWidget(bar)
+
+        # Interactive view
+        self.view = QGraphicsView()
+        self.scene = QGraphicsScene(self)
+        self.view.setScene(self.scene)
+        self.view.setStyleSheet("background: #252528; border: 1px solid #777; border-radius: 4px;")
+        self.bg_item = QGraphicsPixmapItem()
+        self.scene.addItem(self.bg_item)
+        layout.addWidget(self.view, 1)
+
+        # Connect mouse events on scene
+        self.scene.mousePressEvent = self._handle_scene_click
+        self.scene.mouseMoveEvent = self._handle_scene_drag
+
+        # Bottom buttons
+        btn_layout = QHBoxLayout()
+        self.lbl_status = QLabel("Ready")
+        self.lbl_status.setStyleSheet("color: #444; font-size: 11px;")
+        btn_layout.addWidget(self.lbl_status)
+        btn_layout.addStretch(1)
+
+        btn_save = QPushButton("Save Color Pop Photo")
+        btn_save.setStyleSheet("""
+            QPushButton {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #3c82e6, stop:1 #1c52ba);
+                color: white; font-weight: bold; border: 1px solid #143e8c;
+                border-radius: 4px; padding: 6px 18px; min-width: 120px;
+            }
+            QPushButton:hover { background: #4d8ff2; }
+        """)
+        btn_save.clicked.connect(self._save_photo)
+        btn_layout.addWidget(btn_save)
+
+        btn_cancel = QPushButton("Cancel")
+        btn_cancel.clicked.connect(self.reject)
+        btn_layout.addWidget(btn_cancel)
+
+        layout.addLayout(btn_layout)
+
+    def _set_brush_mode(self, mode: str) -> None:
+        self.brush_mode = mode
+        self.btn_keep.setChecked(mode == "keep_color")
+        self.btn_bw.setChecked(mode == "make_bw")
+
+    def _on_radius_changed(self, val: int) -> None:
+        self.brush_radius = val
+
+    def _reset_mask(self) -> None:
+        self.subject_mask = estimate_subject_mask(self.original_bgr)
+        self._render_effect()
+
+    def _handle_scene_click(self, event: Any) -> None:
+        pos = event.scenePos()
+        self._apply_brush_at(int(pos.x()), int(pos.y()))
+
+    def _handle_scene_drag(self, event: Any) -> None:
+        if event.buttons() & Qt.LeftButton:
+            pos = event.scenePos()
+            self._apply_brush_at(int(pos.x()), int(pos.y()))
+
+    def _apply_brush_at(self, x: int, y: int) -> None:
+        h, w = self.original_bgr.shape[:2]
+        if 0 <= x < w and 0 <= y < h:
+            self.subject_mask = refine_mask_brush(
+                self.subject_mask,
+                self.original_bgr,
+                (x, y),
+                radius=self.brush_radius,
+                mode=self.brush_mode,
+            )
+            self._render_effect()
+
+    def _render_effect(self) -> None:
+        contrast = self.sld_contrast.value() / 100.0
+        self.rendered_bgr = apply_color_pop(
+            self.original_bgr,
+            self.subject_mask,
+            bg_contrast=contrast,
+        )
+        pm = _cv2_to_qpixmap(self.rendered_bgr)
+        self.bg_item.setPixmap(pm)
+        self.scene.setSceneRect(QRectF(pm.rect()))
+        self.view.fitInView(self.scene.sceneRect(), Qt.KeepAspectRatio)
+
+    def _save_photo(self) -> None:
+        if self.rendered_bgr is None:
+            return
+
+        timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H%M%S")
+        out_name = f"ColorPop_{timestamp}.jpg"
+        out_path = self.output_dir / out_name
+
+        try:
+            cv2.imwrite(str(out_path), self.rendered_bgr, [int(cv2.IMWRITE_JPEG_QUALITY), 96])
+            self.saved_file_path = out_path
+            self.accept()
+        except Exception as e:
+            QMessageBox.critical(self, "Save Error", f"Could not save photo:\n{e}")
+
+
+# =============================================================================
+# 5. Portrait Depth Bokeh & Foreground Fill Light Dialog
+# =============================================================================
+
+class PortraitBokehDialog(QDialog):
+    """
+    Portrait Bokeh & Fill Light Dialog:
+    - Background lens blur kernel with slider.
+    - Soft-knee foreground face/subject fill light.
+    """
+
+    def __init__(
+        self,
+        image_bgr: np.ndarray,
+        file_path: Path | None = None,
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.original_bgr = image_bgr.copy()
+        self.file_path = file_path
+        self.output_dir = file_path.parent if file_path else Path.home()
+        self.saved_file_path: Path | None = None
+
+        self.subject_mask = estimate_subject_mask(self.original_bgr)
+        self.rendered_bgr: np.ndarray | None = None
+
+        self.setWindowTitle("Portrait Depth Bokeh & Fill Light")
+        self.resize(980, 680)
+        self._init_ui()
+        self._render_effect()
+
+    def _init_ui(self) -> None:
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(14, 12, 14, 14)
+        layout.setSpacing(10)
+
+        # Header
+        lbl_title = QLabel("Portrait Depth Bokeh & Foreground Fill Light")
+        lbl_title.setStyleSheet("font-size: 16px; font-weight: bold; color: #1e395b;")
+        lbl_sub = QLabel("Simulate shallow depth-of-field lens bokeh behind subject with soft portrait studio fill light.")
+        lbl_sub.setStyleSheet("color: #555555; font-size: 12px;")
+        layout.addWidget(lbl_title)
+        layout.addWidget(lbl_sub)
+
+        # Controls bar
+        bar = QFrame()
+        bar.setStyleSheet("background: #f4f6fa; border: 1px solid #d0d7e5; border-radius: 4px; padding: 4px;")
+        bar_layout = QHBoxLayout(bar)
+        bar_layout.setContentsMargins(8, 4, 8, 4)
+        bar_layout.setSpacing(14)
+
+        bar_layout.addWidget(QLabel("Bokeh Blur Strength:"))
+        self.sld_blur = QSlider(Qt.Horizontal)
+        self.sld_blur.setRange(2, 40)
+        self.sld_blur.setValue(16)
+        self.sld_blur.valueChanged.connect(self._render_effect)
+        bar_layout.addWidget(self.sld_blur)
+
+        bar_layout.addWidget(QLabel("Subject Fill Light:"))
+        self.sld_fill = QSlider(Qt.Horizontal)
+        self.sld_fill.setRange(0, 50)
+        self.sld_fill.setValue(22)
+        self.sld_fill.valueChanged.connect(self._render_effect)
+        bar_layout.addWidget(self.sld_fill)
+
+        bar_layout.addStretch(1)
+        layout.addWidget(bar)
+
+        # Canvas
+        self.view = QGraphicsView()
+        self.scene = QGraphicsScene(self)
+        self.view.setScene(self.scene)
+        self.view.setStyleSheet("background: #252528; border: 1px solid #777; border-radius: 4px;")
+        self.bg_item = QGraphicsPixmapItem()
+        self.scene.addItem(self.bg_item)
+        layout.addWidget(self.view, 1)
+
+        # Bottom buttons
+        btn_layout = QHBoxLayout()
+        btn_layout.addStretch(1)
+
+        btn_save = QPushButton("Save Portrait Photo")
+        btn_save.setStyleSheet("""
+            QPushButton {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #3c82e6, stop:1 #1c52ba);
+                color: white; font-weight: bold; border: 1px solid #143e8c;
+                border-radius: 4px; padding: 6px 18px; min-width: 120px;
+            }
+            QPushButton:hover { background: #4d8ff2; }
+        """)
+        btn_save.clicked.connect(self._save_photo)
+        btn_layout.addWidget(btn_save)
+
+        btn_cancel = QPushButton("Cancel")
+        btn_cancel.clicked.connect(self.reject)
+        btn_layout.addWidget(btn_cancel)
+
+        layout.addLayout(btn_layout)
+
+    def _render_effect(self) -> None:
+        bokeh_r = self.sld_blur.value()
+        fill_val = self.sld_fill.value() / 100.0
+        self.rendered_bgr = apply_portrait_bokeh_and_fill_light(
+            self.original_bgr,
+            self.subject_mask,
+            bokeh_radius=bokeh_r,
+            fill_light=fill_val,
+        )
+        pm = _cv2_to_qpixmap(self.rendered_bgr)
+        self.bg_item.setPixmap(pm)
+        self.scene.setSceneRect(QRectF(pm.rect()))
+        self.view.fitInView(self.scene.sceneRect(), Qt.KeepAspectRatio)
+
+    def _save_photo(self) -> None:
+        if self.rendered_bgr is None:
+            return
+
+        timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H%M%S")
+        out_name = f"PortraitBokeh_{timestamp}.jpg"
+        out_path = self.output_dir / out_name
+
+        try:
+            cv2.imwrite(str(out_path), self.rendered_bgr, [int(cv2.IMWRITE_JPEG_QUALITY), 96])
+            self.saved_file_path = out_path
+            self.accept()
+        except Exception as e:
+            QMessageBox.critical(self, "Save Error", f"Could not save photo:\n{e}")
+
+
+# =============================================================================
+# 6. 3D Cinematic Motion (Faux-3D Parallax MP4 Generator) Dialog
+# =============================================================================
+
+class CinematicMotionWorker(QThread):
+    progress = Signal(int)
+    finished = Signal(bool, str)
+
+    def __init__(self, image_bgr: np.ndarray, out_path: Path, duration: float) -> None:
+        super().__init__()
+        self.image_bgr = image_bgr
+        self.out_path = out_path
+        self.duration = duration
+
+    def run(self) -> None:
+        try:
+            success = render_3d_cinematic_motion_video(
+                self.image_bgr,
+                self.out_path,
+                duration_sec=self.duration,
+                fps=30,
+                resolution=(1920, 1080),
+                progress_callback=self.progress.emit,
+            )
+            self.finished.emit(success, "Video rendered successfully" if success else "Failed to open video encoder")
+        except Exception as e:
+            self.finished.emit(False, str(e))
+
+
+class CinematicMotionDialog(QDialog):
+    """
+    3D Cinematic Motion Video Generator:
+    - Estimates foreground/background layers with disocclusion background inpainting.
+    - Renders smooth 30fps .mp4 virtual camera dolly/parallax video.
+    """
+
+    def __init__(
+        self,
+        image_bgr: np.ndarray,
+        file_path: Path | None = None,
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.original_bgr = image_bgr.copy()
+        self.file_path = file_path
+        self.output_dir = file_path.parent if file_path else Path.home()
+        self.saved_file_path: Path | None = None
+        self._worker: CinematicMotionWorker | None = None
+
+        self.setWindowTitle("3D Cinematic Motion Video Generator")
+        self.resize(750, 480)
+        self._init_ui()
+
+    def _init_ui(self) -> None:
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(16, 14, 16, 16)
+        layout.setSpacing(12)
+
+        # Header
+        lbl_title = QLabel("3D Cinematic Motion (Faux-3D Virtual Camera Parallax)")
+        lbl_title.setStyleSheet("font-size: 16px; font-weight: bold; color: #1e395b;")
+        lbl_sub = QLabel("Renders a smooth 3D virtual camera dolly .mp4 video with parallax layer shift (Google Photos Cinematic Photos style).")
+        lbl_sub.setStyleSheet("color: #555555; font-size: 12px;")
+        layout.addWidget(lbl_title)
+        layout.addWidget(lbl_sub)
+
+        # Settings
+        frame_set = QFrame()
+        frame_set.setStyleSheet("background: #f4f6fa; border: 1px solid #d0d7e5; border-radius: 4px; padding: 6px;")
+        set_layout = QHBoxLayout(frame_set)
+        set_layout.setContentsMargins(8, 6, 8, 6)
+        set_layout.setSpacing(12)
+
+        set_layout.addWidget(QLabel("Video Duration:"))
+        self.cmb_duration = QComboBox()
+        self.cmb_duration.addItems(["3 seconds (90 frames)", "5 seconds (150 frames)", "8 seconds (240 frames)"])
+        self.cmb_duration.setCurrentIndex(1)
+        set_layout.addWidget(self.cmb_duration)
+
+        set_layout.addWidget(QLabel("Resolution: Full HD 1080p (1920 × 1080 @ 30fps)"))
+        set_layout.addStretch(1)
+        layout.addWidget(frame_set)
+
+        # Preview thumbnail
+        thumb = cv2.resize(self.original_bgr, (480, 270), interpolation=cv2.INTER_AREA)
+        lbl_thumb = QLabel()
+        lbl_thumb.setPixmap(_cv2_to_qpixmap(thumb))
+        lbl_thumb.setAlignment(Qt.AlignCenter)
+        lbl_thumb.setStyleSheet("background: #202022; border: 1px solid #888; border-radius: 4px;")
+        layout.addWidget(lbl_thumb, 1)
+
+        # Progress bar
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(0)
+        self.progress_bar.setStyleSheet("QProgressBar { height: 8px; border: none; background: #e0e0e0; } QProgressBar::chunk { background: #2D72BC; }")
+        layout.addWidget(self.progress_bar)
+
+        self.lbl_status = QLabel("Ready to generate 3D motion video.")
+        self.lbl_status.setStyleSheet("color: #444; font-size: 11px;")
+        layout.addWidget(self.lbl_status)
+
+        # Bottom buttons
+        btn_layout = QHBoxLayout()
+        btn_layout.addStretch(1)
+
+        self.btn_render = QPushButton("Render 3D Motion Video (.mp4)")
+        self.btn_render.setStyleSheet("""
+            QPushButton {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #3c82e6, stop:1 #1c52ba);
+                color: white; font-weight: bold; border: 1px solid #143e8c;
+                border-radius: 4px; padding: 7px 20px; min-width: 150px;
+            }
+            QPushButton:hover { background: #4d8ff2; }
+            QPushButton:disabled { background: #ccc; color: #888; }
+        """)
+        self.btn_render.clicked.connect(self._start_render)
+        btn_layout.addWidget(self.btn_render)
+
+        btn_cancel = QPushButton("Cancel")
+        btn_cancel.clicked.connect(self.reject)
+        btn_layout.addWidget(btn_cancel)
+
+        layout.addLayout(btn_layout)
+
+    def _start_render(self) -> None:
+        self.btn_render.setEnabled(False)
+        self.progress_bar.setValue(0)
+        self.lbl_status.setText("Estimating depth layers and inpainting background disocclusion...")
+
+        timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H%M%S")
+        out_name = f"Cinematic3D_{timestamp}.mp4"
+        out_path = self.output_dir / out_name
+
+        dur_text = self.cmb_duration.currentText()
+        duration = 3.0 if "3" in dur_text else (8.0 if "8" in dur_text else 5.0)
+
+        self._worker = CinematicMotionWorker(self.original_bgr, out_path, duration)
+        self._worker.progress.connect(self._on_progress)
+        self._worker.finished.connect(lambda ok, msg: self._on_finished(ok, msg, out_path))
+        self._worker.start()
+
+    def _on_progress(self, val: int) -> None:
+        self.progress_bar.setValue(val)
+        self.lbl_status.setText(f"Encoding 3D virtual camera frames: {val}%")
+
+    def _on_finished(self, ok: bool, msg: str, out_path: Path) -> None:
+        self.btn_render.setEnabled(True)
+        if ok and out_path.exists():
+            self.saved_file_path = out_path
+            self.lbl_status.setText(f"✓ Video saved: {out_path.name}")
+            self.accept()
+        else:
+            QMessageBox.critical(self, "Render Error", f"Could not render 3D video:\n{msg}")
+
