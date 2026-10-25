@@ -1159,6 +1159,21 @@ class PhotoGalleryMainWindow(QMainWindow):
         if folder:
             self.scan_folder(folder, include_subfolders=True)
 
+    def open_import_wizard(self, source_path: Path | None = None) -> None:
+        """Opens the WLPG Camera, Memory Card & Folder Import Wizard."""
+        from src.ui.import_dialog import ImportMediaDialog
+        dlg = ImportMediaDialog(self.catalog_repo, initial_source=source_path, parent=self)
+        dlg.import_completed.connect(self._on_import_wizard_completed)
+        dlg.exec()
+
+    def _on_import_wizard_completed(self, created_folders: list[Path]) -> None:
+        """Triggered after wizard copies files and creates destination folders."""
+        for folder_path in created_folders:
+            self.scan_folder(folder_path, include_subfolders=False)
+        self.refresh_navigation_and_autocomplete()
+        self.rebuild_and_run_query()
+        self.lbl_sync_status.setText(f"✓ Imported to {len(created_folders)} folder(s)")
+
     def _on_remove_folder_from_library(
         self, folder_id: int, folder_path: str, folder_name: str
     ) -> None:
@@ -3829,8 +3844,10 @@ class PhotoGalleryMainWindow(QMainWindow):
             self.ribbon.btn_toggle_tag_pane.setChecked(not self.right_tag_dock.isHidden())
 
     def dispatch_ribbon_action(self, action_id: str) -> None:
-        if action_id in ("add_folder", "import_media"):
+        if action_id == "add_folder":
             self._prompt_and_add_folder()
+        elif action_id in ("import_media", "import_photos"):
+            self.open_import_wizard()
         elif action_id == "select_all":
             self.select_all_items()
         elif action_id == "cut":
