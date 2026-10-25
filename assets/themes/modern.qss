@@ -1,0 +1,65 @@
+/* Modern Neutral Theme */
+QMainWindow, QWidget {
+    background-color: #FAFAFA;
+    color: #222222;
+    font-family: "Segoe UI", sans-serif;
+}
+QListView {
+    background-color: #FFFFFF;
+    border: none;
+}
+QTreeWidget {
+    background-color: #F4F5F7;
+    border: 1px solid #E0E0E0;
+}
+QStatusBar {
+    background-color: #F0F2F5;
+    border-top: 1px solid #DCDCDC;
+}
+
+QToolTip {
+    background-color: #FFFFFF;
+    color: #222222;
+    border: 1px solid #CCCCCC;
+    border-radius: 2px;
+    padding: 3px 6px;
+    font-family: "Segoe UI", sans-serif;
+    font-size: 12px;
+}
+
+QCheckBox {
+    spacing: 6px;
+    color: #222222;
+    font-family: "Segoe UI", sans-serif;
+    font-size: 9pt;
+}
+
+QCheckBox::indicator {
+    width: 14px;
+    height: 14px;
+    border: 1px solid #767676;
+    border-radius: 3px;
+    background-color: #FFFFFF;
+}
+
+QCheckBox::indicator:hover {
+    border-color: #005FB8;
+    background-color: #F5F5F5;
+}
+
+QCheckBox::indicator:checked {
+    border: 1px solid #005FB8;
+    background-color: #005FB8;
+    image: url({ICONS_PATH}/check_white.svg);
+}
+
+QCheckBox::indicator:checked:hover {
+    border-color: #0052A3;
+    background-color: #0052A3;
+}
+
+QCheckBox::indicator:disabled {
+    border-color: #CCCCCC;
+    background-color: #EBEBEB;
+}
+

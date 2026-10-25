@@ -1,0 +1,4861 @@
+"""
+PhotoGalleryMainWindow (QMainWindow) — Central Coordinator for PhotoGallery64.
+Connects DualDatabaseEngine, CatalogRepository, ThumbnailRepository, FolderSyncWorker,
+ThumbnailDecodeWorker, MetadataSyncDaemon, CatalogListModel, ThumbnailGridView,
+LeftNavigationDock, RibbonToolbar, TagAndCaptionDock, SingleMediaViewer, WorldMapView,
+and the WLPG bottom status bar.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import shutil
+import sys
+import threading
+from collections.abc import Sequence
+from pathlib import Path
+from typing import Any, Literal
+
+from PySide6.QtCore import (
+    QBuffer,
+    QByteArray,
+    QEvent,
+    QIODevice,
+    QLoggingCategory,
+    QMimeData,
+    QObject,
+    QRunnable,
+    QPoint,
+    QSettings,
+    QSize,
+    Qt,
+    QThreadPool,
+    QTimer,
+    QUrl,
+    Signal,
+)
+
+QLoggingCategory.setFilterRules(
+    "qt.gui.imageio.jpeg.warning=false\n"
+    "qt.gui.imageio.warning=false\n"
+)
+from PySide6.QtGui import (
+    QImage,
+    QKeyEvent,
+    QKeySequence,
+    QMouseEvent,
+    QPixmap,
+    QShortcut,
+    QTransform,
+    QUndoCommand,
+    QUndoStack,
+)
+from PySide6.QtWidgets import (
+    QApplication,
+    QFileDialog,
+    QFrame,
+    QHBoxLayout,
+    QInputDialog,
+    QLabel,
+    QLineEdit,
+    QMainWindow,
+    QMenu,
+    QMessageBox,
+    QPlainTextEdit,
+    QPushButton,
+    QSizePolicy,
+    QSlider,
+    QStackedWidget,
+    QTextEdit,
+    QVBoxLayout,
+    QWidget,
+)
+
+from legacy_reference.imgBrowserv13 import CancellationFlag, LruCache
+from src.db.connection import DualDatabaseEngine
+from src.db.repository import (
+    ArrangeMode,
+    CatalogRepository,
+    FilterQuerySpec,
+    MediaItemRecord,
+    ThumbnailRepository,
+)
+from src.ui.batch_people_view import BatchPeopleView
+from src.ui.dialogs import AppSettingsDialog, ChangeTimeTakenDialog, ResizePhotoDialog
+from src.ui.grid_model import CatalogListModel
+from src.ui.grid_view import MediaCardDelegate, ThumbnailGridView
+from src.ui.left_nav_dock import LeftNavigationDock
+from src.ui.map_view import WorldMapView
+from src.ui.media_viewer import SingleMediaViewer
+from src.ui.people_directory_view import PeopleDirectoryView
+from src.ui.person_header_bar import PersonHeaderBar
+from src.ui.ribbon_toolbar import RibbonToolbar, make_wlpg_icon
+from src.ui.right_tag_dock import TagAndCaptionDock
+from src.ui.search_scope_bar import SearchScopeBar
+from src.ui.slideshow_view import FullscreenSlideshowDialog
+from src.ui.tag_someone_dialog import TagSomeoneDialog
+import src.ui.icon_provider as icon_provider
+from src.workers.scanner_thumb_worker import (
+    FolderSyncWorker,
+    ThumbnailDecodeWorker,
+    extract_media_metadata,
+)
+from src.workers.face_worker import FaceDetectionWorker
+from src.workers.xmp_sync_worker import MetadataSyncDaemon
+from src.workers.folder_watcher import FolderWatcherDaemon
+from src.utils.geotag_resolver import resolve_location_query
+
+
+class _RatingUndoCommand(QUndoCommand):
+    """Reversible rating modification command for QUndoStack."""
+
+    def __init__(
+        self,
+        main_win: PhotoGalleryMainWindow,
+        target_ids: Sequence[int],
+        new_rating: int,
+    ) -> None:
+        super().__init__(f"Set rating to {new_rating} star{'s' if new_rating != 1 else ''}")
+        self.main_win = main_win
+        self.target_ids = list(target_ids)
+        self.new_rating = new_rating
+        field_map = self.main_win.catalog_repo.get_field_map_for_ids(self.target_ids, "rating")
+        self.old_ratings = {mid: int(field_map.get(mid) or 0) for mid in self.target_ids}
+
+    def redo(self) -> None:
+        self.main_win.catalog_repo.set_rating(self.target_ids, self.new_rating)
+        self.main_win.catalog_model.update_items_metadata(self.target_ids, rating=self.new_rating)
+        active_ids = self.main_win.get_active_target_ids() if hasattr(self.main_win, "get_active_target_ids") else getattr(self.main_win, "_selected_ids", [])
+        if any(mid in active_ids for mid in self.target_ids):
+            summary = self.main_win.catalog_repo.get_selection_summary(active_ids)
+            self.main_win.right_tag_dock.bind_selection(active_ids, summary)
+
+    def undo(self) -> None:
+        self.main_win.catalog_repo.restore_field_map(self.old_ratings, "rating")
+        val_to_mids: dict[int, list[int]] = {}
+        for mid, old_r in self.old_ratings.items():
+            val_to_mids.setdefault(old_r, []).append(mid)
+        for old_r, mids in val_to_mids.items():
+            self.main_win.catalog_model.update_items_metadata(mids, rating=old_r)
+        active_ids = self.main_win.get_active_target_ids() if hasattr(self.main_win, "get_active_target_ids") else getattr(self.main_win, "_selected_ids", [])
+        if any(mid in active_ids for mid in self.target_ids):
+            summary = self.main_win.catalog_repo.get_selection_summary(active_ids)
+            self.main_win.right_tag_dock.bind_selection(active_ids, summary)
+
+
+class _FlagUndoCommand(QUndoCommand):
+    """Reversible flag modification command for QUndoStack."""
+
+    def __init__(
+        self,
+        main_win: PhotoGalleryMainWindow,
+        target_ids: Sequence[int],
+        new_flag: int,
+    ) -> None:
+        super().__init__("Flag" if new_flag else "Unflag")
+        self.main_win = main_win
+        self.target_ids = list(target_ids)
+        self.new_flag = new_flag
+        field_map = self.main_win.catalog_repo.get_field_map_for_ids(self.target_ids, "flag")
+        self.old_flags = {mid: int(field_map.get(mid) or 0) for mid in self.target_ids}
+
+    def redo(self) -> None:
+        self.main_win.catalog_repo.set_flag(self.target_ids, self.new_flag)
+        self.main_win.catalog_model.update_items_metadata(self.target_ids, flag=self.new_flag)
+        active_ids = self.main_win.get_active_target_ids() if hasattr(self.main_win, "get_active_target_ids") else getattr(self.main_win, "_selected_ids", [])
+        if any(mid in active_ids for mid in self.target_ids):
+            summary = self.main_win.catalog_repo.get_selection_summary(active_ids)
+            self.main_win.right_tag_dock.bind_selection(active_ids, summary)
+
+    def undo(self) -> None:
+        self.main_win.catalog_repo.restore_field_map(self.old_flags, "flag")
+        val_to_mids: dict[int, list[int]] = {}
+        for mid, old_f in self.old_flags.items():
+            val_to_mids.setdefault(old_f, []).append(mid)
+        for old_f, mids in val_to_mids.items():
+            self.main_win.catalog_model.update_items_metadata(mids, flag=old_f)
+        active_ids = self.main_win.get_active_target_ids() if hasattr(self.main_win, "get_active_target_ids") else getattr(self.main_win, "_selected_ids", [])
+        if any(mid in active_ids for mid in self.target_ids):
+            summary = self.main_win.catalog_repo.get_selection_summary(active_ids)
+            self.main_win.right_tag_dock.bind_selection(active_ids, summary)
+
+
+class _CaptionUndoCommand(QUndoCommand):
+    """Reversible caption modification command for QUndoStack."""
+
+    def __init__(
+        self,
+        main_win: PhotoGalleryMainWindow,
+        target_ids: Sequence[int],
+        new_caption: str,
+    ) -> None:
+        super().__init__("Edit caption")
+        self.main_win = main_win
+        self.target_ids = list(target_ids)
+        self.new_caption = new_caption
+        field_map = self.main_win.catalog_repo.get_field_map_for_ids(self.target_ids, "caption")
+        self.old_captions = {mid: str(field_map.get(mid) or "") for mid in self.target_ids}
+
+    def redo(self) -> None:
+        self.main_win.catalog_repo.set_caption(self.target_ids, self.new_caption)
+        self.main_win.catalog_model.update_items_metadata(self.target_ids, caption=self.new_caption)
+        active_ids = self.main_win.get_active_target_ids() if hasattr(self.main_win, "get_active_target_ids") else getattr(self.main_win, "_selected_ids", [])
+        if any(mid in active_ids for mid in self.target_ids):
+            summary = self.main_win.catalog_repo.get_selection_summary(active_ids)
+            self.main_win.right_tag_dock.bind_selection(active_ids, summary)
+
+    def undo(self) -> None:
+        self.main_win.catalog_repo.restore_field_map(self.old_captions, "caption")
+        val_to_mids: dict[str, list[int]] = {}
+        for mid, old_c in self.old_captions.items():
+            val_to_mids.setdefault(old_c, []).append(mid)
+        for old_c, mids in val_to_mids.items():
+            self.main_win.catalog_model.update_items_metadata(mids, caption=old_c)
+        active_ids = self.main_win.get_active_target_ids() if hasattr(self.main_win, "get_active_target_ids") else getattr(self.main_win, "_selected_ids", [])
+        if any(mid in active_ids for mid in self.target_ids):
+            summary = self.main_win.catalog_repo.get_selection_summary(active_ids)
+            self.main_win.right_tag_dock.bind_selection(active_ids, summary)
+
+
+class _GeotagUndoCommand(QUndoCommand):
+    """Reversible geotag modification command for QUndoStack."""
+
+    def __init__(
+        self,
+        main_win: PhotoGalleryMainWindow,
+        target_ids: Sequence[int],
+        new_lat: float | None,
+        new_lon: float | None,
+        new_location_name: str | None,
+    ) -> None:
+        super().__init__("Edit geotag")
+        self.main_win = main_win
+        self.target_ids = list(target_ids)
+        self.new_lat = new_lat
+        self.new_lon = new_lon
+        self.new_location_name = new_location_name
+        self.old_geotags = self.main_win.catalog_repo.get_geotag_map(self.target_ids)
+
+    def redo(self) -> None:
+        self.main_win.catalog_repo.set_geotag(
+            self.target_ids, self.new_lat, self.new_lon, self.new_location_name
+        )
+        active_ids = self.main_win.get_active_target_ids() if hasattr(self.main_win, "get_active_target_ids") else getattr(self.main_win, "_selected_ids", [])
+        if any(mid in active_ids for mid in self.target_ids):
+            summary = self.main_win.catalog_repo.get_selection_summary(active_ids)
+            self.main_win.right_tag_dock.bind_selection(active_ids, summary)
+        if self.main_win.map_view is not None and self.main_win.central_stack.currentWidget() == self.main_win.map_view:
+            self.main_win.map_view.set_viewport_bbox(
+                self.main_win.map_view._min_lat,
+                self.main_win.map_view._max_lat,
+                self.main_win.map_view._min_lon,
+                self.main_win.map_view._max_lon,
+                self.main_win.catalog_repo,
+            )
+
+    def undo(self) -> None:
+        self.main_win.catalog_repo.restore_geotag_map(self.old_geotags)
+        active_ids = self.main_win.get_active_target_ids() if hasattr(self.main_win, "get_active_target_ids") else getattr(self.main_win, "_selected_ids", [])
+        if any(mid in active_ids for mid in self.target_ids):
+            summary = self.main_win.catalog_repo.get_selection_summary(active_ids)
+            self.main_win.right_tag_dock.bind_selection(active_ids, summary)
+        if self.main_win.map_view is not None and self.main_win.central_stack.currentWidget() == self.main_win.map_view:
+            self.main_win.map_view.set_viewport_bbox(
+                self.main_win.map_view._min_lat,
+                self.main_win.map_view._max_lat,
+                self.main_win.map_view._min_lon,
+                self.main_win.map_view._max_lon,
+                self.main_win.catalog_repo,
+            )
+
+
+
+class _RotateUndoCommand(QUndoCommand):
+    """Reversible lossless rotation command for QUndoStack."""
+
+    def __init__(
+        self,
+        main_win: PhotoGalleryMainWindow,
+        target_ids: Sequence[int],
+        clockwise: bool,
+    ) -> None:
+        super().__init__("Rotate clockwise" if clockwise else "Rotate counter-clockwise")
+        self.main_win = main_win
+        self.target_ids = list(target_ids)
+        self.clockwise = clockwise
+
+    def redo(self) -> None:
+        self.main_win._rotate_internal(self.target_ids, clockwise=self.clockwise)
+
+    def undo(self) -> None:
+        self.main_win._rotate_internal(self.target_ids, clockwise=not self.clockwise)
+
+
+class _MoveFilesUndoCommand(QUndoCommand):
+    """Reversible file move command for QUndoStack (moves on disk and updates catalog.db)."""
+
+    def __init__(
+        self,
+        main_win: PhotoGalleryMainWindow,
+        moves: list[dict[str, Any]],
+        target_folder_name: str,
+    ) -> None:
+        count = len(moves)
+        s = "s" if count != 1 else ""
+        super().__init__(f"Move {count} item{s} to {target_folder_name}")
+        self.main_win = main_win
+        self.moves = moves
+
+    @staticmethod
+    def _safe_move(src: str, dst: str) -> None:
+        import gc
+        os.makedirs(os.path.dirname(dst), exist_ok=True)
+        for attempt in range(6):
+            try:
+                shutil.move(src, dst)
+                return
+            except PermissionError:
+                gc.collect()
+                if attempt == 5:
+                    raise
+                time.sleep(0.04 * (attempt + 1))
+
+    def redo(self) -> None:
+        for m in self.moves:
+            flag = self.main_win._active_thumb_flags.pop(m["media_id"], None)
+            if flag is not None:
+                flag.set()
+            src = m["src_path"]
+            dst = m["dst_path"]
+            if os.path.exists(src):
+                self._safe_move(src, dst)
+            self.main_win.catalog_repo.move_media_folder(
+                m["media_id"], m["dst_folder_id"], m["dst_filename"]
+            )
+            detail = self.main_win.catalog_repo.get_media_detail(m["media_id"])
+            backup_path = detail.get("original_backup_path")
+            if backup_path and os.path.exists(backup_path):
+                dst_backup_dir = Path(os.path.dirname(dst)) / ".OriginalFiles"
+                dst_backup = dst_backup_dir / Path(backup_path).name
+                try:
+                    self._safe_move(backup_path, str(dst_backup))
+                    m["prev_backup_path"] = backup_path
+                    m["curr_backup_path"] = str(dst_backup)
+                    with self.main_win.engine.write_lock:
+                        conn = self.main_win.engine.catalog_conn()
+                        conn.execute("UPDATE media SET original_backup_path = ? WHERE id = ?;", (str(dst_backup), m["media_id"]))
+                        conn.commit()
+                except OSError:
+                    pass
+            self.main_win._media_meta_lookup.pop(m["media_id"], None)
+            self.main_win.catalog_model.update_items_metadata(
+                [m["media_id"]], filename=m["dst_filename"]
+            )
+        self.main_win.refresh_navigation_and_autocomplete()
+        self.main_win.rebuild_and_run_query()
+
+    def undo(self) -> None:
+        for m in self.moves:
+            flag = self.main_win._active_thumb_flags.pop(m["media_id"], None)
+            if flag is not None:
+                flag.set()
+            src = m["dst_path"]
+            dst = m["src_path"]
+            if os.path.exists(src):
+                self._safe_move(src, dst)
+            self.main_win.catalog_repo.move_media_folder(
+                m["media_id"], m["src_folder_id"], m["src_filename"]
+            )
+            curr_b = m.get("curr_backup_path")
+            prev_b = m.get("prev_backup_path")
+            if curr_b and prev_b and os.path.exists(curr_b):
+                try:
+                    self._safe_move(curr_b, prev_b)
+                    with self.main_win.engine.write_lock:
+                        conn = self.main_win.engine.catalog_conn()
+                        conn.execute("UPDATE media SET original_backup_path = ? WHERE id = ?;", (prev_b, m["media_id"]))
+                        conn.commit()
+                except OSError:
+                    pass
+            self.main_win._media_meta_lookup.pop(m["media_id"], None)
+            self.main_win.catalog_model.update_items_metadata(
+                [m["media_id"]], filename=m["src_filename"]
+            )
+        self.main_win.refresh_navigation_and_autocomplete()
+        self.main_win.rebuild_and_run_query()
+
+
+class _AvatarBackfillSignals(QObject):
+    finished = Signal(int)
+
+
+class _AvatarBackfillWorker(QRunnable):
+    """Background worker that generates missing avatar crops in people table."""
+
+    def __init__(self, engine: DualDatabaseEngine, signals: _AvatarBackfillSignals) -> None:
+        super().__init__()
+        self.engine = engine
+        self.signals = signals
+
+    def run(self) -> None:
+        try:
+            repo = CatalogRepository(self.engine)
+            updated = repo.backfill_missing_people_thumbnails()
+            if updated > 0:
+                self.signals.finished.emit(updated)
+        except Exception:
+            pass
+        finally:
+            if threading.current_thread() is not threading.main_thread():
+                self.engine.close_thread_connections()
+
+
+class PhotoGalleryMainWindow(QMainWindow):
+    """
+    Windows Live Photo Gallery 64-Bit Clone Main Window (`docs/reference_ui/main_ui.png`).
+    Enforces strict thread-pool boundaries: QPixmap is instantiated exclusively on the GUI thread.
+    """
+
+    def __init__(
+        self,
+        engine: DualDatabaseEngine,
+        start_xmp_daemon: bool = True,
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Photo Gallery")
+        self.resize(1360, 840)
+        self.setMinimumSize(500, 400)
+
+        self.engine = engine
+        self.catalog_repo = CatalogRepository(engine)
+        self.repo = self.catalog_repo
+        self.thumb_repo = ThumbnailRepository(engine)
+        self.pixmap_cache = LruCache(2500)
+
+        self.retention_days: int = 30
+        self.find_people_enabled: bool = True
+        self.current_theme: Literal["wlpg_aero", "modern", "dark"] = "wlpg_aero"
+        self._arrange_by: ArrangeMode = "date"
+        self._reverse_sort: bool = False
+        self._group_by: str = "month"
+        self._group_reverse: bool = False
+        self._sort_by: str = "date"
+        self._sort_reverse: bool = False
+        self._search_text: str = ""
+        self._active_bbox: tuple[float, float, float, float] | None = None
+        self._active_map_media_ids: list[int] | None = None
+        self._active_map_location_label: str | None = None
+        self._search_scope_bar_explicitly_opened: bool = False
+        self._selected_ids: list[int] = []
+        self._lead_selected_id: int | None = None
+        self._is_shutting_down: bool = False
+        self.write_back_paused: bool = False
+        self._workers_paused: bool = False
+        self.current_icon_theme: str = "wlpg_aero"
+        self._scanner_status_text: str = "Scanning: Idle"
+        self._face_status_text: str = "Faces: Idle"
+
+        # Undo / Redo Command Stack
+        self.undo_stack = QUndoStack(self)
+
+        # Navigation History Stack
+        self._nav_history: list[dict[str, Any]] = []
+        self._nav_index: int = -1
+        self._is_navigating_history: bool = False
+
+        # Dedicated Thread Pools & Cancellation Flags
+        self.scanner_pool = QThreadPool(self)
+        self.scanner_pool.setMaxThreadCount(1)
+        self._scanner_cancel = CancellationFlag()
+
+        self.thumbnail_pool = QThreadPool(self)
+        self.thumbnail_pool.setMaxThreadCount(min(8, os.cpu_count() or 4))
+        self._active_thumb_flags: dict[int, CancellationFlag] = {}
+        self._media_meta_lookup: dict[int, tuple[str, int, bool, int]] = {}
+
+        self.face_pool = QThreadPool(self)
+        self.face_pool.setMaxThreadCount(1)
+        self._face_cancel = CancellationFlag()
+        self._face_worker: FaceDetectionWorker | None = None
+
+        # Background XMP / EXIF Write-Back Daemon
+        self.xmp_daemon = MetadataSyncDaemon(engine, poll_interval_ms=1500, parent=self)
+        self.xmp_daemon.batch_synced.connect(self.on_metadata_batch_synced)
+        self.xmp_daemon.sync_error.connect(
+            lambda mid, err: self.on_worker_error(f"XMP sync error ({mid}): {err}")
+        )
+        if start_xmp_daemon:
+            self.xmp_daemon.start()
+        self.metadata_sync_daemon = self.xmp_daemon
+
+        # Real-Time Continuous Directory Watcher
+        self.folder_watcher = FolderWatcherDaemon(engine, debounce_interval_ms=750, parent=self)
+        self.folder_watcher.delta_completed.connect(self._on_folder_watcher_delta)
+        self.folder_watcher.reconciliation_completed.connect(self._on_startup_reconciliation_completed)
+        self.folder_watcher.update_watched_paths()
+
+        # ---------------------------------------------------------------------
+        # Build UI Hierarchy
+        # ---------------------------------------------------------------------
+        # 1. Top Ribbon Toolbar spanning the full top width of the window
+        self.ribbon = RibbonToolbar(self)
+        self.setMenuWidget(self.ribbon)
+        self.undo_stack.canUndoChanged.connect(self.ribbon.set_undo_enabled)
+        self.undo_stack.canRedoChanged.connect(self.ribbon.set_redo_enabled)
+
+        # 2. Central QStackedWidget (0: Grid, 1: Single Viewer, 2: World Map)
+        self.central_stack = QStackedWidget(self)
+        self.central_stack.setFrameShape(QFrame.NoFrame)
+
+        self.catalog_model = CatalogListModel(self.pixmap_cache, self)
+        self.card_delegate = MediaCardDelegate(self.pixmap_cache, self)
+        self.card_delegate.thumb_repo = self.thumb_repo
+        self.grid_view = ThumbnailGridView(
+            self.catalog_model, self.card_delegate, self.central_stack
+        )
+        self.grid_view.main_window = self
+        self.grid_view.catalog_repo = self.catalog_repo
+        self.grid_view.thumb_repo = self.thumb_repo
+
+        # Person Header Bar (compact Google Photos / Immich style header with view toggle & suggestions banner)
+        self.person_header_bar = PersonHeaderBar(self.engine, self.grid_view)
+        self.person_header_bar.hide()
+        self.grid_view.set_person_header_bar(self.person_header_bar)
+        self.person_header_bar.back_to_directory_requested.connect(self.open_people_directory_view)
+        self.person_header_bar.review_suggestions_requested.connect(lambda pid: self.open_batch_people_view(person_id=pid))
+        self.person_header_bar.view_mode_changed.connect(self._on_person_view_mode_changed)
+        self.person_header_bar.person_renamed.connect(
+            lambda pid, name: (self.refresh_navigation_and_autocomplete(), self.left_nav_dock.select_person(pid))
+        )
+
+        self.scope_bar = SearchScopeBar(self.grid_view)
+        self.scope_bar.setFixedHeight(62)
+        self.scope_bar.hide()
+        self.grid_view.set_search_scope_bar(self.scope_bar)
+        self.ribbon.remove_embedded_scope_bar()
+        self.ribbon.scope_bar = self.scope_bar
+        self.ribbon.txt_search = self.scope_bar.txt_search
+        self.central_stack.addWidget(self.grid_view)
+
+        self.media_viewer = SingleMediaViewer(self.central_stack)
+        self.media_viewer.main_window = self
+        self.media_viewer.catalog_repo = self.catalog_repo
+        self.media_viewer.repo = self.catalog_repo
+        self.central_stack.addWidget(self.media_viewer)
+
+        self.map_view = WorldMapView(self.central_stack)
+        self.map_view.bind_repository(self.catalog_repo, self.thumb_repo)
+        self.central_stack.addWidget(self.map_view)
+
+        self.batch_people_view = BatchPeopleView(self.engine, self.central_stack)
+        self.batch_people_view.faces_confirmed.connect(self._on_batch_faces_confirmed)
+        self.batch_people_view.faces_rejected.connect(self._on_batch_faces_rejected)
+        self.batch_people_view.back_to_gallery_requested.connect(self.close_batch_people_view)
+        self.batch_people_view.open_media_requested.connect(self.open_single_viewer)
+        self.central_stack.addWidget(self.batch_people_view)
+
+        # Immich / Google Photos Inspired People Directory View
+        self.people_directory_view = PeopleDirectoryView(self.engine, self.central_stack)
+        self.people_directory_view.person_selected.connect(self._on_directory_person_selected)
+        self.people_directory_view.unnamed_selected.connect(self._on_directory_unnamed_selected)
+        self.people_directory_view.review_suggestions_requested.connect(self.open_batch_people_view)
+        self.person_header_bar.unnamed_person_named.connect(self._on_unnamed_person_named)
+        self.central_stack.addWidget(self.people_directory_view)
+
+        self.setCentralWidget(self.central_stack)
+
+        # 3. Left Navigation Dock & Right Tag/Caption Dock
+        self.left_nav_dock = LeftNavigationDock(self)
+        self.addDockWidget(Qt.LeftDockWidgetArea, self.left_nav_dock)
+        self.resizeDocks([self.left_nav_dock], [230], Qt.Horizontal)
+
+        self.right_tag_dock = TagAndCaptionDock(self)
+        self.addDockWidget(Qt.RightDockWidgetArea, self.right_tag_dock)
+
+        # 4. WLPG Bottom Status Bar
+        self._build_status_bar()
+
+        # 5. Wire Qt Signals & Slots
+        self._connect_signals()
+
+        # 6. Apply WLPG Classic Aero Theme & Initial Refresh
+        self.apply_theme("wlpg_aero")
+        self._start_async_avatar_backfill()
+        self.refresh_navigation_and_autocomplete()
+        self.rebuild_and_run_query()
+
+        # Seed initial navigation state into history stack
+        self._nav_history = [self.left_nav_dock.current_filter_state()]
+        self._nav_index = 0
+        self._update_nav_buttons()
+
+        # 7. Restore persisted application state (folder, view, docks, geometry)
+        self._restore_app_state()
+
+        # 8. Launch low-priority background startup reconciliation for offline filesystem changes
+        QTimer.singleShot(150, self.folder_watcher.start_startup_reconciliation)
+
+        # 9. Start live status bar worker monitor timer (production safeguard 2)
+        self._monitor_timer = QTimer(self)
+        self._monitor_timer.setInterval(1200)
+        self._monitor_timer.timeout.connect(self._update_worker_monitor)
+        self._monitor_timer.start()
+
+        # 10. Install global event filter for mouse Back / Forward thumb buttons
+        app = QApplication.instance()
+        if app:
+            app.installEventFilter(self)
+
+    def _build_status_bar(self) -> None:
+        sb = self.statusBar()
+        sb.setFixedHeight(28)
+        sb.setStyleSheet(
+            """
+            QStatusBar {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #F0F4FA, stop:1 #D9E4F2);
+                border-top: 1px solid #B8CDE3;
+                color: #1E395B;
+                font-family: 'Segoe UI';
+                font-size: 8.5pt;
+            }
+            QStatusBar QPushButton {
+                border: 1px solid transparent;
+                background: transparent;
+                border-radius: 2px;
+                min-width: 22px;
+                max-width: 26px;
+                height: 20px;
+            }
+            QStatusBar QPushButton:hover {
+                border: 1px solid #7DA2CE;
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #FFFFFF, stop:0.5 #E7F1FB, stop:1 #D0E4F9);
+            }
+            QStatusBar QPushButton:pressed {
+                border: 1px solid #5A85B8;
+                background: #BFDCF7;
+            }
+            QStatusBar QSlider::groove:horizontal {
+                height: 3px;
+                background: #B6C8DA;
+                border-radius: 1px;
+            }
+            QStatusBar QSlider::handle:horizontal {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #F0F6FA, stop:1 #D8E5F0);
+                border: 1px solid #7592B5;
+                width: 6px;
+                height: 12px;
+                margin: -5px 0;
+                border-radius: 2px;
+            }
+            QStatusBar QSlider::handle:horizontal:hover {
+                border: 1px solid #3380CC;
+                background: #E5F1FC;
+            }
+            """
+        )
+
+        self.lbl_status_counts = QLabel("0 items", sb)
+        self.lbl_status_counts.setStyleSheet("padding-left: 6px; font-weight: bold;")
+        sb.addWidget(self.lbl_status_counts)
+
+        # Worker Monitor consolidated widget right next to item count
+        self.worker_monitor_widget = QWidget(sb)
+        mon_hbox = QHBoxLayout(self.worker_monitor_widget)
+        mon_hbox.setContentsMargins(4, 0, 4, 0)
+        mon_hbox.setSpacing(4)
+
+        # Subtle vertical separator between item count and worker status
+        sep_w = QFrame(self.worker_monitor_widget)
+        sep_w.setFrameShape(QFrame.VLine)
+        sep_w.setStyleSheet("color: #AFC3D8; margin: 3px 2px;")
+        mon_hbox.addWidget(sep_w)
+
+        self.btn_pause_workers = QPushButton("⏸", self.worker_monitor_widget)
+        self.btn_pause_workers.setCursor(Qt.PointingHandCursor)
+        self.btn_pause_workers.setToolTip("Pause background indexing, face detection, and file write-back")
+        self.btn_pause_workers.setStyleSheet(
+            """
+            QPushButton {
+                font-family: 'Segoe UI Symbol', 'Segoe UI', sans-serif;
+                font-size: 11pt;
+                border: none;
+                background: transparent;
+                color: #1E395B;
+                padding: 0;
+                min-width: 18px;
+                max-width: 20px;
+                height: 18px;
+            }
+            QPushButton:hover {
+                color: #0078D7;
+            }
+            """
+        )
+        self.btn_pause_workers.clicked.connect(self.toggle_pause_all_workers)
+        mon_hbox.addWidget(self.btn_pause_workers)
+
+        self.lbl_worker_monitor = QLabel("Idle", self.worker_monitor_widget)
+        self.lbl_worker_monitor.setCursor(Qt.PointingHandCursor)
+        self.lbl_worker_monitor.setToolTip("Background tasks status\nClick for details")
+        self.lbl_worker_monitor.setStyleSheet(
+            """
+            QLabel {
+                color: #5A738E;
+                font-size: 8.5pt;
+                padding: 1px 4px;
+                border-radius: 3px;
+            }
+            QLabel:hover {
+                color: #0078D7;
+                background: #E5F1FC;
+            }
+            """
+        )
+        self.lbl_worker_monitor.mousePressEvent = lambda e: self._show_worker_details_menu(e)
+        mon_hbox.addWidget(self.lbl_worker_monitor)
+
+        sb.addWidget(self.worker_monitor_widget)
+
+        # Subtle vertical separator before transient status message
+        self.sep_status_msg = QFrame(sb)
+        self.sep_status_msg.setFrameShape(QFrame.VLine)
+        self.sep_status_msg.setStyleSheet("color: #AFC3D8; margin: 3px 6px;")
+        self.sep_status_msg.setVisible(False)
+        sb.addWidget(self.sep_status_msg)
+
+        self.lbl_sync_status = QLabel("", sb)
+        self.lbl_sync_status.setStyleSheet("color: #0066CC; padding-left: 4px;")
+        sb.addWidget(self.lbl_sync_status, 1)
+
+        # Override statusBar().showMessage and clearMessage so temporary notifications
+        # display in lbl_sync_status without ever hiding item counts or worker monitor controls
+        sb.showMessage = self.show_status_message
+        sb.clearMessage = lambda: self.show_status_message("")
+
+        # Right-aligned WLPG Bottom Bar Controls matching media_1792165701201_517fc7f1.png
+        right_ctrl = QWidget(sb)
+        right_ctrl.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Preferred)
+        r_hbox = QHBoxLayout(right_ctrl)
+        r_hbox.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        r_hbox.setContentsMargins(0, 0, 6, 0)
+        r_hbox.setSpacing(2)
+
+        self.btn_status_prev = QPushButton(right_ctrl)
+        self.btn_status_prev.setIcon(make_wlpg_icon("prev_media", 18))
+        self.btn_status_prev.setIconSize(QSize(18, 18))
+        self.btn_status_prev.setFixedSize(22, 22)
+        self.btn_status_prev.setToolTip("Previous (Left Arrow)")
+        self.btn_status_prev.clicked.connect(lambda: self.navigate_single_viewer(-1))
+        self.btn_status_prev.setVisible(False)
+        r_hbox.addWidget(self.btn_status_prev)
+
+        self.btn_status_next = QPushButton(right_ctrl)
+        self.btn_status_next.setIcon(make_wlpg_icon("next_media", 18))
+        self.btn_status_next.setIconSize(QSize(18, 18))
+        self.btn_status_next.setFixedSize(22, 22)
+        self.btn_status_next.setToolTip("Next (Right Arrow)")
+        self.btn_status_next.clicked.connect(lambda: self.navigate_single_viewer(1))
+        self.btn_status_next.setVisible(False)
+        r_hbox.addWidget(self.btn_status_next)
+
+        self.btn_status_rot_ccw = QPushButton(right_ctrl)
+        self.btn_status_rot_ccw.setIcon(make_wlpg_icon("rotate_ccw", 18))
+        self.btn_status_rot_ccw.setIconSize(QSize(18, 18))
+        self.btn_status_rot_ccw.setFixedSize(22, 22)
+        self.btn_status_rot_ccw.setToolTip("Rotate counter-clockwise (lossless)")
+        self.btn_status_rot_ccw.clicked.connect(lambda: self.rotate_selection(clockwise=False))
+        r_hbox.addWidget(self.btn_status_rot_ccw)
+
+        self.btn_status_rot_cw = QPushButton(right_ctrl)
+        self.btn_status_rot_cw.setIcon(make_wlpg_icon("rotate_cw", 18))
+        self.btn_status_rot_cw.setIconSize(QSize(18, 18))
+        self.btn_status_rot_cw.setFixedSize(22, 22)
+        self.btn_status_rot_cw.setToolTip("Rotate clockwise (lossless)")
+        self.btn_status_rot_cw.clicked.connect(lambda: self.rotate_selection(clockwise=True))
+        r_hbox.addWidget(self.btn_status_rot_cw)
+
+        self.btn_status_delete = QPushButton(right_ctrl)
+        self.btn_status_delete.setIcon(make_wlpg_icon("delete", 16))
+        self.btn_status_delete.setIconSize(QSize(16, 16))
+        self.btn_status_delete.setFixedSize(22, 22)
+        self.btn_status_delete.setToolTip("Delete selected items to Recycle Bin (Del)")
+        self.btn_status_delete.clicked.connect(self.delete_selection_to_recycle_bin)
+        r_hbox.addWidget(self.btn_status_delete)
+
+        self.btn_status_slideshow = QPushButton(right_ctrl)
+        self.btn_status_slideshow.setIcon(make_wlpg_icon("slideshow", 18))
+        self.btn_status_slideshow.setIconSize(QSize(18, 18))
+        self.btn_status_slideshow.setFixedSize(22, 22)
+        self.btn_status_slideshow.setToolTip("Slide show (F12)")
+        self.btn_status_slideshow.clicked.connect(lambda: self.dispatch_ribbon_action("slide_show"))
+        r_hbox.addWidget(self.btn_status_slideshow)
+
+        # Subtle vertical separator
+        sep = QFrame(right_ctrl)
+        sep.setFrameShape(QFrame.VLine)
+        sep.setFixedSize(1, 16)
+        sep.setStyleSheet("color: #AFC3D8; margin: 3px 2px;")
+        r_hbox.addWidget(sep)
+
+        self.btn_status_grid = QPushButton(right_ctrl)
+        self.btn_status_grid.setIcon(make_wlpg_icon("view_list", 18))
+        self.btn_status_grid.setIconSize(QSize(18, 18))
+        self.btn_status_grid.setFixedSize(22, 22)
+        self.btn_status_grid.setToolTip("Thumbnail grid view")
+        self.btn_status_grid.clicked.connect(self.show_grid_view)
+        r_hbox.addWidget(self.btn_status_grid)
+
+        self.btn_status_fit = QPushButton(right_ctrl)
+        self.btn_status_fit.setIcon(make_wlpg_icon("actual_size", 18))
+        self.btn_status_fit.setIconSize(QSize(18, 18))
+        self.btn_status_fit.setFixedSize(22, 22)
+        self.btn_status_fit.setToolTip("Actual size (Ctrl+0)")
+        self.btn_status_fit.clicked.connect(self._on_status_zoom_toggle_clicked)
+        self.btn_status_fit.setVisible(False)
+        r_hbox.addWidget(self.btn_status_fit)
+
+        # Alias for backward compatibility with existing tests
+        self.btn_status_actual = self.btn_status_fit
+
+        # Legacy alias for test compatibility
+        self.btn_status_viewer = QPushButton(right_ctrl)
+        self.btn_status_viewer.setVisible(False)
+        self.btn_status_viewer.clicked.connect(self._on_status_viewer_clicked)
+
+        self.btn_status_zoom_out = QPushButton(right_ctrl)
+        self.btn_status_zoom_out.setIcon(make_wlpg_icon("zoom_out", 18))
+        self.btn_status_zoom_out.setIconSize(QSize(18, 18))
+        self.btn_status_zoom_out.setFixedSize(22, 22)
+        self.btn_status_zoom_out.setToolTip("Zoom out")
+        self.btn_status_zoom_out.clicked.connect(
+            lambda: self.slider_status_zoom.setValue(
+                max(self.slider_status_zoom.minimum(), self.slider_status_zoom.value() - 25)
+            )
+        )
+        r_hbox.addWidget(self.btn_status_zoom_out)
+
+        self.slider_status_zoom = QSlider(Qt.Horizontal, right_ctrl)
+        self.slider_status_zoom.setRange(72, 320)
+        self.slider_status_zoom.setValue(150)
+        self.slider_status_zoom.setFixedWidth(95)
+        self.slider_status_zoom.setToolTip("Thumbnail / Viewer zoom")
+        self.slider_status_zoom.valueChanged.connect(self._on_status_zoom_changed)
+        r_hbox.addWidget(self.slider_status_zoom)
+
+        self.btn_status_zoom_in = QPushButton(right_ctrl)
+        self.btn_status_zoom_in.setIcon(make_wlpg_icon("zoom_in", 18))
+        self.btn_status_zoom_in.setIconSize(QSize(18, 18))
+        self.btn_status_zoom_in.setFixedSize(22, 22)
+        self.btn_status_zoom_in.setToolTip("Zoom in")
+        self.btn_status_zoom_in.clicked.connect(
+            lambda: self.slider_status_zoom.setValue(
+                min(self.slider_status_zoom.maximum(), self.slider_status_zoom.value() + 25)
+            )
+        )
+        r_hbox.addWidget(self.btn_status_zoom_in)
+
+        sb.addPermanentWidget(right_ctrl)
+
+    def _connect_signals(self) -> None:
+        # Left Navigation Dock
+        self.left_nav_dock.filter_changed.connect(self._on_nav_filter_changed)
+        self.left_nav_dock.people_directory_requested.connect(self.open_people_directory_view)
+        self.left_nav_dock.folder_add_requested.connect(self._prompt_and_add_folder)
+        self.left_nav_dock.folder_remove_requested.connect(self._on_remove_folder_from_library)
+        self.left_nav_dock.folder_renamed.connect(self._on_folder_renamed)
+        self.left_nav_dock.folder_created.connect(self._on_folder_created)
+        self.left_nav_dock.folder_deleted.connect(self._on_folder_deleted)
+        self.left_nav_dock.favourite_path_selected.connect(
+            lambda path: self.scan_folder(path, include_subfolders=True)
+        )
+        self.left_nav_dock.files_dropped_on_folder.connect(self._on_files_dropped_on_folder)
+
+        # Top Ribbon Toolbar
+        self.ribbon.arrange_changed.connect(self.on_arrange_changed)
+        self.ribbon.details_overlay_changed.connect(self._on_details_overlay_changed)
+        self.ribbon.person_quick_find_selected.connect(self.on_quick_find_person)
+        self.ribbon.search_text_changed.connect(self._on_search_text_changed)
+        self.ribbon.search_all_requested.connect(self.left_nav_dock.clear_all_filters)
+        self.ribbon.action_triggered.connect(self.dispatch_ribbon_action)
+        self.ribbon.layout_mode_changed.connect(self.grid_view.set_layout_mode)
+        self.ribbon.zoom_size_changed.connect(self._on_ribbon_zoom_changed)
+
+        # Authentic WLPG Find Tab Filter Signal Connections
+        self.ribbon.date_filter_selected.connect(
+            lambda y, m, d: self.left_nav_dock.select_date(y, m, d)
+        )
+        self.ribbon.rating_filter_selected.connect(
+            lambda ratings: self.left_nav_dock.select_ratings(ratings)
+        )
+        self.ribbon.tag_filter_selected.connect(self._on_ribbon_tag_filter)
+        self.ribbon.untagged_filter_selected.connect(
+            self.left_nav_dock.set_untagged_only
+        )
+        self.ribbon.flagged_filter_selected.connect(
+            self.left_nav_dock.set_flagged_only
+        )
+        self.ribbon.flag_filter_selected.connect(
+            self.left_nav_dock.set_flag_filter
+        )
+        self.ribbon.edited_filter_selected.connect(
+            self.left_nav_dock.set_edited_only
+        )
+        self.ribbon.media_type_filter_selected.connect(
+            self.left_nav_dock.set_media_type
+        )
+        self.ribbon.person_boolean_mode_changed.connect(
+            self.left_nav_dock.set_person_boolean_mode
+        )
+        self.ribbon.text_search_toggle_requested.connect(
+            lambda: self.toggle_search_scope_bar(force_visible=True)
+        )
+
+        # Central Search Scope Bar Signals
+        self.scope_bar.search_text_changed.connect(self._on_search_text_changed)
+        self.scope_bar.search_all_requested.connect(self._on_search_all_requested)
+        self.scope_bar.location_clear_requested.connect(self._on_clear_location_filter)
+        self.scope_bar.pin_toggled.connect(self._on_scope_bar_pin_toggled)
+        self.scope_bar.close_requested.connect(self.hide_search_scope_bar)
+        self.scope_bar.person_remove_requested.connect(self.left_nav_dock.unselect_person)
+        self.scope_bar.tag_remove_requested.connect(
+            lambda tid: self.left_nav_dock.set_tag_filter_state(tid, "none")
+        )
+        self.scope_bar.rating_clear_requested.connect(self.left_nav_dock.clear_rating_filters)
+        self.scope_bar.flagged_clear_requested.connect(
+            lambda: self.left_nav_dock.set_flagged_only(False)
+        )
+        self.scope_bar.date_clear_requested.connect(
+            lambda: self.left_nav_dock.select_date(None, None, None)
+        )
+
+        # Quick Access Toolbar & Navigation History Signals
+        self.ribbon.back_requested.connect(self.navigate_history_back)
+        self.ribbon.forward_requested.connect(self.navigate_history_forward)
+        self.ribbon.undo_requested.connect(self._on_undo)
+        self.ribbon.redo_requested.connect(self._on_redo)
+        self.ribbon.filter_month_selected.connect(self.left_nav_dock.select_month)
+
+        # Unified Undo / Redo stack listeners
+        self.undo_stack.canUndoChanged.connect(lambda _: self._update_undo_redo_enabled())
+        self.undo_stack.canRedoChanged.connect(lambda _: self._update_undo_redo_enabled())
+        self.media_viewer.undo_stack.canUndoChanged.connect(lambda _: self._update_undo_redo_enabled())
+        self.media_viewer.undo_stack.canRedoChanged.connect(lambda _: self._update_undo_redo_enabled())
+
+        # ThumbnailGridView & MediaCardDelegate
+        self.card_delegate.rating_clicked.connect(self.on_inline_rating_changed)
+        self.card_delegate.flag_toggled.connect(self.on_inline_flag_changed)
+        self.card_delegate.caption_changed.connect(self.on_inline_caption_changed)
+        self.grid_view.viewport_range_changed.connect(self.enqueue_visible_thumbnails)
+        self.grid_view.selection_ids_changed.connect(self.on_grid_selection_changed)
+        self.grid_view.media_activated.connect(self.open_single_viewer)
+
+        # Right Tag & Caption / Fine-Tune Dock
+        self.right_tag_dock.rating_edited.connect(self.apply_rating_to_selection)
+        self.right_tag_dock.flag_edited.connect(self.apply_flag_to_selection)
+        self.right_tag_dock.caption_committed.connect(self.apply_caption_to_selection)
+        self.right_tag_dock.geotag_edited.connect(self.apply_geotag_to_selection)
+        self.right_tag_dock.tag_added.connect(self.on_selection_tag_added)
+        self.right_tag_dock.tag_removed.connect(self.on_selection_tag_removed)
+        self.right_tag_dock.tag_assign_to_all_requested.connect(self.on_selection_tag_assign_to_all)
+        self.right_tag_dock.tag_filter_requested.connect(self._on_right_dock_tag_filter_requested)
+        self.right_tag_dock.person_added.connect(self.on_selection_person_added)
+        self.right_tag_dock.person_removed.connect(self.on_selection_person_removed)
+        self.right_tag_dock.person_hovered.connect(self._on_dock_person_hovered)
+        self.right_tag_dock.person_search_requested.connect(self._on_dock_person_search_requested)
+        self.right_tag_dock.person_view_suggestions_requested.connect(self._on_dock_person_view_suggestions_requested)
+        self.right_tag_dock.person_tag_as_other_requested.connect(self._on_dock_person_tag_as_other_requested)
+        self.right_tag_dock.person_set_display_pic_requested.connect(self._on_dock_person_set_display_pic_requested)
+        self.right_tag_dock.person_merge_requested.connect(self._on_dock_person_merge_requested)
+        self.right_tag_dock.person_rename_requested.connect(self._on_dock_person_rename_requested)
+        self.right_tag_dock.person_confirm_requested.connect(self._on_dock_person_confirm_requested)
+        self.right_tag_dock.person_reject_suggestion_requested.connect(self._on_dock_person_reject_suggestion_requested)
+        self.right_tag_dock.person_tag_mode_requested.connect(self._on_dock_person_tag_mode_requested)
+        self.right_tag_dock.change_time_requested.connect(self.open_change_time_taken_dialog)
+        self.right_tag_dock.filename_committed.connect(self.on_selection_filename_committed)
+        self.right_tag_dock.date_taken_edited.connect(self.on_selection_date_taken_edited)
+        self.right_tag_dock.author_committed.connect(self.on_selection_author_committed)
+        self.right_tag_dock.visibilityChanged.connect(
+            lambda vis: self.ribbon.btn_toggle_tag_pane.setChecked(vis)
+            if hasattr(self.ribbon, "btn_toggle_tag_pane")
+            else None
+        )
+
+        # Fine-Tune Sliders -> SingleMediaViewer
+        self.right_tag_dock.fine_tune_exposure_changed.connect(
+            self.media_viewer.set_exposure_parameters
+        )
+        self.right_tag_dock.fine_tune_color_changed.connect(
+            self.media_viewer.set_color_parameters
+        )
+        self.right_tag_dock.fine_tune_optics_changed.connect(
+            self.media_viewer.set_optics_parameters
+        )
+        self.right_tag_dock.fine_tune_levels_changed.connect(
+            self.media_viewer.set_levels
+        )
+        self.right_tag_dock.fine_tune_reset_requested.connect(
+            self.media_viewer.reset_recipe
+        )
+        self.right_tag_dock.fine_tune_straighten_changed.connect(
+            self.media_viewer.set_straighten
+        )
+        self.right_tag_dock.fine_tune_detail_changed.connect(
+            self.media_viewer.set_detail
+        )
+        self.right_tag_dock.compare_started.connect(
+            lambda: self.media_viewer.set_compare_mode(True)
+        )
+        self.right_tag_dock.compare_ended.connect(
+            lambda: self.media_viewer.set_compare_mode(False)
+        )
+        self.right_tag_dock.analyze_noise_requested.connect(
+            self._on_analyze_noise_requested
+        )
+        self.right_tag_dock.fine_tune_slider_pressed.connect(
+            self.media_viewer.begin_slider_adjustment
+        )
+        self.right_tag_dock.fine_tune_slider_released.connect(
+            self.media_viewer.commit_slider_adjustment
+        )
+        self.media_viewer.rotate_requested.connect(self.rotate_selection)
+        self.right_tag_dock.auto_straighten_requested.connect(
+            self.media_viewer.apply_auto_straighten
+        )
+        self.right_tag_dock.fine_tune_auto_adjust.connect(
+            self.media_viewer.apply_auto_adjust
+        )
+
+        # Keyboard shortcuts: Ctrl+I, Ctrl+F, Ctrl+T, Undo/Redo, Navigation, Select All, Cut/Copy/Paste
+        self.sc_info = QShortcut(QKeySequence("Ctrl+I"), self)
+        self.sc_info.activated.connect(lambda: self.toggle_right_pane("info"))
+
+        self.sc_add_tag = QShortcut(QKeySequence("Ctrl+T"), self)
+        self.sc_add_tag.activated.connect(self.focus_descriptive_tag_box)
+
+        self.sc_fine_tune = QShortcut(QKeySequence("Ctrl+F"), self)
+        self.sc_fine_tune.activated.connect(self._on_ctrl_f)
+
+        self.sc_undo = QShortcut(QKeySequence("Ctrl+Z"), self)
+        self.sc_undo.activated.connect(self._on_undo)
+
+        self.sc_redo = QShortcut(QKeySequence("Ctrl+Y"), self)
+        self.sc_redo.activated.connect(self._on_redo)
+
+        self.sc_back = QShortcut(QKeySequence("Alt+Left"), self)
+        self.sc_back.activated.connect(self.navigate_history_back)
+
+        self.sc_forward = QShortcut(QKeySequence("Alt+Right"), self)
+        self.sc_forward.activated.connect(self.navigate_history_forward)
+
+        self.sc_browser_back = QShortcut(QKeySequence(QKeySequence.StandardKey.Back), self)
+        self.sc_browser_back.activated.connect(self.navigate_history_back)
+
+        self.sc_browser_forward = QShortcut(QKeySequence(QKeySequence.StandardKey.Forward), self)
+        self.sc_browser_forward.activated.connect(self.navigate_history_forward)
+
+        self.sc_select_all = QShortcut(QKeySequence("Ctrl+A"), self)
+        self.sc_select_all.activated.connect(self.select_all_items)
+
+        self.sc_cut = QShortcut(QKeySequence("Ctrl+X"), self)
+        self.sc_cut.activated.connect(self.cut_selection_to_clipboard)
+
+        self.sc_copy = QShortcut(QKeySequence("Ctrl+C"), self)
+        self.sc_copy.activated.connect(self.copy_selection_to_clipboard)
+
+        self.sc_paste = QShortcut(QKeySequence("Ctrl+V"), self)
+        self.sc_paste.activated.connect(self.paste_from_clipboard)
+
+        self.sc_rot_left = QShortcut(QKeySequence("Ctrl+,"), self)
+        self.sc_rot_left.activated.connect(lambda: self.rotate_selection(clockwise=False))
+
+        self.sc_rot_right = QShortcut(QKeySequence("Ctrl+."), self)
+        self.sc_rot_right.activated.connect(lambda: self.rotate_selection(clockwise=True))
+
+        self.sc_slideshow = QShortcut(QKeySequence(Qt.Key_F12), self)
+        self.sc_slideshow.activated.connect(lambda: self.dispatch_ribbon_action("slide_show"))
+
+        self.sc_actual_size = QShortcut(QKeySequence("Ctrl+0"), self)
+        self.sc_actual_size.activated.connect(lambda: self.media_viewer.set_zoom_mode("100"))
+
+        # Star rating shortcuts (0 through 5)
+        self._rating_shortcuts = []
+        for r in range(6):
+            sc = QShortcut(QKeySequence(str(r)), self)
+            sc.activated.connect(lambda val=r: self._on_rating_shortcut(val))
+            self._rating_shortcuts.append(sc)
+
+        # Zoom in / out shortcuts (+, =, -)
+        self._zoom_shortcuts = []
+        for seq in ("+", "=", Qt.Key_Plus):
+            sc = QShortcut(QKeySequence(seq), self)
+            sc.activated.connect(self._on_zoom_in_shortcut)
+            self._zoom_shortcuts.append(sc)
+        for seq in ("-", Qt.Key_Minus):
+            sc = QShortcut(QKeySequence(seq), self)
+            sc.activated.connect(self._on_zoom_out_shortcut)
+            self._zoom_shortcuts.append(sc)
+
+        # SingleMediaViewer
+        self.media_viewer.closed.connect(self.show_grid_view)
+        self.media_viewer.navigate_requested.connect(self.navigate_single_viewer)
+        self.media_viewer.pixel_edit_saved.connect(self._on_pixel_edit_saved)
+        self.media_viewer.pixel_edit_reverted.connect(self._on_pixel_edit_reverted)
+        self.media_viewer.face_region_tagged.connect(self._on_viewer_face_region_tagged)
+        self.media_viewer.image_changed.connect(
+            self.right_tag_dock.histogram_widget.set_histogram_data
+        )
+        self.media_viewer.recipe_changed.connect(
+            self.right_tag_dock.sync_recipe
+        )
+        self.media_viewer.recipe_changed.connect(
+            lambda rec: self.ribbon.effects_gallery.set_active_effect(rec.effect)
+            if hasattr(self.ribbon, "effects_gallery")
+            else None
+        )
+        self.media_viewer.zoom_percent_changed.connect(
+            lambda _: self._update_status_zoom_toggle_button()
+        )
+
+        # Ribbon Exposure & Color popup real-time preview connections
+        self.ribbon.exposure_preview_requested.connect(self._on_exposure_preview)
+        self.ribbon.auto_exposure_preview_requested.connect(self._on_auto_exposure_preview)
+        self.ribbon.exposure_preview_cancelled.connect(self._on_preview_cancelled)
+        self.ribbon.exposure_adjustment_selected.connect(self._on_exposure_selected)
+        self.ribbon.auto_exposure_selected.connect(self._on_auto_exposure_selected)
+        self.ribbon.exposure_menu_about_to_show.connect(self._on_exposure_menu_about_to_show)
+
+        self.ribbon.color_preview_requested.connect(self._on_color_preview)
+        self.ribbon.auto_color_preview_requested.connect(self._on_auto_color_preview)
+        self.ribbon.color_preview_cancelled.connect(self._on_preview_cancelled)
+        self.ribbon.color_adjustment_selected.connect(self._on_color_selected)
+        self.ribbon.auto_color_selected.connect(self._on_auto_color_selected)
+        self.ribbon.color_menu_about_to_show.connect(self._on_color_menu_about_to_show)
+
+        # Ribbon Effects gallery hover real-time preview connections
+        self.ribbon.effects_gallery.effect_hovered.connect(self._on_effect_hovered)
+        self.ribbon.effects_gallery.effect_unhovered.connect(self._on_preview_cancelled)
+
+        # WorldMapView
+        self.map_view.close_requested.connect(self.show_grid_view)
+        self.map_view.filter_to_bbox_requested.connect(self.on_map_bbox_filter_requested)
+        self.map_view.cluster_clicked.connect(self._on_map_cluster_clicked)
+        self.map_view.cluster_clicked_data.connect(self._on_map_cluster_clicked_data)
+
+    # -------------------------------------------------------------------------
+    # Folder Scanning & Progressive Sync
+    # -------------------------------------------------------------------------
+    def _prompt_and_add_folder(self) -> None:
+        folder = QFileDialog.getExistingDirectory(self, "Add Folder to Gallery")
+        if folder:
+            self.scan_folder(folder, include_subfolders=True)
+
+    def _on_remove_folder_from_library(
+        self, folder_id: int, folder_path: str, folder_name: str
+    ) -> None:
+        display_name = folder_name or Path(folder_path).name or f"Folder {folder_id}"
+        reply = QMessageBox.question(
+            self,
+            "Remove Folder from Gallery",
+            f"Are you sure you want to remove '{display_name}' and its subfolders from the gallery?\n\n"
+            "This will remove the items from the Photo Gallery database and thumbnail cache.\n"
+            "(Your original files and folders on disk will NOT be deleted).",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+
+        removed_ids = self.catalog_repo.remove_folder_tree(folder_id)
+        for mid in removed_ids:
+            self.pixmap_cache.remove(mid)
+
+        # Clear left nav selection if removed folder was selected
+        if self.left_nav_dock._folder_id == folder_id:
+            self.left_nav_dock._folder_id = None
+            self.left_nav_dock._folder_name = "All folders"
+
+        self.refresh_navigation_and_autocomplete()
+        self.rebuild_and_run_query()
+        self.folder_watcher.update_watched_paths()
+        self.statusBar().showMessage(
+            f"Removed '{display_name}' and its subfolders from gallery.", 5000
+        )
+
+    def _on_folder_renamed(self, old_path: str, new_path: str, new_name: str) -> None:
+        """Handles inline folder renaming: updates catalog.db, watcher, and UI state."""
+        self.catalog_repo.rename_folder(old_path, new_path, new_name)
+        self._media_meta_lookup.clear()
+        if hasattr(self, "folder_watcher") and self.folder_watcher is not None:
+            self.folder_watcher.update_watched_paths()
+        if getattr(self.left_nav_dock, "_folder_name", "") == Path(old_path).name:
+            self.left_nav_dock._folder_name = new_name
+        self.refresh_navigation_and_autocomplete()
+        self.rebuild_and_run_query()
+        self.statusBar().showMessage(f"Renamed folder to '{new_name}'.", 4000)
+
+    def _on_folder_created(self, new_dir_str: str) -> None:
+        """Handles newly created folders."""
+        if hasattr(self, "folder_watcher") and self.folder_watcher is not None:
+            self.folder_watcher.update_watched_paths()
+        self.refresh_navigation_and_autocomplete()
+        self.statusBar().showMessage(f"Created new folder '{Path(new_dir_str).name}'.", 4000)
+
+    def _on_folder_deleted(self, folder_id: int, folder_path: str) -> None:
+        """Handles folder deletion moved to Recycle Bin."""
+        if folder_id:
+            removed_ids = self.catalog_repo.remove_folder_tree(folder_id)
+            for mid in removed_ids:
+                self.pixmap_cache.remove(mid)
+        self._media_meta_lookup.clear()
+        if hasattr(self, "folder_watcher") and self.folder_watcher is not None:
+            self.folder_watcher.update_watched_paths()
+        self.refresh_navigation_and_autocomplete()
+        self.rebuild_and_run_query()
+        self.statusBar().showMessage("Moved folder to Recycle Bin.", 4000)
+
+    def _on_files_dropped_on_folder(
+        self,
+        target_folder_id: int,
+        target_folder_path: str,
+        file_paths: list[str],
+        is_copy: bool = False,
+    ) -> None:
+        if not file_paths:
+            return
+
+        if not target_folder_path and target_folder_id:
+            frow = self.catalog_repo.get_folder_by_id(target_folder_id)
+            if frow:
+                target_folder_path = str(frow["path"])
+        if not target_folder_path:
+            return
+
+        target_dir = os.path.normpath(target_folder_path)
+        if not os.path.exists(target_dir):
+            try:
+                os.makedirs(target_dir, exist_ok=True)
+            except Exception:
+                pass
+
+        target_folder_name = os.path.basename(target_dir) or "folder"
+
+        if is_copy:
+            copied_count = 0
+            upsert_batch: list[dict[str, Any]] = []
+            for fpath in file_paths:
+                norm_fpath = os.path.normpath(fpath)
+                if not os.path.exists(norm_fpath):
+                    continue
+                src_fname = os.path.basename(norm_fpath)
+                dst_fname = src_fname
+                dst_path = os.path.join(target_dir, dst_fname)
+                counter = 1
+                stem, ext = os.path.splitext(src_fname)
+                while os.path.exists(dst_path):
+                    dst_fname = f"{stem} ({counter}){ext}"
+                    dst_path = os.path.join(target_dir, dst_fname)
+                    counter += 1
+                try:
+                    shutil.copy2(norm_fpath, dst_path)
+                    st = os.stat(dst_path)
+                    upsert_batch.append(
+                        {
+                            "folder_id": target_folder_id,
+                            "filename": dst_fname,
+                            "ext": ext.lower().lstrip("."),
+                            "size": int(st.st_size),
+                            "mtime": int(st.st_mtime),
+                            "date_taken": int(st.st_mtime),
+                        }
+                    )
+                    copied_count += 1
+                except Exception:
+                    pass
+            if copied_count > 0:
+                if upsert_batch:
+                    try:
+                        self.catalog_repo.bulk_upsert_media(upsert_batch)
+                    except Exception:
+                        pass
+                self._media_meta_lookup.clear()
+                self.refresh_navigation_and_autocomplete()
+                self.rebuild_and_run_query()
+                self.scan_folder(target_dir, include_subfolders=False)
+                item_word = "item" if copied_count == 1 else "items"
+                self.statusBar().showMessage(
+                    f"Copied {copied_count} {item_word} to {target_folder_name}", 4000
+                )
+            return
+
+        moves: list[dict[str, Any]] = []
+        external_count = 0
+        for fpath in file_paths:
+            p = Path(fpath)
+            if not p.exists():
+                continue
+            parent_posix = p.parent.as_posix().rstrip("/")
+            fname = p.name
+
+            conn = self.catalog_repo.engine.catalog_conn()
+            row = conn.execute(
+                """
+                SELECT m.id, m.folder_id, m.filename, f.path AS folder_path
+                FROM media m
+                JOIN folders f ON f.id = m.folder_id
+                WHERE RTRIM(REPLACE(LOWER(f.path), '\\', '/'), '/') = LOWER(?) AND LOWER(m.filename) = LOWER(?);
+                """,
+                (parent_posix, fname),
+            ).fetchone()
+
+            if row is None:
+                # File dragged from external Explorer or other folder not yet indexed!
+                dst_path = os.path.join(target_dir, fname)
+                counter = 1
+                stem, ext = os.path.splitext(fname)
+                while os.path.exists(dst_path) and dst_path.lower() != str(p).lower():
+                    dst_path = os.path.join(target_dir, f"{stem} ({counter}){ext}")
+                    counter += 1
+                try:
+                    shutil.move(str(p), dst_path)
+                    external_count += 1
+                except Exception:
+                    pass
+                continue
+
+            mid = int(row["id"])
+            src_fid = int(row["folder_id"])
+            src_fname = str(row["filename"])
+            src_path = os.path.normpath(os.path.join(str(row["folder_path"]), src_fname))
+
+            # If already in the target folder, skip
+            if src_fid == target_folder_id or os.path.dirname(src_path).lower() == target_dir.lower():
+                continue
+
+            # Check if destination filename collides
+            dst_fname = src_fname
+            dst_path = os.path.join(target_dir, dst_fname)
+            counter = 1
+            stem, ext = os.path.splitext(src_fname)
+            while os.path.exists(dst_path) and dst_path.lower() != src_path.lower():
+                dst_fname = f"{stem} ({counter}){ext}"
+                dst_path = os.path.join(target_dir, dst_fname)
+                counter += 1
+
+            moves.append({
+                "media_id": mid,
+                "src_path": src_path,
+                "dst_path": dst_path,
+                "src_folder_id": src_fid,
+                "dst_folder_id": target_folder_id,
+                "src_filename": src_fname,
+                "dst_filename": dst_fname,
+            })
+
+        if moves:
+            cmd = _MoveFilesUndoCommand(self, moves, target_folder_name)
+            self.undo_stack.push(cmd)
+            count = len(moves)
+            item_word = "item" if count == 1 else "items"
+            self.statusBar().showMessage(
+                f"Moved {count} {item_word} to {target_folder_name}", 4000
+            )
+
+        if external_count > 0:
+            self._media_meta_lookup.clear()
+            self.scan_folder(target_dir, include_subfolders=False)
+            item_word = "item" if external_count == 1 else "items"
+            self.statusBar().showMessage(
+                f"Moved {external_count} external {item_word} to {target_folder_name}", 4000
+            )
+
+    def scan_folder(
+        self,
+        folder_path: str | Path,
+        include_subfolders: bool = True,
+        blocking: bool = False,
+    ) -> None:
+        self._scanner_cancel.set()
+        self._scanner_cancel = CancellationFlag()
+        self._scanner_status_text = "Scanning: Active"
+        self._update_worker_monitor()
+        worker = FolderSyncWorker(
+            self.engine,
+            Path(folder_path),
+            include_subfolders=include_subfolders,
+            cancel_flag=self._scanner_cancel,
+        )
+        worker.signals.progress.connect(self.on_sync_progress)
+        worker.signals.finished.connect(self.on_sync_finished)
+        worker.signals.error.connect(self.on_worker_error)
+        if blocking:
+            worker.run()
+        else:
+            self.scanner_pool.start(worker)
+
+    def on_sync_progress(self, count: int, folder_name: str) -> None:
+        self._scanner_status_text = f"Scanning: {count:,} files"
+        self._update_worker_monitor()
+
+    def on_sync_finished(self, upserted_count: int, was_completed: bool) -> None:
+        self._scanner_status_text = "Scanning: Idle"
+        self._update_worker_monitor()
+        if upserted_count > 0:
+            self.statusBar().showMessage(f"✓ Synced {upserted_count:,} items", 4000)
+        elif not was_completed:
+            self.statusBar().showMessage("Scan cancelled", 3000)
+        if upserted_count > 0 or was_completed:
+            self._media_meta_lookup.clear()
+        if upserted_count > 1000 and was_completed:
+            try:
+                self.engine.analyze_catalog()
+            except Exception:
+                pass
+        self.refresh_navigation_and_autocomplete()
+        self.rebuild_and_run_query()
+        if hasattr(self, "folder_watcher"):
+            self.folder_watcher.update_watched_paths()
+        if was_completed and upserted_count > 0 and getattr(self, "find_people_enabled", False):
+            self.start_face_detection()
+
+    def _on_folder_watcher_delta(
+        self, folder_path: str, added: int, modified: int, deleted: int, folders_changed: int = 0
+    ) -> None:
+        if added > 0 or modified > 0 or deleted > 0 or folders_changed > 0:
+            self._media_meta_lookup.clear()
+            self.refresh_navigation_and_autocomplete()
+            self.rebuild_and_run_query()
+            fname = os.path.basename(folder_path) or folder_path
+            parts: list[str] = []
+            if added > 0:
+                parts.append(f"+{added}")
+            if modified > 0:
+                parts.append(f"~{modified}")
+            if deleted > 0:
+                parts.append(f"-{deleted}")
+            if folders_changed > 0:
+                parts.append(f"{folders_changed} folder(s)")
+            summary = ", ".join(parts) if parts else "updated"
+            self.statusBar().showMessage(f"✓ Synced '{fname}': {summary}", 4000)
+            if added > 0 and getattr(self, "find_people_enabled", False):
+                self.start_face_detection()
+
+    def _on_startup_reconciliation_completed(
+        self, added: int, modified: int, deleted: int, folders_changed: int
+    ) -> None:
+        if added > 0 or modified > 0 or deleted > 0 or folders_changed > 0:
+            self._media_meta_lookup.clear()
+            self.refresh_navigation_and_autocomplete()
+            self.rebuild_and_run_query()
+            parts: list[str] = []
+            if added > 0:
+                parts.append(f"+{added} item(s)")
+            if modified > 0:
+                parts.append(f"~{modified} item(s)")
+            if deleted > 0:
+                parts.append(f"-{deleted} item(s)")
+            if folders_changed > 0:
+                parts.append(f"{folders_changed} folder(s)")
+            self.statusBar().showMessage(f"✓ Startup sync: {', '.join(parts)}", 4000)
+            if added > 0 and getattr(self, "find_people_enabled", False):
+                self.start_face_detection()
+
+    def on_worker_error(self, err_msg: str) -> None:
+        self.lbl_sync_status.setText(f"⚠ {err_msg}")
+
+    def on_metadata_batch_synced(self, media_ids: list[int]) -> None:
+        self._update_worker_monitor()
+
+    # -------------------------------------------------------------------------
+    # Background Face Detection & Recognition
+    # -------------------------------------------------------------------------
+    def start_face_detection(self, force_rescan: bool = False) -> None:
+        """Launches background FaceDetectionWorker on self.face_pool if not already running."""
+        if self._is_shutting_down:
+            return
+        if self._face_worker is not None:
+            return
+        self._face_cancel.clear()
+        worker = FaceDetectionWorker(
+            engine=self.engine,
+            cancel_flag=self._face_cancel,
+            batch_size=50,
+            throttle_ms=5,
+            force_rescan=force_rescan,
+        )
+        worker.signals.batch_progressed.connect(self.on_face_batch_progressed)
+        worker.signals.suggestions_updated.connect(self.on_face_suggestions_updated)
+        worker.signals.worker_finished.connect(self.on_face_worker_finished)
+        self._face_worker = worker
+        self.face_pool.start(worker)
+
+    def stop_face_detection(self) -> None:
+        """Requests cancellation of background FaceDetectionWorker."""
+        self._face_cancel.set()
+
+    def on_face_batch_progressed(self, current: int, total: int) -> None:
+        """Updates status bar and BatchPeopleView when face scanning makes progress."""
+        if total > 0 and current < total:
+            self._face_status_text = f"Faces: {current:,}/{total:,}"
+        else:
+            self._face_status_text = "Faces: Idle"
+        if hasattr(self, "batch_people_view"):
+            self.batch_people_view.set_scan_progress(current, total)
+        self._update_worker_monitor()
+
+    def on_face_suggestions_updated(self) -> None:
+        """Refreshes navigation tree, autocomplete, and BatchPeopleView when new face suggestions or centroids appear."""
+        self.refresh_navigation_and_autocomplete()
+        if hasattr(self, "batch_people_view") and self.central_stack.currentWidget() == self.batch_people_view:
+            self.batch_people_view.refresh_suggestions()
+
+    def on_face_worker_finished(self, total_faces: int) -> None:
+        """Cleans up active worker reference and updates status bar and BatchPeopleView."""
+        self._face_worker = None
+        self._face_status_text = "Faces: Idle"
+        self._update_worker_monitor()
+        if hasattr(self, "batch_people_view"):
+            self.batch_people_view.set_scan_progress(0, 0)
+            if self.central_stack.currentWidget() == self.batch_people_view:
+                self.batch_people_view.refresh_suggestions()
+        if total_faces > 0:
+            self.statusBar().showMessage(f"✓ Face scan complete: {total_faces} faces found", 4000)
+            self.refresh_navigation_and_autocomplete()
+
+    # -------------------------------------------------------------------------
+    # Sub-10ms Query Execution & Viewport Thumbnail Prefetching
+    # -------------------------------------------------------------------------
+    def refresh_navigation_and_autocomplete(self) -> None:
+        self.left_nav_dock.refresh_trees(self.catalog_repo)
+        people = self.catalog_repo.get_people_list()
+        tags = self.catalog_repo.get_tag_tree()
+        recent = self.catalog_repo.get_recent_tags(10)
+        self.ribbon.populate_face_carousel(people)
+        self.ribbon.populate_tags_menu(tags)
+        self.right_tag_dock.set_autocomplete_lists(
+            [str(t["full_path"]) for t in tags],
+            [str(p["name"]) for p in people],
+            recent_tags=recent,
+        )
+
+    def _on_ribbon_tag_filter(self, tag_id: int | None, mode: str) -> None:
+        if tag_id is None:
+            if mode in ("AND", "OR"):
+                self.left_nav_dock.set_tag_boolean_mode(mode)  # type: ignore[arg-type]
+            else:
+                self.left_nav_dock.clear_tag_filters()
+        else:
+            self.left_nav_dock.set_tag_filter_state(tag_id, "include")
+
+    def _on_right_dock_tag_filter_requested(self, tag_id: int) -> None:
+        if self.central_stack.currentWidget() != self.grid_view:
+            self.show_grid_view()
+        self.left_nav_dock.clear_tag_filters()
+        self.left_nav_dock.set_tag_filter_state(tag_id, "include")
+
+    def _has_active_filter_facets(self) -> bool:
+        state = self.left_nav_dock.current_filter_state()
+        return bool(
+            state.get("person_ids")
+            or state.get("include_tag_ids")
+            or state.get("ratings")
+            or state.get("flagged_only")
+            or state.get("date_year") is not None
+            or state.get("date_month") is not None
+            or self._search_text
+            or self._active_bbox is not None
+            or self._active_map_media_ids is not None
+            or self._active_map_location_label is not None
+            or self._search_scope_bar_explicitly_opened
+        )
+
+    def _update_scope_bar_visibility(self) -> None:
+        state = self.left_nav_dock.current_filter_state()
+        self.scope_bar.update_active_filter_chips(
+            state, self.catalog_repo, location_label=self._active_map_location_label
+        )
+        if self.scope_bar.is_pinned() or self._has_active_filter_facets():
+            self.scope_bar.show()
+        else:
+            self.scope_bar.hide()
+
+    def _on_search_all_requested(self) -> None:
+        """Removes only the folder filter, expanding search to all photos and videos while keeping bar open and filters intact."""
+        self._search_scope_bar_explicitly_opened = True
+        self.left_nav_dock.clear_folder_filter()
+        self.scope_bar.show()
+        self.scope_bar.focus_search_input()
+
+    def _on_clear_location_filter(self) -> None:
+        """Removes the location/map filter chip and re-runs the catalog query."""
+        self._active_map_media_ids = None
+        self._active_bbox = None
+        self._active_map_location_label = None
+        self._update_scope_bar_visibility()
+        self.rebuild_and_run_query()
+
+    def toggle_search_scope_bar(self, force_visible: bool | None = None) -> None:
+        if force_visible is True:
+            self._search_scope_bar_explicitly_opened = True
+            self.scope_bar.show()
+            self.scope_bar.focus_search_input()
+        elif force_visible is False:
+            self.hide_search_scope_bar()
+        else:
+            if self.scope_bar.isVisible():
+                self.hide_search_scope_bar()
+            else:
+                self._search_scope_bar_explicitly_opened = True
+                self.scope_bar.show()
+                self.scope_bar.focus_search_input()
+
+    def hide_search_scope_bar(self) -> None:
+        self._search_scope_bar_explicitly_opened = False
+        self.scope_bar.set_pinned(False)
+        self.scope_bar.clear_search_input()
+        self.scope_bar.hide()
+        if self._search_text:
+            self._search_text = ""
+            self.rebuild_and_run_query()
+
+    def _on_scope_bar_pin_toggled(self, pinned: bool) -> None:
+        if not pinned and not self._has_active_filter_facets():
+            self.hide_search_scope_bar()
+
+    def _on_ctrl_f(self) -> None:
+        if self.central_stack.currentWidget() == self.media_viewer:
+            self.toggle_right_pane("fine_tune")
+        else:
+            self.toggle_search_scope_bar(force_visible=True)
+
+    def focus_descriptive_tag_box(self) -> None:
+        """Opens the Tag & Caption pane, focuses Add descriptive tags, and brings up suggestions (Ctrl+T)."""
+        self.right_tag_dock.focus_descriptive_tag_input()
+        if hasattr(self.ribbon, "btn_toggle_tag_pane"):
+            self.ribbon.btn_toggle_tag_pane.setChecked(True)
+
+    def _on_undo(self) -> None:
+        if self.central_stack.currentWidget() == self.media_viewer:
+            if self.media_viewer.undo_stack.canUndo():
+                self.media_viewer.undo_stack.undo()
+            elif self.undo_stack.canUndo():
+                self.undo_stack.undo()
+        else:
+            self.undo_stack.undo()
+
+    def _on_redo(self) -> None:
+        if self.central_stack.currentWidget() == self.media_viewer:
+            if self.media_viewer.undo_stack.canRedo():
+                self.media_viewer.undo_stack.redo()
+            elif self.undo_stack.canRedo():
+                self.undo_stack.redo()
+        else:
+            self.undo_stack.redo()
+
+    def _update_undo_redo_enabled(self) -> None:
+        try:
+            if self.central_stack.currentWidget() == self.media_viewer:
+                can_u = self.media_viewer.undo_stack.canUndo() or self.undo_stack.canUndo()
+                can_r = self.media_viewer.undo_stack.canRedo() or self.undo_stack.canRedo()
+                self.ribbon.set_undo_enabled(can_u)
+                self.ribbon.set_redo_enabled(can_r)
+            else:
+                self.ribbon.set_undo_enabled(self.undo_stack.canUndo())
+                self.ribbon.set_redo_enabled(self.undo_stack.canRedo())
+        except (RuntimeError, AttributeError):
+            pass
+
+    def _update_nav_buttons(self) -> None:
+        can_back = self._nav_index > 0
+        can_forward = 0 <= self._nav_index < len(self._nav_history) - 1
+        if hasattr(self, "ribbon"):
+            self.ribbon.set_back_enabled(can_back)
+            self.ribbon.set_forward_enabled(can_forward)
+
+    def _push_nav_state(self, state: dict[str, Any]) -> None:
+        """Pushes a view/filter navigation state onto the history stack."""
+        if self._is_navigating_history:
+            return
+        if 0 <= self._nav_index < len(self._nav_history):
+            if self._nav_history[self._nav_index] == state:
+                return
+        self._nav_history = self._nav_history[: self._nav_index + 1]
+        self._nav_history.append(state)
+        self._nav_index = len(self._nav_history) - 1
+        self._update_nav_buttons()
+
+    def navigate_history_back(self) -> None:
+        """Navigates to the previous state in history (browser/explorer style)."""
+        if self._nav_index > 0:
+            self._nav_index -= 1
+            state = self._nav_history[self._nav_index]
+            self._apply_nav_state(state)
+
+    def navigate_history_forward(self) -> None:
+        """Navigates to the next state in history (browser/explorer style)."""
+        if 0 <= self._nav_index < len(self._nav_history) - 1:
+            self._nav_index += 1
+            state = self._nav_history[self._nav_index]
+            self._apply_nav_state(state)
+
+    def _apply_nav_state(self, state: dict[str, Any]) -> None:
+        """Applies a view/filter navigation state restored from the history stack."""
+        self._is_navigating_history = True
+        try:
+            view = state.get("view", "grid")
+            if view == "people_directory":
+                if hasattr(self, "media_viewer") and self.central_stack.currentWidget() == self.media_viewer:
+                    self.show_grid_view()
+                self._active_map_media_ids = None
+                self.grid_view.set_person_header(None)
+                self.card_delegate.set_face_crop_person_id(None)
+                if hasattr(self, "people_directory_view"):
+                    self.central_stack.setCurrentWidget(self.people_directory_view)
+                    self.people_directory_view.refresh_directory()
+                    self.scope_bar.set_scope_label("People directory")
+                    self.ribbon.set_scope_label("People")
+                    self.lbl_sync_status.setText("People directory")
+            elif view == "unnamed_person":
+                if hasattr(self, "media_viewer") and self.central_stack.currentWidget() == self.media_viewer:
+                    self.show_grid_view()
+                face_ids = state.get("face_ids", [])
+                thumb_blob = state.get("thumb_blob")
+                mids = state.get("media_ids", [])
+                self._active_map_media_ids = set(mids) if mids else None
+                self.central_stack.setCurrentWidget(self.grid_view)
+                self.ribbon.set_active_mode("grid")
+                self.person_header_bar.load_unnamed_person(face_ids, thumb_blob, photo_count=len(mids))
+                self.grid_view.person_header_bar.show()
+                self.grid_view._update_top_bars_geometry()
+                self.scope_bar.set_scope_label("People to Name")
+                self.ribbon.set_scope_label("People")
+                self.rebuild_and_run_query()
+            elif view == "viewer":
+                mid = state.get("media_id")
+                if mid is not None:
+                    self.open_single_viewer(mid)
+            else:
+                # Standard grid view (view == "grid" or legacy filter dict)
+                if hasattr(self, "media_viewer") and self.central_stack.currentWidget() == self.media_viewer:
+                    self.show_grid_view()
+                self._active_map_media_ids = None
+                filt = state.get("filter", state)
+                self.left_nav_dock.restore_filter_state(filt)
+                if self.central_stack.currentWidget() != self.grid_view:
+                    self.central_stack.setCurrentWidget(self.grid_view)
+                    self.ribbon.set_active_mode("grid")
+                selected_pids = filt.get("person_ids", ())
+                if len(selected_pids) == 1:
+                    self.grid_view.set_person_header(selected_pids[0])
+                else:
+                    self.grid_view.set_person_header(None)
+                    self.card_delegate.set_face_crop_person_id(None)
+                folder_name = self.left_nav_dock.selected_folder_name()
+                scope_desc = f"Folder: {folder_name}" if folder_name else ""
+                self.scope_bar.set_scope_label(scope_desc)
+                self.ribbon.set_scope_label(scope_desc or "All photos and videos")
+                self._update_scope_bar_visibility()
+                self.rebuild_and_run_query()
+        finally:
+            self._is_navigating_history = False
+            self._update_nav_buttons()
+
+    def _on_nav_filter_changed(self) -> None:
+        self._active_bbox = None
+        folder_name = self.left_nav_dock.selected_folder_name()
+        scope_desc = f"Folder: {folder_name}" if folder_name else ""
+        self.scope_bar.set_scope_label(scope_desc)
+        self.ribbon.set_scope_label(scope_desc or "All photos and videos")
+        self._update_scope_bar_visibility()
+        if not self._is_navigating_history:
+            filt = self.left_nav_dock.current_filter_state()
+            state = dict(filt)
+            state["view"] = "grid"
+            state["filter"] = filt
+            self._push_nav_state(state)
+
+        # If navigating away while in people directory, return central stack to grid view
+        if hasattr(self, "people_directory_view") and self.central_stack.currentWidget() == self.people_directory_view:
+            self.central_stack.setCurrentWidget(self.grid_view)
+
+        # Check if single person filter is active -> show PersonHeaderBar
+        selected_pids = self.left_nav_dock.current_filter_state().get("person_ids", ())
+        if len(selected_pids) == 1:
+            self.grid_view.set_person_header(selected_pids[0])
+        else:
+            self.grid_view.set_person_header(None)
+            self.card_delegate.set_face_crop_person_id(None)
+
+        self.rebuild_and_run_query()
+
+    def open_people_directory_view(self) -> None:
+        """Opens Immich / Google Photos inspired People Directory grid."""
+        if hasattr(self, "people_directory_view"):
+            self._active_map_media_ids = None
+            self.grid_view.set_person_header(None)
+            self.card_delegate.set_face_crop_person_id(None)
+            self.central_stack.setCurrentWidget(self.people_directory_view)
+            self.people_directory_view.refresh_directory()
+            self.scope_bar.set_scope_label("People directory")
+            self.ribbon.set_scope_label("People")
+            self.lbl_sync_status.setText("People directory")
+            self._push_nav_state({"view": "people_directory"})
+
+    def _on_directory_person_selected(self, person_id: int) -> None:
+        """Navigates from People Directory into a single person's photo timeline."""
+        self._active_map_media_ids = None
+        if hasattr(self, "left_nav_dock"):
+            self.left_nav_dock.select_person(person_id)
+
+    def _on_directory_unnamed_selected(self, face_ids: list[int], thumb_blob: bytes | None) -> None:
+        """Navigates from People Directory to view photos containing this unnamed person."""
+        if not face_ids:
+            return
+        conn = self.engine.catalog_conn()
+        placeholders = ",".join("?" for _ in face_ids)
+        rows = conn.execute(
+            f"SELECT DISTINCT media_id FROM media_people WHERE id IN ({placeholders});",
+            face_ids,
+        ).fetchall()
+        mids = [r[0] for r in rows]
+
+        self._active_map_media_ids = set(mids)
+        self.central_stack.setCurrentWidget(self.grid_view)
+        self.person_header_bar.load_unnamed_person(face_ids, thumb_blob, photo_count=len(mids))
+        self.grid_view.person_header_bar.show()
+        self.grid_view._update_top_bars_geometry()
+        self.rebuild_and_run_query()
+        self.scope_bar.set_scope_label("People to Name")
+        self.ribbon.set_scope_label("People")
+        self._push_nav_state({
+            "view": "unnamed_person",
+            "face_ids": list(face_ids),
+            "thumb_blob": thumb_blob,
+            "media_ids": mids,
+        })
+
+    def _on_unnamed_person_named(self, name: str, face_ids: list[int]) -> None:
+        """Assigns a name to an unnamed person group directly from the Person Header Bar."""
+        self.people_directory_view._on_name_cluster(name, face_ids)
+        conn = self.engine.catalog_conn()
+        p = conn.execute("SELECT id FROM people WHERE name = ? COLLATE NOCASE;", (name.strip(),)).fetchone()
+        if p:
+            self._active_map_media_ids = None
+            self.left_nav_dock.select_person(int(p[0]))
+
+    def _on_person_view_mode_changed(self, mode: str) -> None:
+        """Toggles between full photos and face crops in the grid view."""
+        if mode == "crops":
+            selected_pids = self.left_nav_dock.current_filter_state().get("person_ids", ())
+            pid = selected_pids[0] if selected_pids else None
+            self.card_delegate.set_face_crop_person_id(pid)
+        else:
+            self.card_delegate.set_face_crop_person_id(None)
+        self.grid_view.viewport().update()
+
+    def on_arrange_changed(self, mode: str, reverse: bool) -> None:
+        self._arrange_by = mode  # type: ignore[assignment]
+        self._reverse_sort = bool(reverse)
+        self._group_by = mode
+        self._group_reverse = bool(reverse)
+        self.rebuild_and_run_query()
+
+    def set_group_by(self, mode: str, reverse: bool | None = None) -> None:
+        self._group_by = str(mode).lower()
+        if reverse is not None:
+            self._group_reverse = bool(reverse)
+        self.rebuild_and_run_query()
+
+    def set_sort_by(self, mode: str, reverse: bool | None = None) -> None:
+        self._sort_by = str(mode).lower()
+        if reverse is not None:
+            self._sort_reverse = bool(reverse)
+        self.rebuild_and_run_query()
+
+    def _on_details_overlay_changed(self, details: set[str]) -> None:
+        self.card_delegate.set_visible_details(details)
+        self.grid_view.viewport().update()
+
+    def on_quick_find_person(self, person_id: int) -> None:
+        toggle = self.ribbon.is_people_and_mode()
+        self.left_nav_dock.select_person(person_id, toggle=toggle)
+
+    def _on_search_text_changed(self, text: str) -> None:
+        self._search_text = text
+        if hasattr(self, "scope_bar") and self.scope_bar.search_text() != text:
+            self.scope_bar.txt_search.blockSignals(True)
+            self.scope_bar.txt_search.setText(text)
+            self.scope_bar.txt_search.blockSignals(False)
+        self.rebuild_and_run_query()
+
+    def rebuild_and_run_query(self, preserve_selection: bool = True) -> list[MediaItemRecord]:
+        """Builds FilterQuerySpec, queries catalog.db in <10ms, and updates CatalogListModel."""
+        prev_ids = list(self._selected_ids)
+        headers_enabled = (self._group_by != "none")
+        spec: FilterQuerySpec = self.left_nav_dock.build_filter_spec(
+            arrange_by=self._arrange_by,
+            reverse_sort=self._reverse_sort,
+            search_text=self._search_text,
+            bbox=self._active_bbox,
+            media_ids=tuple(self._active_map_media_ids) if self._active_map_media_ids else None,
+            group_by=self._group_by,
+            sort_by=self._sort_by,
+            sort_reverse=self._sort_reverse,
+            group_reverse=self._group_reverse,
+        )
+        records = self.catalog_repo.query_media_records(spec)
+        self.catalog_model.set_records(records, group_headers_enabled=headers_enabled)
+        if preserve_selection and prev_ids:
+            self.grid_view.set_selected_media_ids(prev_ids)
+        else:
+            self._update_status_counts()
+        self.enqueue_visible_thumbnails(self.grid_view.visible_media_ids(buffer_rows=2))
+        return records
+
+    def _ensure_media_path_lookup(self, media_ids: list[int]) -> None:
+        missing = [mid for mid in media_ids if mid not in self._media_meta_lookup]
+        if not missing:
+            return
+        conn = self.engine.catalog_conn()
+        placeholders = ",".join("?" for _ in missing)
+        rows = conn.execute(
+            f"""
+            SELECT m.id, f.path || '/' || m.filename AS full_path, m.mtime, m.is_video, m.orientation
+            FROM media m
+            JOIN folders f ON f.id = m.folder_id
+            WHERE m.id IN ({placeholders});
+            """,
+            missing,
+        ).fetchall()
+        for r in rows:
+            self._media_meta_lookup[int(r["id"])] = (
+                str(r["full_path"]),
+                int(r["mtime"]),
+                bool(r["is_video"]),
+                int(r["orientation"] or 1),
+            )
+
+    def enqueue_visible_thumbnails(self, media_ids: list[int]) -> None:
+        """
+        Cancels out-of-view pending thumbnail workers and schedules ThumbnailDecodeWorker
+        tasks for visible media_ids not yet in LruCache.
+        """
+        if self._is_shutting_down or not media_ids:
+            return
+
+        visible_set = set(media_ids)
+        for mid, flag in list(self._active_thumb_flags.items()):
+            if mid not in visible_set:
+                flag.set()
+                self._active_thumb_flags.pop(mid, None)
+
+        uncached = [mid for mid in media_ids if mid not in self.pixmap_cache]
+        if not uncached:
+            return
+
+        self._ensure_media_path_lookup(uncached[:64])
+        for mid in uncached[:64]:
+            if mid in self._active_thumb_flags:
+                continue
+            meta = self._media_meta_lookup.get(mid)
+            if meta is None:
+                continue
+            fpath, mtime, is_video, orientation = meta
+            cflag = CancellationFlag()
+            self._active_thumb_flags[mid] = cflag
+            worker = ThumbnailDecodeWorker(
+                self.engine,
+                media_id=mid,
+                file_path=fpath,
+                mtime=mtime,
+                is_video=is_video,
+                orientation=orientation,
+                cancel_flag=cflag,
+            )
+            worker.signals.thumbnail_ready.connect(self.on_thumbnail_decoded)
+            self.thumbnail_pool.start(worker)
+
+    def on_thumbnail_decoded(self, media_id: int, qimage: QImage) -> None:
+        """
+        Slot executed strictly on the GUI thread: converts QImage -> QPixmap,
+        stores in LruCache, and notifies CatalogListModel to repaint the cell.
+        """
+        self._active_thumb_flags.pop(media_id, None)
+        if qimage.isNull():
+            return
+        pixmap = QPixmap.fromImage(qimage)
+        self.pixmap_cache.put(media_id, pixmap)
+        self.catalog_model.notify_pixmap_ready(media_id)
+
+    def _start_async_avatar_backfill(self) -> None:
+        """Launches background QRunnable to generate avatar crops for people without blocking startup."""
+        if self._is_shutting_down:
+            return
+        signals = _AvatarBackfillSignals(self)
+        signals.finished.connect(self._on_avatar_backfill_completed)
+        worker = _AvatarBackfillWorker(self.engine, signals)
+        self.scanner_pool.start(worker)
+
+    def _on_avatar_backfill_completed(self, updated_count: int) -> None:
+        """Called on GUI thread when avatar backfill produces new thumbnails."""
+        if updated_count > 0:
+            try:
+                self.left_nav_dock.reload_people_tree()
+                people = self.catalog_repo.get_people_list()
+                self.ribbon.home_face_carousel.load_people(people)
+            except Exception:
+                pass
+
+    # -------------------------------------------------------------------------
+    # Selection & Instant Metadata Edits
+    # -------------------------------------------------------------------------
+    def on_grid_selection_changed(
+        self, selected_ids: list[int], lead_id: int
+    ) -> None:
+        self._selected_ids = list(selected_ids)
+        self._lead_selected_id = lead_id if lead_id > 0 else (selected_ids[0] if selected_ids else None)
+        self._update_status_counts()
+        self._update_revert_button_state()
+
+        has_sel = len(self._selected_ids) > 0
+        for btn in (
+            getattr(self.ribbon, "btn_edit_crop", None),
+            getattr(self.ribbon, "btn_edit_red_eye", None),
+            getattr(self.ribbon, "btn_edit_retouch", None),
+            getattr(self.ribbon, "btn_edit_straighten", None),
+            getattr(self.ribbon, "btn_edit_fine_tune", None),
+        ):
+            if btn is not None:
+                btn.setEnabled(has_sel)
+
+        summary = self.catalog_repo.get_selection_summary(self._selected_ids)
+        self.right_tag_dock.bind_selection(self._selected_ids, summary)
+
+    def _update_status_counts(self) -> None:
+        total = self.catalog_model.total_media_count
+        self.right_tag_dock.set_total_view_count(total)
+        sel = len(self._selected_ids)
+        item_word = "item" if total == 1 else "items"
+        if sel > 0:
+            self.lbl_status_counts.setText(f"{total} {item_word}, {sel} selected")
+        else:
+            self.lbl_status_counts.setText(f"{total} {item_word}")
+
+    def on_inline_rating_changed(self, media_id: int, rating: int) -> None:
+        cmd = _RatingUndoCommand(self, [media_id], rating)
+        self.undo_stack.push(cmd)
+
+    def on_inline_flag_changed(self, media_id: int, new_flag: int) -> None:
+        cmd = _FlagUndoCommand(self, [media_id], new_flag)
+        self.undo_stack.push(cmd)
+
+    def on_inline_caption_changed(self, media_id: int, new_caption: str) -> None:
+        cmd = _CaptionUndoCommand(self, [media_id], new_caption)
+        self.undo_stack.push(cmd)
+
+    def _on_rating_shortcut(self, rating: int) -> None:
+        focused = QApplication.focusWidget()
+        if isinstance(focused, (QLineEdit, QTextEdit, QPlainTextEdit)):
+            return
+        self.apply_rating_to_selection(rating)
+
+    def _on_zoom_in_shortcut(self) -> None:
+        focused = QApplication.focusWidget()
+        if isinstance(focused, (QLineEdit, QTextEdit, QPlainTextEdit)):
+            return
+        self.dispatch_ribbon_action("zoom_in")
+
+    def _on_zoom_out_shortcut(self) -> None:
+        focused = QApplication.focusWidget()
+        if isinstance(focused, (QLineEdit, QTextEdit, QPlainTextEdit)):
+            return
+        self.dispatch_ribbon_action("zoom_out")
+
+    def get_active_target_ids(self) -> list[int]:
+        if (
+            self.central_stack.currentWidget() == self.media_viewer
+            and self.media_viewer.current_media_id is not None
+        ):
+            return [self.media_viewer.current_media_id]
+        return list(self._selected_ids)
+
+    def apply_rating_to_selection(self, rating: int) -> None:
+        target_ids = self.get_active_target_ids()
+        if not target_ids:
+            return
+        cmd = _RatingUndoCommand(self, target_ids, rating)
+        self.undo_stack.push(cmd)
+
+    def apply_flag_to_selection(self, flag: int) -> None:
+        target_ids = self.get_active_target_ids()
+        if not target_ids:
+            return
+        cmd = _FlagUndoCommand(self, target_ids, flag)
+        self.undo_stack.push(cmd)
+
+    def apply_caption_to_selection(self, caption: str) -> None:
+        target_ids = self.get_active_target_ids()
+        if not target_ids:
+            return
+        cmd = _CaptionUndoCommand(self, target_ids, caption)
+        self.undo_stack.push(cmd)
+
+    def apply_geotag_to_selection(self, location_name: str) -> None:
+        target_ids = self.get_active_target_ids()
+        if not target_ids:
+            return
+        lat, lon, loc_label = resolve_location_query(location_name)
+        cmd = _GeotagUndoCommand(self, target_ids, lat, lon, loc_label)
+        self.undo_stack.push(cmd)
+
+    def on_selection_tag_added(self, tag_path: str) -> None:
+        target_ids = self.get_active_target_ids()
+        if not target_ids or not tag_path.strip():
+            return
+        tid = self.catalog_repo.create_tag(tag_path.strip())
+        self.catalog_repo.assign_tag(target_ids, tid)
+        for mid in target_ids:
+            self._media_meta_lookup.pop(mid, None)
+        self.metadata_sync_daemon.notify_dirty()
+        self.refresh_navigation_and_autocomplete()
+        if self.central_stack.currentWidget() == self.grid_view:
+            self.rebuild_and_run_query(preserve_selection=True)
+        summary = self.catalog_repo.get_selection_summary(target_ids)
+        self.right_tag_dock.bind_selection(target_ids, summary)
+
+    def on_selection_tag_removed(self, tag_id: int) -> None:
+        target_ids = self.get_active_target_ids()
+        if not target_ids:
+            return
+        self.catalog_repo.remove_tag(target_ids, tag_id)
+        for mid in target_ids:
+            self._media_meta_lookup.pop(mid, None)
+        self.metadata_sync_daemon.notify_dirty()
+        self.refresh_navigation_and_autocomplete()
+        if self.central_stack.currentWidget() == self.grid_view:
+            self.rebuild_and_run_query(preserve_selection=True)
+        summary = self.catalog_repo.get_selection_summary(target_ids)
+        self.right_tag_dock.bind_selection(target_ids, summary)
+
+    def on_selection_tag_assign_to_all(self, tag_id: int) -> None:
+        target_ids = self.get_active_target_ids()
+        if not target_ids:
+            return
+        self.catalog_repo.assign_tag(target_ids, tag_id)
+        for mid in target_ids:
+            self._media_meta_lookup.pop(mid, None)
+        self.metadata_sync_daemon.notify_dirty()
+        self.refresh_navigation_and_autocomplete()
+        if self.central_stack.currentWidget() == self.grid_view:
+            self.rebuild_and_run_query(preserve_selection=True)
+        summary = self.catalog_repo.get_selection_summary(target_ids)
+        self.right_tag_dock.bind_selection(target_ids, summary)
+
+    def on_selection_person_added(self, person_name: str) -> None:
+        target_ids = (
+            [self.media_viewer.current_media_id]
+            if self.central_stack.currentWidget() == self.media_viewer
+            and self.media_viewer.current_media_id is not None
+            else list(self._selected_ids)
+        )
+        if not target_ids or not person_name.strip():
+            return
+        for mid in target_ids:
+            self.catalog_repo.assign_person(mid, person_name.strip())
+        self.refresh_navigation_and_autocomplete()
+        summary = self.catalog_repo.get_selection_summary(target_ids)
+        self.right_tag_dock.bind_selection(target_ids, summary)
+        if (
+            self.central_stack.currentWidget() == self.media_viewer
+            and self.media_viewer.current_media_id is not None
+        ):
+            detail = self.catalog_repo.get_media_detail(self.media_viewer.current_media_id)
+            self.media_viewer.render_face_regions(detail.get("people", []))
+        if getattr(self, "find_people_enabled", True):
+            self.start_face_detection()
+
+    def on_selection_person_removed(self, person_id: int) -> None:
+        target_ids = (
+            [self.media_viewer.current_media_id]
+            if self.central_stack.currentWidget() == self.media_viewer
+            and self.media_viewer.current_media_id is not None
+            else list(self._selected_ids)
+        )
+        if not target_ids:
+            return
+        for mid in target_ids:
+            self.catalog_repo.remove_person_tag(mid, person_id)
+        self.refresh_navigation_and_autocomplete()
+        summary = self.catalog_repo.get_selection_summary(target_ids)
+        self.right_tag_dock.bind_selection(target_ids, summary)
+        if (
+            self.central_stack.currentWidget() == self.media_viewer
+            and self.media_viewer.current_media_id is not None
+        ):
+            detail = self.catalog_repo.get_media_detail(self.media_viewer.current_media_id)
+            self.media_viewer.render_face_regions(detail.get("people", []))
+
+    def _on_dock_person_hovered(self, person_id: int, is_hovered: bool) -> None:
+        if self.central_stack.currentWidget() == self.media_viewer:
+            self.media_viewer.highlight_person_face(person_id if is_hovered else None)
+
+    def _on_dock_person_search_requested(self, person_id: int, person_name: str) -> None:
+        if self.central_stack.currentWidget() != self.grid_view:
+            self.show_grid_view()
+        self.left_nav_dock.show()
+        self.left_nav_dock.root_people.setExpanded(True)
+        for i in range(self.left_nav_dock.root_people.childCount()):
+            child = self.left_nav_dock.root_people.child(i)
+            data = child.data(0, Qt.UserRole)
+            if isinstance(data, dict) and data.get("type") == "person" and data.get("id") == person_id:
+                self.left_nav_dock.tree.setCurrentItem(child)
+                self.left_nav_dock._emit_current_filter()
+                return
+        self.current_filter.person_ids = [person_id]
+        self.rebuild_and_run_query()
+
+    def _on_dock_person_view_suggestions_requested(self, person_id: int, person_name: str) -> None:
+        self.open_batch_people_view(person_id=person_id)
+
+    def _on_dock_person_tag_as_other_requested(self, person_id: int, old_name: str = "") -> None:
+        target_ids = (
+            [self.media_viewer.current_media_id]
+            if self.central_stack.currentWidget() == self.media_viewer
+            and self.media_viewer.current_media_id is not None
+            else list(self._selected_ids)
+        )
+        if not target_ids:
+            return
+        people_rows = self.catalog_repo.get_people_list()
+        new_name, new_pid = TagSomeoneDialog.prompt(people_rows, self, title="Tag someone")
+        if not new_name or not new_name.strip():
+            return
+        new_name_clean = new_name.strip()
+        if new_pid is None or new_pid < 0:
+            new_pid = self.catalog_repo.upsert_person(new_name_clean)
+        for mid in target_ids:
+            detail = self.catalog_repo.get_media_detail(mid)
+            existing_rect = None
+            for p in detail.get("people", []):
+                if p.get("person_id") == person_id or (old_name and p.get("name") == old_name):
+                    if p.get("rect_x") is not None:
+                        existing_rect = (
+                            float(p["rect_x"]),
+                            float(p["rect_y"]),
+                            float(p["rect_w"]),
+                            float(p["rect_h"]),
+                        )
+                    break
+            self.catalog_repo.remove_person_tag(mid, person_id)
+            self.catalog_repo.assign_person(mid, new_name_clean, existing_rect)
+        self.refresh_navigation_and_autocomplete()
+        summary = self.catalog_repo.get_selection_summary(target_ids)
+        self.right_tag_dock.bind_selection(target_ids, summary)
+        if (
+            self.central_stack.currentWidget() == self.media_viewer
+            and self.media_viewer.current_media_id is not None
+        ):
+            detail = self.catalog_repo.get_media_detail(self.media_viewer.current_media_id)
+            self.media_viewer.render_face_regions(detail.get("people", []))
+        if getattr(self, "find_people_enabled", True):
+            self.start_face_detection()
+
+    def _on_dock_person_confirm_requested(self, person_id: int, face_id: int) -> None:
+        if face_id > 0 and person_id > 0:
+            self.catalog_repo.confirm_face_suggestion(face_id, person_id)
+        self.refresh_navigation_and_autocomplete()
+        target_ids = (
+            [self.media_viewer.current_media_id]
+            if self.central_stack.currentWidget() == self.media_viewer
+            and self.media_viewer.current_media_id is not None
+            else list(self._selected_ids)
+        )
+        if target_ids:
+            summary = self.catalog_repo.get_selection_summary(target_ids)
+            self.right_tag_dock.bind_selection(target_ids, summary)
+        if (
+            self.central_stack.currentWidget() == self.media_viewer
+            and self.media_viewer.current_media_id is not None
+        ):
+            detail = self.catalog_repo.get_media_detail(self.media_viewer.current_media_id)
+            self.media_viewer.render_face_regions(detail.get("people", []))
+        self.lbl_sync_status.setText("✓ Confirmed face suggestion")
+        if getattr(self, "find_people_enabled", True):
+            self.start_face_detection()
+
+    def _on_dock_person_reject_suggestion_requested(self, person_id: int, face_id: int) -> None:
+        if face_id > 0:
+            self.catalog_repo.reject_face_suggestion(face_id, person_id if person_id > 0 else None)
+        target_ids = (
+            [self.media_viewer.current_media_id]
+            if self.central_stack.currentWidget() == self.media_viewer
+            and self.media_viewer.current_media_id is not None
+            else list(self._selected_ids)
+        )
+        if target_ids:
+            summary = self.catalog_repo.get_selection_summary(target_ids)
+            self.right_tag_dock.bind_selection(target_ids, summary)
+        if (
+            self.central_stack.currentWidget() == self.media_viewer
+            and self.media_viewer.current_media_id is not None
+        ):
+            detail = self.catalog_repo.get_media_detail(self.media_viewer.current_media_id)
+            self.media_viewer.render_face_regions(detail.get("people", []))
+        self.lbl_sync_status.setText("Face suggestion dismissed")
+
+    def _on_dock_person_set_display_pic_requested(self, person_id: int) -> None:
+        target_ids = (
+            [self.media_viewer.current_media_id]
+            if self.central_stack.currentWidget() == self.media_viewer
+            and self.media_viewer.current_media_id is not None
+            else list(self._selected_ids)
+        )
+        if not target_ids:
+            return
+        mid = target_ids[0]
+        ok = self.catalog_repo.set_person_display_picture(person_id, mid)
+        if ok:
+            self.refresh_navigation_and_autocomplete()
+            summary = self.catalog_repo.get_selection_summary(target_ids)
+            self.right_tag_dock.bind_selection(target_ids, summary)
+            self.lbl_sync_status.setText("✓ Updated contact display picture")
+
+    def _on_dock_person_merge_requested(self, source_person_id: int, source_name: str) -> None:
+        people_rows = self.catalog_repo.get_people_list()
+        candidates = [
+            (int(r["id"]), str(r["name"]))
+            for r in people_rows
+            if int(r["id"]) != int(source_person_id)
+        ]
+        if not candidates:
+            QMessageBox.information(
+                self,
+                "Merge People",
+                "There are no other people contacts in the catalog to merge with.",
+            )
+            return
+        names = [name for _pid, name in candidates]
+        target_name, ok = QInputDialog.getItem(
+            self,
+            "Merge People",
+            f"Merge '{source_name}' into:",
+            names,
+            0,
+            False,
+        )
+        if not ok or not target_name:
+            return
+        target_id = next((pid for pid, nm in candidates if nm == target_name), None)
+        if target_id is None:
+            return
+        self.catalog_repo.merge_people(source_person_id, target_id)
+        self.refresh_navigation_and_autocomplete()
+        target_ids = (
+            [self.media_viewer.current_media_id]
+            if self.central_stack.currentWidget() == self.media_viewer
+            and self.media_viewer.current_media_id is not None
+            else list(self._selected_ids)
+        )
+        if target_ids:
+            summary = self.catalog_repo.get_selection_summary(target_ids)
+            self.right_tag_dock.bind_selection(target_ids, summary)
+        if (
+            self.central_stack.currentWidget() == self.media_viewer
+            and self.media_viewer.current_media_id is not None
+        ):
+            detail = self.catalog_repo.get_media_detail(self.media_viewer.current_media_id)
+            self.media_viewer.render_face_regions(detail.get("people", []))
+        self.lbl_sync_status.setText(f"✓ Merged '{source_name}' into '{target_name}'")
+
+    def _on_dock_person_rename_requested(self, person_id: int, old_name: str) -> None:
+        new_name, ok = QInputDialog.getText(
+            self,
+            "Rename Contact",
+            "Enter new name for contact:",
+            text=old_name,
+        )
+        if not ok or not new_name.strip() or new_name.strip() == old_name:
+            return
+        self.catalog_repo.rename_person(person_id, new_name.strip())
+        self.refresh_navigation_and_autocomplete()
+        target_ids = (
+            [self.media_viewer.current_media_id]
+            if self.central_stack.currentWidget() == self.media_viewer
+            and self.media_viewer.current_media_id is not None
+            else list(self._selected_ids)
+        )
+        if target_ids:
+            summary = self.catalog_repo.get_selection_summary(target_ids)
+            self.right_tag_dock.bind_selection(target_ids, summary)
+        if (
+            self.central_stack.currentWidget() == self.media_viewer
+            and self.media_viewer.current_media_id is not None
+        ):
+            detail = self.catalog_repo.get_media_detail(self.media_viewer.current_media_id)
+            self.media_viewer.render_face_regions(detail.get("people", []))
+        self.lbl_sync_status.setText(f"✓ Renamed '{old_name}' to '{new_name.strip()}'")
+
+    def _on_dock_person_tag_mode_requested(self) -> None:
+        """Triggered when user clicks 'Add people tags' in Right Dock or 'People tag' on Ribbon."""
+        if self.central_stack.currentWidget() != self.media_viewer:
+            sel = self.grid_view.selected_media_ids() or list(self._selected_ids)
+            if not sel:
+                return
+            if not self.open_single_viewer(sel[0]):
+                return
+        self.media_viewer.start_face_tagging_mode()
+
+    def on_selection_filename_committed(self, new_fname: str) -> None:
+        target_ids = (
+            [self.media_viewer.current_media_id]
+            if self.central_stack.currentWidget() == self.media_viewer
+            and self.media_viewer.current_media_id is not None
+            else list(self._selected_ids)
+        )
+        if len(target_ids) != 1:
+            return
+        mid = target_ids[0]
+        new_fname = new_fname.strip()
+        if not new_fname:
+            return
+        try:
+            detail = self.catalog_repo.get_media_detail(mid)
+            old_fname = str(detail["filename"])
+            if old_fname == new_fname:
+                return
+            folder_p = Path(detail["folder_path"])
+            old_path = folder_p / old_fname
+            new_path = folder_p / new_fname
+            if new_path.exists():
+                QMessageBox.warning(self, "File Exists", f"A file named '{new_fname}' already exists.")
+                summary = self.catalog_repo.get_selection_summary(target_ids)
+                self.right_tag_dock.bind_selection(target_ids, summary)
+                return
+            if old_path.exists():
+                old_path.rename(new_path)
+            self.catalog_repo.rename_media(mid, new_fname)
+            self._media_meta_lookup.pop(mid, None)
+            self.rebuild_and_run_query()
+            summary = self.catalog_repo.get_selection_summary(target_ids)
+            self.right_tag_dock.bind_selection(target_ids, summary)
+            self.lbl_sync_status.setText(f"✓ Renamed file to '{new_fname}'")
+        except Exception as e:
+            QMessageBox.warning(self, "Rename Error", f"Could not rename file: {e}")
+
+    def on_selection_date_taken_edited(self, new_ts: int) -> None:
+        target_ids = (
+            [self.media_viewer.current_media_id]
+            if self.central_stack.currentWidget() == self.media_viewer
+            and self.media_viewer.current_media_id is not None
+            else list(self._selected_ids)
+        )
+        if not target_ids:
+            return
+        if len(target_ids) == 1:
+            self.catalog_repo.set_date_taken(target_ids, new_ts)
+        else:
+            lead_id = self._lead_selected_id or target_ids[0]
+            self.catalog_repo.apply_relative_time_shift(target_ids, lead_id, new_ts)
+        self.refresh_navigation_and_autocomplete()
+        self.rebuild_and_run_query()
+        summary = self.catalog_repo.get_selection_summary(target_ids)
+        self.right_tag_dock.bind_selection(target_ids, summary)
+        self.lbl_sync_status.setText(f"✓ Updated Date taken for {len(target_ids)} file(s)")
+
+    def on_selection_author_committed(self, new_author: str) -> None:
+        target_ids = (
+            [self.media_viewer.current_media_id]
+            if self.central_stack.currentWidget() == self.media_viewer
+            and self.media_viewer.current_media_id is not None
+            else list(self._selected_ids)
+        )
+        if not target_ids:
+            return
+        self.catalog_repo.set_author(target_ids, new_author.strip())
+        self.rebuild_and_run_query()
+        summary = self.catalog_repo.get_selection_summary(target_ids)
+        self.right_tag_dock.bind_selection(target_ids, summary)
+        self.lbl_sync_status.setText(f"✓ Updated Author for {len(target_ids)} file(s)")
+
+    def _on_viewer_face_region_tagged(
+        self,
+        media_id: int,
+        person_name: str,
+        rx: float,
+        ry: float,
+        rw: float,
+        rh: float,
+    ) -> None:
+        self.catalog_repo.assign_person(media_id, person_name, (rx, ry, rw, rh))
+        self.refresh_navigation_and_autocomplete()
+        detail = self.catalog_repo.get_media_detail(media_id)
+        self.media_viewer.render_face_regions(detail.get("people", []))
+        target_ids = (
+            [media_id]
+            if self.central_stack.currentWidget() == self.media_viewer
+            else list(self._selected_ids)
+        )
+        if media_id in target_ids:
+            summary = self.catalog_repo.get_selection_summary(target_ids)
+            self.right_tag_dock.bind_selection(target_ids, summary)
+        if getattr(self, "find_people_enabled", True):
+            self.start_face_detection()
+
+    # -------------------------------------------------------------------------
+    # Relative 'Change Time Taken' Dialog Integration
+    # -------------------------------------------------------------------------
+    def open_change_time_taken_dialog(
+        self, auto_accept_timestamp: int | None = None
+    ) -> ChangeTimeTakenDialog | None:
+        if not self._selected_ids:
+            return None
+        lead_id = self._lead_selected_id or self._selected_ids[0]
+        lead_detail = self.catalog_repo.get_media_detail(lead_id)
+        lead_dt = int(
+            lead_detail["date_taken"]
+            if lead_detail["date_taken"] is not None
+            else lead_detail["mtime"]
+        )
+        dlg = ChangeTimeTakenDialog(
+            lead_filename=str(lead_detail["filename"]),
+            lead_date_taken=lead_dt,
+            selected_count=len(self._selected_ids),
+            parent=self,
+        )
+        if auto_accept_timestamp is not None:
+            self.catalog_repo.apply_relative_time_shift(
+                self._selected_ids, lead_id, int(auto_accept_timestamp)
+            )
+            self.refresh_navigation_and_autocomplete()
+            self.rebuild_and_run_query()
+            summary = self.catalog_repo.get_selection_summary(self._selected_ids)
+            self.right_tag_dock.bind_selection(self._selected_ids, summary)
+            return dlg
+
+        if dlg.exec() == ChangeTimeTakenDialog.Accepted:
+            self.catalog_repo.apply_relative_time_shift(
+                self._selected_ids, lead_id, dlg.new_lead_timestamp()
+            )
+            self.refresh_navigation_and_autocomplete()
+            self.rebuild_and_run_query()
+            summary = self.catalog_repo.get_selection_summary(self._selected_ids)
+            self.right_tag_dock.bind_selection(self._selected_ids, summary)
+        return dlg
+
+    # -------------------------------------------------------------------------
+    # View Switching (Grid <-> Single Media Viewer <-> World Map)
+    # -------------------------------------------------------------------------
+    def open_single_viewer(self, media_id: int) -> bool:
+        try:
+            detail = self.catalog_repo.get_media_detail(media_id)
+        except KeyError:
+            return False
+        full_path = Path(detail["folder_path"]) / str(detail["filename"])
+        ok = self.media_viewer.load_media(
+            media_id=media_id,
+            file_path=full_path,
+            is_video=bool(detail["is_video"]),
+            people_regions=detail.get("people", []),
+            orientation=int(detail.get("orientation") or 1),
+        )
+        if ok:
+            if self.central_stack.currentWidget() != self.media_viewer:
+                self._prev_ribbon_tab = self.ribbon.tab_widget.currentIndex()
+                if self.isVisible():
+                    self._nav_dock_was_visible = not self.left_nav_dock.isHidden()
+                self.left_nav_dock.hide()
+            self.central_stack.setCurrentWidget(self.media_viewer)
+            self.ribbon.set_active_mode("viewer")
+            self.ribbon.tab_widget.setCurrentWidget(self.ribbon.tab_edit)
+            self._update_undo_redo_enabled()
+            if hasattr(self, "scope_bar"):
+                self.scope_bar.hide()
+            self.btn_status_prev.setVisible(True)
+            self.btn_status_next.setVisible(True)
+            self.btn_status_fit.setVisible(True)
+            self._update_status_zoom_toggle_button()
+
+            fname = str(detail["filename"])
+            self.setWindowTitle(f"{fname} - Photo Gallery")
+            if hasattr(self.ribbon, "lbl_app_title"):
+                self.ribbon.lbl_app_title.setText(f"{fname} - Photo Gallery")
+
+            self._selected_ids = [media_id]
+            self._lead_selected_id = media_id
+            summary = self.catalog_repo.get_selection_summary([media_id])
+            self.right_tag_dock.bind_selection([media_id], summary)
+
+            if hasattr(self.ribbon, "btn_toggle_tag_pane"):
+                self.ribbon.btn_toggle_tag_pane.setChecked(self.right_tag_dock.isVisible())
+
+            records = self.catalog_model._records
+            pos = self.catalog_model.record_index_for_id(media_id)
+            if pos is not None and records:
+                self.lbl_status_counts.setText(f"{pos + 1} of {len(records)}")
+
+            if (
+                self.right_tag_dock.isVisible()
+                and self.right_tag_dock.current_mode() == "fine_tune"
+            ):
+                self.right_tag_dock.sync_recipe(self.media_viewer.current_recipe)
+                self.right_tag_dock.histogram_widget.set_histogram_data(
+                    self.media_viewer.current_pil_image
+                )
+
+            if hasattr(self.ribbon, "effects_gallery"):
+                pixmaps = self.media_viewer.get_effect_preview_pixmaps(42, 28)
+                if pixmaps:
+                    self.ribbon.effects_gallery.update_live_thumbnails(pixmaps)
+            self._update_revert_button_state()
+            if not self._is_navigating_history:
+                if 0 <= self._nav_index < len(self._nav_history) and self._nav_history[self._nav_index].get("view") == "viewer":
+                    self._nav_history[self._nav_index]["media_id"] = media_id
+                else:
+                    self._push_nav_state({"view": "viewer", "media_id": media_id})
+        return ok
+
+    def show_grid_view(self) -> None:
+        if self.media_viewer.has_unsaved_adjustments():
+            self.media_viewer.save_current_image_with_backup()
+            self.rebuild_and_run_query()
+        self.media_viewer.media_player.stop()
+        self.central_stack.setCurrentWidget(self.grid_view)
+        self.ribbon.set_active_mode("grid")
+        self._update_undo_redo_enabled()
+        if hasattr(self, "_prev_ribbon_tab"):
+            self.ribbon.tab_widget.setCurrentIndex(self._prev_ribbon_tab)
+        is_nav_vis = getattr(self, "_nav_dock_was_visible", True)
+        self.left_nav_dock.setVisible(is_nav_vis)
+        if is_nav_vis:
+            self.left_nav_dock.show()
+            self.left_nav_dock.setMinimumWidth(190)
+            self.resizeDocks([self.left_nav_dock], [230], Qt.Horizontal)
+        if hasattr(self.ribbon, "btn_toggle_nav_pane"):
+            self.ribbon.btn_toggle_nav_pane.setChecked(is_nav_vis)
+        self.btn_status_prev.setVisible(False)
+        self.btn_status_next.setVisible(False)
+        self.btn_status_fit.setVisible(False)
+        self.btn_status_actual.setVisible(False)
+
+        self.setWindowTitle("Photo Gallery")
+        if hasattr(self.ribbon, "lbl_app_title"):
+            self.ribbon.lbl_app_title.setText("Photo Gallery")
+
+        if self.right_tag_dock.current_mode() == "fine_tune":
+            self.right_tag_dock.set_mode("info")
+
+        if hasattr(self.ribbon, "btn_toggle_tag_pane"):
+            self.ribbon.btn_toggle_tag_pane.setChecked(self.right_tag_dock.isVisible())
+
+        self._update_status_counts()
+        self._update_scope_bar_visibility()
+        self._update_revert_button_state()
+
+        # Rebind selection from grid to right dock
+        sel = self.grid_view.selected_media_ids() or list(self._selected_ids)
+        summary = self.catalog_repo.get_selection_summary(sel)
+        self.right_tag_dock.bind_selection(sel, summary)
+
+    def show_map_view(self) -> None:
+        self.central_stack.setCurrentWidget(self.map_view)
+        self.ribbon.set_active_mode("map")
+        self.map_view.set_viewport_bbox(-85.0, 85.0, -180.0, 180.0, self.catalog_repo)
+
+    def open_batch_people_view(self, person_id: int | None = None) -> None:
+        """Toggles between standard grid view and BatchPeopleView."""
+        if self.central_stack.currentWidget() == self.batch_people_view and person_id is None:
+            self.close_batch_people_view()
+            return
+        self.central_stack.setCurrentWidget(self.batch_people_view)
+        # Ensure face detection worker runs if enabled or if no unassigned faces exist yet
+        if getattr(self, "find_people_enabled", True) and "PYTEST_CURRENT_TEST" not in os.environ:
+            pending_rows = self.catalog_repo.get_pending_face_suggestions(
+                limit=1, min_confidence=0.0, include_unnamed=True
+            )
+            force_rescan = (
+                not pending_rows
+                and not getattr(self, "_auto_face_rescan_triggered", False)
+            )
+            if force_rescan:
+                self._auto_face_rescan_triggered = True
+            self.start_face_detection(force_rescan=force_rescan)
+        if person_id is not None:
+            self.batch_people_view.filter_to_person(person_id)
+        else:
+            self.batch_people_view.refresh_suggestions()
+        self.left_nav_dock.hide()
+        self.right_tag_dock.hide()
+        self.lbl_sync_status.setText("Batch people tag view")
+
+    def close_batch_people_view(self) -> None:
+        """Returns to standard grid view from BatchPeopleView."""
+        self.central_stack.setCurrentWidget(self.grid_view)
+        self.left_nav_dock.show()
+        self.refresh_navigation_and_autocomplete()
+        self.rebuild_and_run_query()
+        self.lbl_sync_status.setText("✓ Returned to gallery")
+
+    def _on_batch_faces_confirmed(self, face_ids: list[int], person_id: int) -> None:
+        """Slot called when faces are confirmed in BatchPeopleView."""
+        self.refresh_navigation_and_autocomplete()
+        if hasattr(self, "people_directory_view"):
+            self.people_directory_view.refresh_directory()
+        if hasattr(self, "grid_view") and getattr(self.grid_view, "person_header_bar", None) is not None:
+            if self.grid_view.person_header_bar.isVisible() and self.grid_view.person_header_bar.current_person_id == person_id:
+                self.grid_view.person_header_bar.load_person(person_id)
+        self.lbl_sync_status.setText(f"✓ Confirmed {len(face_ids)} face(s)")
+        if getattr(self, "find_people_enabled", True):
+            self.start_face_detection()
+
+    def _on_batch_faces_rejected(self, face_ids: list[int]) -> None:
+        """Slot called when faces are rejected in BatchPeopleView."""
+        self.lbl_sync_status.setText(f"Rejected {len(face_ids)} face suggestion(s)")
+
+    def navigate_single_viewer(self, delta: int) -> bool:
+        curr_id = self.media_viewer.current_media_id
+        if curr_id is None:
+            return False
+        if self.media_viewer.has_unsaved_adjustments():
+            self.media_viewer.save_current_image_with_backup()
+            self.rebuild_and_run_query()
+        records = self.catalog_model._records
+        if not records:
+            return False
+        pos = self.catalog_model.record_index_for_id(curr_id)
+        if pos is None:
+            return False
+        next_pos = (pos + delta) % len(records)
+        next_id = records[next_pos].id
+        self._selected_ids = [next_id]
+        self._lead_selected_id = next_id
+        summary = self.catalog_repo.get_selection_summary([next_id])
+        self.right_tag_dock.bind_selection([next_id], summary)
+        ok = self.open_single_viewer(next_id)
+        if (
+            ok
+            and self.right_tag_dock.isVisible()
+            and self.right_tag_dock.current_mode() == "fine_tune"
+        ):
+            self.right_tag_dock.histogram_widget.set_histogram_data(
+                self.media_viewer.current_pil_image
+            )
+        return ok
+
+    def on_map_bbox_filter_requested(
+        self, min_lat: float, max_lat: float, min_lon: float, max_lon: float
+    ) -> None:
+        self._active_bbox = (min_lat, max_lat, min_lon, max_lon)
+        self._active_map_media_ids = None
+        self._active_map_location_label = f"Map Area ({min_lat:.1f}°, {min_lon:.1f}° to {max_lat:.1f}°, {max_lon:.1f}°)"
+        self.ribbon.set_scope_label(
+            f"Map Area ({min_lat:.1f}°..{max_lat:.1f}°, {min_lon:.1f}°..{max_lon:.1f}°)"
+        )
+        self.show_grid_view()
+        self.rebuild_and_run_query()
+
+    def _on_map_cluster_clicked(self, media_ids: list[int]) -> None:
+        if not media_ids:
+            return
+        if len(media_ids) == 1:
+            self.open_single_viewer(int(media_ids[0]))
+        else:
+            self.filter_gallery_to_map_selection(media_ids)
+
+    def _on_map_cluster_clicked_data(self, media_ids: list[int], label: str = "") -> None:
+        if not media_ids:
+            return
+        if len(media_ids) == 1:
+            self.open_single_viewer(int(media_ids[0]))
+        else:
+            loc_label = label or f"{len(media_ids)} items"
+            self.filter_gallery_to_map_selection(media_ids, loc_label)
+
+    def filter_gallery_to_map_selection(
+        self, media_ids: list[int], location_label: str = ""
+    ) -> None:
+        if hasattr(self, "left_nav_dock") and self.left_nav_dock is not None:
+            self.left_nav_dock.clear_all_filters()
+        self._search_text = ""
+        if hasattr(self, "search_box") and self.search_box is not None:
+            self.search_box.clear()
+        if hasattr(self, "ribbon") and hasattr(self.ribbon, "search_input") and self.ribbon.search_input is not None:
+            self.ribbon.search_input.clear()
+        self._active_tag_ids = []
+        self._active_person_ids = []
+        self._active_date_filter = None
+        self._active_rating_filter = 0
+        self._active_flag_filter = False
+
+        self._active_map_media_ids = list(media_ids)
+        self._active_bbox = None
+        count = len(media_ids)
+        display_label = (
+            f"📍 {location_label} ({count} items)"
+            if location_label and f"{count}" not in location_label
+            else f"📍 {location_label or f'{count} items'}"
+        )
+        self._active_map_location_label = display_label
+        self.ribbon.set_scope_label(display_label)
+        self.show_grid_view()
+        self.rebuild_and_run_query()
+
+    def _on_analyze_noise_requested(self) -> None:
+        """Runs the MAD noise profile analysis on the active photo and updates the denoise slider."""
+        if self.media_viewer.master_np_rgb is not None:
+            from src.imaging.opencv_engine import analyze_noise_profile
+            rec_denoise = analyze_noise_profile(self.media_viewer.master_np_rgb)
+            self.right_tag_dock.set_denoise_analyzed_value(rec_denoise)
+            self.media_viewer.set_detail(
+                int(self.media_viewer.current_recipe.sharpen),
+                int(round(rec_denoise)),
+            )
+
+    def _batch_apply_image_adjustment(
+        self, media_ids: list[int], action_name: str, adjust_fn: Any
+    ) -> None:
+        """
+        Applies a non-destructive image adjustment to 1 or N photos in batch:
+        1. Backs up original to .OriginalFiles/<filename> if not already backed up
+        2. Adjusts pixels via OpenCV/PIL pipeline
+        3. Preserves metadata (EXIF/XMP)
+        4. Invalidates thumbnails and refreshes grid
+        """
+        if not media_ids:
+            return
+        valid_ids = []
+        for mid in media_ids:
+            detail = self.catalog_repo.get_media_detail(mid)
+            if detail and not detail.get("is_video"):
+                valid_ids.append(mid)
+        if not valid_ids:
+            return
+
+        total = len(valid_ids)
+        self.show_status_message(f"Applying {action_name} to {total} photo(s)...", 3000)
+        import shutil
+        import numpy as np
+        from PIL import Image
+
+        for idx, mid in enumerate(valid_ids):
+            detail = self.catalog_repo.get_media_detail(mid)
+            if not detail:
+                continue
+            folder_p = detail.get("folder_path")
+            fname = detail.get("filename")
+            if not folder_p or not fname:
+                continue
+            fpath = Path(folder_p) / fname
+            if not fpath.exists():
+                continue
+
+            # Ensure .OriginalFiles backup exists
+            orig_dir = fpath.parent / ".OriginalFiles"
+            orig_dir.mkdir(parents=True, exist_ok=True)
+            backup_path = orig_dir / fpath.name
+            if not backup_path.exists():
+                shutil.copy2(fpath, backup_path)
+
+            try:
+                with Image.open(fpath) as pil_img:
+                    exif_bytes = pil_img.info.get("exif")
+                    icc_profile = pil_img.info.get("icc_profile")
+                    rgb_arr = np.array(pil_img.convert("RGB"))
+
+                adjusted_arr = adjust_fn(rgb_arr)
+                out_img = Image.fromarray(adjusted_arr)
+                save_kwargs: dict[str, Any] = {"quality": 95}
+                if exif_bytes:
+                    save_kwargs["exif"] = exif_bytes
+                if icc_profile:
+                    save_kwargs["icc_profile"] = icc_profile
+                out_img.save(fpath, **save_kwargs)
+
+                self._on_pixel_edit_saved(mid, str(backup_path))
+            except Exception as e:
+                import logging
+                logging.getLogger(__name__).error("Failed to batch adjust %s: %s", fpath, e)
+
+        self.rebuild_and_run_query()
+        self.show_status_message(f"✓ {action_name} applied to {total} photo(s)", 4000)
+
+    def _batch_auto_adjust(self, media_ids: list[int]) -> None:
+        from src.imaging.opencv_engine import analyze_auto_adjust, render_adjusted_image
+
+        def _adjust(rgb: np.ndarray) -> np.ndarray:
+            rec = analyze_auto_adjust(rgb)
+            return render_adjusted_image(rgb, rec)
+
+        self._batch_apply_image_adjustment(media_ids, "Auto Adjust", _adjust)
+
+    def _batch_apply_effect(self, media_ids: list[int], effect_name: str) -> None:
+        from src.imaging.opencv_engine import _apply_effect_grade
+
+        def _adjust(rgb: np.ndarray) -> np.ndarray:
+            return _apply_effect_grade(rgb, effect_name)
+
+        label = effect_name.replace("_", " ").title()
+        self._batch_apply_image_adjustment(media_ids, f"Effect ({label})", _adjust)
+
+    def _on_pixel_edit_saved(self, media_id: int, backup_path: str) -> None:
+        self.catalog_repo.record_pixel_edit_backup(media_id, backup_path)
+        self.thumb_repo.invalidate([media_id])
+        if media_id in self.pixmap_cache:
+            del self.pixmap_cache[media_id]
+        self._media_meta_lookup.pop(media_id, None)
+        self._update_revert_button_state()
+
+    def _on_pixel_edit_reverted(self, media_id: int) -> None:
+        self.catalog_repo.clear_pixel_edit_backup(media_id)
+        self.thumb_repo.invalidate([media_id])
+        if media_id in self.pixmap_cache:
+            del self.pixmap_cache[media_id]
+        self._media_meta_lookup.pop(media_id, None)
+        self._update_revert_button_state()
+
+        # Restore original face boxes from the restored original file
+        try:
+            detail = self.catalog_repo.get_media_detail(media_id)
+            fpath = Path(detail.get("file_path", ""))
+            if fpath.exists():
+                meta = extract_media_metadata(fpath, is_video=bool(detail.get("is_video")))
+                self.catalog_repo.restore_original_faces(media_id, meta.get("people", []))
+        except Exception:
+            pass
+
+        if (
+            self.central_stack.currentWidget() == self.media_viewer
+            and self.media_viewer.current_media_id == media_id
+        ):
+            try:
+                updated_detail = self.catalog_repo.get_media_detail(media_id)
+                self.media_viewer.render_face_regions(updated_detail.get("people", []))
+            except Exception:
+                pass
+
+    # -------------------------------------------------------------------------
+    # Ribbon & Status Bar Actions (Rotate, Delete, Fix, Options, Face Rescan)
+    # -------------------------------------------------------------------------
+    def rescan_faces_for_selection(self, media_ids: Sequence[int] | None = None) -> None:
+        """Rescans face detection for selected media files."""
+        if media_ids is None:
+            media_ids = (
+                [self.media_viewer.current_media_id]
+                if self.central_stack.currentWidget() == self.media_viewer
+                and self.media_viewer.current_media_id is not None
+                else (self.grid_view.selected_media_ids() or list(self._selected_ids))
+            )
+        if not media_ids:
+            return
+        count = self.catalog_repo.reset_face_scan_for_media(media_ids)
+        self.statusBar().showMessage(f"Rescanning {count} photo(s) for faces...", 4000)
+        self.lbl_sync_status.setText(f"Rescanning {count} photo(s) for faces...")
+        self.start_face_detection()
+
+    def rotate_selection(self, clockwise: bool = True) -> None:
+        target_ids = (
+            [self.media_viewer.current_media_id]
+            if self.central_stack.currentWidget() == self.media_viewer
+            and self.media_viewer.current_media_id is not None
+            else (self.grid_view.selected_media_ids() or list(self._selected_ids))
+        )
+        if not target_ids:
+            return
+        cmd = _RotateUndoCommand(self, target_ids, clockwise)
+        self.undo_stack.push(cmd)
+
+    def _rotate_internal(self, target_ids: list[int], clockwise: bool) -> None:
+        if not target_ids:
+            return
+        rot_map = self.catalog_repo.rotate_lossless(target_ids, clockwise=clockwise)
+        rot_angle = 90 if clockwise else -90
+        rot_transform = QTransform().rotate(rot_angle)
+
+        for mid in target_ids:
+            # 1. Update in-memory thumbnail cache immediately
+            old_pm = self.pixmap_cache.get(mid)
+            if old_pm is not None and not old_pm.isNull():
+                self.pixmap_cache.put(mid, old_pm.transformed(rot_transform, Qt.SmoothTransformation))
+
+            if (
+                self.grid_view.catalog_model
+                and self.grid_view.catalog_model.pixmap_cache is not self.pixmap_cache
+            ):
+                m_old_pm = self.grid_view.catalog_model.pixmap_cache.get(mid)
+                if m_old_pm is not None and not m_old_pm.isNull():
+                    self.grid_view.catalog_model.pixmap_cache.put(
+                        mid, m_old_pm.transformed(rot_transform, Qt.SmoothTransformation)
+                    )
+
+            # 2. Rotate WebP thumbnail in thumbnails.db directly
+            old_blob = self.thumb_repo.get_webp_blob(mid)
+            if old_blob:
+                qimg = QImage.fromData(old_blob, "WEBP")
+                if not qimg.isNull():
+                    rot_qimg = qimg.transformed(rot_transform, Qt.SmoothTransformation)
+                    ba = QByteArray()
+                    buf = QBuffer(ba)
+                    buf.open(QIODevice.WriteOnly)
+                    rot_qimg.save(buf, "WEBP", 80)
+                    buf.close()
+                    m_detail = self.catalog_repo.get_media_detail(mid)
+                    mtime = int(m_detail.get("mtime") or 0)
+                    self.thumb_repo.put_webp_blob(
+                        mid, bytes(ba.data()), mtime, width=rot_qimg.width(), height=rot_qimg.height()
+                    )
+            else:
+                self.thumb_repo.invalidate([mid])
+
+            self._media_meta_lookup.pop(mid, None)
+
+        # 3. Update catalog model records immediately with new orientation & swapped dimensions
+        if self.grid_view.catalog_model:
+            for mid, new_orient in rot_map.items():
+                self.grid_view.catalog_model.update_items_metadata([mid], orientation=new_orient)
+
+        # 4. If single viewer is currently viewing one of the rotated photos, rotate in memory directly!
+        if (
+            self.central_stack.currentWidget() == self.media_viewer
+            and self.media_viewer.current_media_id in target_ids
+        ):
+            self.media_viewer.apply_in_memory_rotation(clockwise=clockwise)
+
+        self.rebuild_and_run_query()
+        self.grid_view.viewport().update()
+
+    def select_all_items(self) -> None:
+        """Selects all items currently displayed in the thumbnail grid."""
+        if self.central_stack.currentWidget() == self.grid_view:
+            self.grid_view.selectAll()
+
+    def cut_selection_to_clipboard(self) -> None:
+        """Cuts file paths of currently selected media to the system clipboard (files & text)."""
+        self._copy_or_cut_selection(is_cut=True)
+
+    def copy_selection_to_clipboard(self) -> None:
+        """Copies file paths of currently selected media to the system clipboard (files & text)."""
+        self._copy_or_cut_selection(is_cut=False)
+
+    def _copy_or_cut_selection(self, is_cut: bool = False) -> None:
+        target_ids = (
+            [self.media_viewer.current_media_id]
+            if self.central_stack.currentWidget() == self.media_viewer
+            and self.media_viewer.current_media_id is not None
+            else (self.grid_view.selected_media_ids() or list(self._selected_ids))
+        )
+        if not target_ids:
+            return
+        urls: list[QUrl] = []
+        paths: list[str] = []
+        for mid in target_ids:
+            try:
+                detail = self.catalog_repo.get_media_detail(mid)
+                fpath = Path(detail["folder_path"]) / str(detail["filename"])
+                if fpath.exists():
+                    urls.append(QUrl.fromLocalFile(str(fpath.resolve())))
+                    paths.append(str(fpath.resolve()))
+            except Exception:
+                pass
+        if urls:
+            self._copied_urls = list(urls)
+            effect = QByteArray(b"\x02\x00\x00\x00" if is_cut else b"\x05\x00\x00\x00")
+
+            def _make_mime() -> QMimeData:
+                m = QMimeData()
+                m.setUrls(urls)
+                m.setText("\r\n".join(paths))
+                # Windows Explorer Preferred DropEffect: 0x02 = Move/Cut, 0x05 = Copy
+                m.setData("Preferred DropEffect", effect)
+                m.setData('application/x-qt-windows-mime;value="Preferred DropEffect"', effect)
+                return m
+
+            self._clipboard_mime = _make_mime()
+            try:
+                QApplication.clipboard().setMimeData(_make_mime())
+            except Exception:
+                pass
+            action_name = "Cut" if is_cut else "Copied"
+            item_w = "file" if len(urls) == 1 else "files"
+            self.lbl_sync_status.setText(f"✓ {action_name} {len(urls)} {item_w} to clipboard")
+            self.statusBar().showMessage(f"{action_name} {len(urls)} {item_w} to clipboard", 3000)
+
+    def paste_from_clipboard(self) -> None:
+        """Pastes files from clipboard into the currently active or selected folder."""
+        clipboard = QApplication.clipboard()
+        mime = clipboard.mimeData()
+        if not mime or not mime.hasUrls():
+            mime = getattr(self, "_clipboard_mime", None)
+        if not mime or not mime.hasUrls():
+            self.statusBar().showMessage("Clipboard is empty or does not contain files.", 3000)
+            return
+
+        file_paths: list[str] = []
+        for u in mime.urls():
+            if u.isLocalFile():
+                p = u.toLocalFile()
+                if os.path.exists(p):
+                    file_paths.append(p)
+        if not file_paths:
+            self.statusBar().showMessage("No valid local files in clipboard.", 3000)
+            return
+
+        # Determine target folder
+        target_folder_id = getattr(self.left_nav_dock, "_folder_id", None)
+        target_folder_path: str | None = None
+
+        if target_folder_id is not None:
+            folder_row = self.catalog_repo.get_folder_by_id(target_folder_id)
+            if folder_row:
+                target_folder_path = folder_row["path"]
+
+        # If no folder selected in left dock, check lead or selected media's folder
+        if not target_folder_path:
+            sel = self.grid_view.selected_media_ids() or list(self._selected_ids)
+            if sel:
+                detail = self.catalog_repo.get_media_detail(sel[0])
+                target_folder_id = detail.get("folder_id")
+                target_folder_path = detail.get("folder_path")
+
+        # If still none, fallback to first folder in catalog
+        if not target_folder_path:
+            all_f = self.catalog_repo.get_folders()
+            if all_f:
+                target_folder_id = all_f[0]["id"]
+                target_folder_path = all_f[0]["path"]
+
+        if not target_folder_path or target_folder_id is None:
+            self.statusBar().showMessage("Please select a target folder to paste into.", 3000)
+            return
+
+        # Check Preferred DropEffect: 0x02 = Move/Cut, 0x05 = Copy
+        effect = bytes(mime.data("Preferred DropEffect"))
+        if not effect:
+            effect = bytes(mime.data('application/x-qt-windows-mime;value="Preferred DropEffect"'))
+        is_copy = True
+        if effect.startswith(b"\x02"):
+            is_copy = False
+
+        self._on_files_dropped_on_folder(
+            target_folder_id=target_folder_id,
+            target_folder_path=target_folder_path,
+            file_paths=file_paths,
+            is_copy=is_copy,
+        )
+
+        # If cut/move, reset clipboard drop effect to copy so subsequent pastes copy
+        if not is_copy:
+            def _make_copy_mime() -> QMimeData:
+                nm = QMimeData()
+                nm.setUrls([QUrl.fromLocalFile(p) for p in file_paths if os.path.exists(p)])
+                nm.setData("Preferred DropEffect", QByteArray(b"\x05\x00\x00\x00"))
+                nm.setData(
+                    'application/x-qt-windows-mime;value="Preferred DropEffect"',
+                    QByteArray(b"\x05\x00\x00\x00"),
+                )
+                return nm
+
+            self._clipboard_mime = _make_copy_mime()
+            try:
+                clipboard.setMimeData(_make_copy_mime())
+            except Exception:
+                pass
+
+    def delete_selection_to_recycle_bin(self) -> int:
+        if not self._selected_ids:
+            return 0
+        try:
+            from send2trash import send2trash
+        except ImportError:
+            send2trash = None
+
+        deleted_count = 0
+        conn = self.engine.catalog_conn()
+        for mid in list(self._selected_ids):
+            try:
+                detail = self.catalog_repo.get_media_detail(mid)
+                fpath = Path(detail["folder_path"]) / str(detail["filename"])
+                if fpath.exists():
+                    if send2trash is not None:
+                        send2trash(str(fpath))
+                    else:
+                        fpath.unlink()
+                backup_path = detail.get("original_backup_path")
+                if backup_path and os.path.exists(backup_path):
+                    try:
+                        if send2trash is not None:
+                            send2trash(str(backup_path))
+                        else:
+                            os.unlink(backup_path)
+                    except OSError:
+                        pass
+                with self.engine.write_lock:
+                    conn.execute("DELETE FROM media WHERE id = ?;", (mid,))
+                    conn.commit()
+                deleted_count += 1
+            except Exception:
+                pass
+
+        self.thumb_repo.invalidate(self._selected_ids)
+        self._selected_ids.clear()
+        self._lead_selected_id = None
+        self.refresh_navigation_and_autocomplete()
+        self.rebuild_and_run_query()
+        return deleted_count
+
+    def set_desktop_background_for_media(self, media_id: int) -> bool:
+        """Sets the selected media file as the Windows desktop wallpaper."""
+        try:
+            detail = self.catalog_repo.get_media_detail(media_id)
+            fpath = Path(detail["folder_path"]) / str(detail["filename"])
+            if not fpath.exists():
+                return False
+            import sys
+            if sys.platform == "win32":
+                import ctypes
+                SPI_SETDESKWALLPAPER = 20
+                SPIF_UPDATEINIFILE = 1
+                SPIF_SENDWININICHANGE = 2
+                ctypes.windll.user32.SystemParametersInfoW(
+                    SPI_SETDESKWALLPAPER,
+                    0,
+                    str(fpath.resolve()),
+                    SPIF_UPDATEINIFILE | SPIF_SENDWININICHANGE,
+                )
+                self.lbl_sync_status.setText(f"✓ Set '{fpath.name}' as desktop background")
+                return True
+        except Exception as e:
+            self.lbl_sync_status.setText(f"⚠ Could not set desktop background: {e}")
+        return False
+
+    def open_file_location_for_media(self, media_id: int) -> bool:
+        """Reveals the media file in Windows Explorer with the item selected."""
+        try:
+            detail = self.catalog_repo.get_media_detail(media_id)
+            fpath = Path(detail["folder_path"]) / str(detail["filename"])
+            if not fpath.exists():
+                return False
+            import os, subprocess, sys
+            norm = os.path.normpath(str(fpath.resolve()))
+            if sys.platform == "win32":
+                subprocess.Popen(f'explorer.exe /select,"{norm}"')
+            else:
+                subprocess.Popen(["xdg-open", str(fpath.parent.resolve())])
+            return True
+        except Exception as e:
+            self.lbl_sync_status.setText(f"⚠ Could not open file location: {e}")
+        return False
+
+    def open_with_app_for_media(self, media_id: int, app_choice: str = "default") -> bool:
+        """Opens the media file with the chosen app, system default viewer, or Windows Open With dialog."""
+        try:
+            detail = self.catalog_repo.get_media_detail(media_id)
+            fpath = Path(detail["folder_path"]) / str(detail["filename"])
+            if not fpath.exists():
+                return False
+            import subprocess
+            import sys
+            if app_choice == "choose":
+                if sys.platform == "win32":
+                    import ctypes
+                    class OPENASINFO(ctypes.Structure):
+                        _fields_ = [
+                            ("pcszFile", ctypes.c_wchar_p),
+                            ("pcszClass", ctypes.c_wchar_p),
+                            ("oaifInFlags", ctypes.c_uint32),
+                        ]
+                    info = OPENASINFO()
+                    info.pcszFile = str(fpath.resolve())
+                    info.pcszClass = None
+                    info.oaifInFlags = 0x05  # OAIF_EXEC | OAIF_ALLOW_REGISTRATION
+                    hwnd = int(self.winId()) if hasattr(self, "winId") else 0
+                    hr = ctypes.windll.shell32.SHOpenWithDialog(hwnd, ctypes.byref(info))
+                    if hr == 0:
+                        return True
+                    # Fallback to OpenAs_RunDLLW
+                    ctypes.windll.shell32.OpenAs_RunDLLW(hwnd, 0, f'"{str(fpath.resolve())}"', 1)
+                    return True
+                else:
+                    subprocess.Popen(["xdg-open", str(fpath.resolve())])
+                    return True
+            elif app_choice == "paint":
+                subprocess.Popen(["mspaint.exe", str(fpath.resolve())])
+                return True
+            elif app_choice != "default":
+                # Specific registered executable command or name
+                try:
+                    subprocess.Popen([app_choice, str(fpath.resolve())])
+                    return True
+                except Exception:
+                    pass
+            # Default action:
+            if sys.platform == "win32":
+                os.startfile(str(fpath.resolve()))
+            else:
+                subprocess.Popen(["xdg-open", str(fpath.resolve())])
+            return True
+        except Exception as e:
+            self.lbl_sync_status.setText(f"⚠ Open with error: {e}")
+        return False
+
+    def rename_selection(self) -> None:
+        """Selects the filename field in the right Information panel for inline renaming."""
+        target_ids = self.grid_view.selected_media_ids() or list(self._selected_ids)
+        if not target_ids:
+            return
+        if len(target_ids) == 1:
+            if hasattr(self, "right_tag_dock") and self.right_tag_dock is not None:
+                self.right_tag_dock.show()
+                self.right_tag_dock.raise_()
+                self.right_tag_dock.focus_filename_rename()
+                return
+            mid = target_ids[0]
+            try:
+                detail = self.catalog_repo.get_media_detail(mid)
+                old_fname = str(detail["filename"])
+                folder_p = Path(detail["folder_path"])
+                old_path = folder_p / old_fname
+                stem = Path(old_fname).stem
+                ext = Path(old_fname).suffix
+                new_stem, ok = QInputDialog.getText(
+                    self, "Rename", "Enter a new name for the file:", text=stem
+                )
+                if not ok or not new_stem.strip() or new_stem.strip() == stem:
+                    return
+                new_fname = f"{new_stem.strip()}{ext}"
+                new_path = folder_p / new_fname
+                if new_path.exists():
+                    QMessageBox.warning(self, "File Exists", f"A file named '{new_fname}' already exists.")
+                    return
+                if old_path.exists():
+                    old_path.rename(new_path)
+                self.catalog_repo.rename_media(mid, new_fname)
+                self._media_meta_lookup.pop(mid, None)
+                self.rebuild_and_run_query()
+                self.lbl_sync_status.setText(f"✓ Renamed file to '{new_fname}'")
+            except Exception as e:
+                QMessageBox.warning(self, "Rename Error", f"Could not rename file: {e}")
+        else:
+            base_name, ok = QInputDialog.getText(
+                self, "Batch Rename", "Enter a base name for the selected files:"
+            )
+            if not ok or not base_name.strip():
+                return
+            base_name = base_name.strip()
+            renamed = 0
+            for i, mid in enumerate(target_ids, start=1):
+                try:
+                    detail = self.catalog_repo.get_media_detail(mid)
+                    old_fname = str(detail["filename"])
+                    folder_p = Path(detail["folder_path"])
+                    old_path = folder_p / old_fname
+                    ext = Path(old_fname).suffix
+                    new_fname = f"{base_name} ({i}){ext}"
+                    new_path = folder_p / new_fname
+                    if old_path.exists() and not new_path.exists():
+                        old_path.rename(new_path)
+                        self.catalog_repo.rename_media(mid, new_fname)
+                        self._media_meta_lookup.pop(mid, None)
+                        renamed += 1
+                except Exception:
+                    pass
+            self.rebuild_and_run_query()
+            self.lbl_sync_status.setText(f"✓ Renamed {renamed} file(s)")
+
+    def open_resize_dialog(self) -> ResizePhotoDialog | None:
+        """Opens authentic WLPG Resize dialog for selected image photos."""
+        target_ids = self.grid_view.selected_media_ids() or list(self._selected_ids)
+        if not target_ids:
+            return None
+        file_paths: list[Path] = []
+        for mid in target_ids:
+            try:
+                detail = self.catalog_repo.get_media_detail(mid)
+                fpath = Path(detail["folder_path"]) / str(detail["filename"])
+                if fpath.exists() and not bool(detail.get("is_video")):
+                    file_paths.append(fpath)
+            except Exception:
+                pass
+        if not file_paths:
+            return None
+
+        dlg = ResizePhotoDialog(file_paths, parent=self)
+        if dlg.exec() == ResizePhotoDialog.Accepted:
+            out_dirs = {p.parent for p in dlg.generated_files}
+            for d in out_dirs:
+                self.scan_folder(d, include_subfolders=False)
+            self.lbl_sync_status.setText(f"✓ Resized and saved {len(dlg.generated_files)} photo(s)")
+        return dlg
+
+    def make_copy_of_selection(self, prompt_dialog: bool = True) -> list[Path]:
+        """Creates a duplicate copy of selected media (or current image in viewer) matching WLPG 'Make a copy'."""
+        target_ids = (
+            [self.media_viewer.current_media_id]
+            if self.central_stack.currentWidget() == self.media_viewer
+            and self.media_viewer.current_media_id is not None
+            else (self.grid_view.selected_media_ids() or list(self._selected_ids))
+        )
+        if not target_ids:
+            return []
+
+        mid = target_ids[0]
+        try:
+            detail = self.catalog_repo.get_media_detail(mid)
+            folder_p = Path(detail["folder_path"])
+            old_fname = str(detail["filename"])
+            src_file = folder_p / old_fname
+            if not src_file.exists():
+                return []
+
+            stem = src_file.stem
+            ext = src_file.suffix.lower()
+
+            # Generate default candidate: e.g. "DSC06914 (2).jpg" matching WLPG
+            import re
+            m = re.match(r"^(.*?)\s*\((\d+)\)$", stem)
+            if m:
+                base_stem = m.group(1).rstrip()
+                start_n = int(m.group(2)) + 1
+            else:
+                base_stem = stem
+                start_n = 2
+
+            n = start_n
+            while True:
+                candidate_name = f"{base_stem} ({n}){src_file.suffix}"
+                if not (folder_p / candidate_name).exists():
+                    break
+                n += 1
+
+            default_save_path = folder_p / candidate_name
+
+            # Construct filter string matching WLPG and Windows Photo Gallery
+            if ext in (".jpg", ".jpeg", ".jpe", ".jfif"):
+                filter_str = (
+                    "JPG (*.jpg;*.jpe;*.exif;*.jfif;*.jpeg);;"
+                    "PNG (*.png);;"
+                    "TIFF (*.tif;*.tiff);;"
+                    "BMP (*.bmp);;"
+                    "All Files (*.*)"
+                )
+                selected_filter = "JPG (*.jpg;*.jpe;*.exif;*.jfif;*.jpeg)"
+            elif ext == ".png":
+                filter_str = (
+                    "PNG (*.png);;"
+                    "JPG (*.jpg;*.jpe;*.exif;*.jfif;*.jpeg);;"
+                    "All Files (*.*)"
+                )
+                selected_filter = "PNG (*.png)"
+            elif ext in (".tif", ".tiff"):
+                filter_str = (
+                    "TIFF (*.tif;*.tiff);;"
+                    "JPG (*.jpg;*.jpe;*.exif;*.jfif;*.jpeg);;"
+                    "All Files (*.*)"
+                )
+                selected_filter = "TIFF (*.tif;*.tiff)"
+            elif ext == ".bmp":
+                filter_str = (
+                    "BMP (*.bmp);;"
+                    "JPG (*.jpg;*.jpe;*.exif;*.jfif;*.jpeg);;"
+                    "All Files (*.*)"
+                )
+                selected_filter = "BMP (*.bmp)"
+            else:
+                filter_str = f"{ext.upper().lstrip('.')} (*{ext});;All Files (*.*)"
+                selected_filter = f"{ext.upper().lstrip('.')} (*{ext})"
+
+            is_test_env = "pytest" in sys.modules or bool(os.environ.get("PYTEST_CURRENT_TEST"))
+            if prompt_dialog and not is_test_env:
+                dest_path_str, _ = QFileDialog.getSaveFileName(
+                    self,
+                    "Make a copy",
+                    str(default_save_path),
+                    filter_str,
+                    selected_filter,
+                )
+                if not dest_path_str:
+                    return []
+                new_file = Path(dest_path_str)
+            else:
+                new_file = default_save_path
+
+            # If in single media viewer and active edits exist, save current edited pixels
+            if (
+                self.central_stack.currentWidget() == self.media_viewer
+                and self.media_viewer.current_media_id == mid
+                and self.media_viewer.current_pil_image is not None
+            ):
+                save_fmt = "JPEG" if new_file.suffix.lower() in (".jpg", ".jpeg") else "PNG"
+                self.media_viewer.current_pil_image.save(new_file, format=save_fmt, quality=95)
+            else:
+                shutil.copy2(src_file, new_file)
+
+            # Rescan destination directory so the copy shows in gallery
+            self.scan_folder(new_file.parent, include_subfolders=False)
+            self.lbl_sync_status.setText(f"✓ Created copy: {new_file.name}")
+            return [new_file]
+
+        except Exception as e:
+            self.lbl_sync_status.setText(f"⚠ Copy error: {e}")
+            return []
+
+    def toggle_right_pane(
+        self, mode: Literal["info", "fine_tune"] = "info"
+    ) -> None:
+        """
+        Mutually exclusive toggle for the Right Inspector:
+        - mode 'info' (Ctrl+I): Tag & caption / metadata information
+        - mode 'fine_tune' (Ctrl+F): Exposure, color, straighten, and detail adjustments
+        """
+        is_open = not self.right_tag_dock.isHidden()
+        if is_open and self.right_tag_dock.current_mode() == mode:
+            self.right_tag_dock.hide()
+        else:
+            self.right_tag_dock.set_mode(mode)
+            self.right_tag_dock.show()
+            self.right_tag_dock.raise_()
+            try:
+                self.resizeDocks([self.right_tag_dock], [280], Qt.Horizontal)
+            except Exception:
+                pass
+            if mode == "fine_tune":
+                self.right_tag_dock.histogram_widget.set_histogram_data(
+                    self.media_viewer.current_pil_image
+                )
+        if hasattr(self.ribbon, "btn_toggle_tag_pane"):
+            self.ribbon.btn_toggle_tag_pane.setChecked(not self.right_tag_dock.isHidden())
+
+    def dispatch_ribbon_action(self, action_id: str) -> None:
+        if action_id in ("add_folder", "import_media"):
+            self._prompt_and_add_folder()
+        elif action_id == "select_all":
+            self.select_all_items()
+        elif action_id == "cut":
+            self.cut_selection_to_clipboard()
+        elif action_id == "copy":
+            self.copy_selection_to_clipboard()
+        elif action_id == "paste":
+            self.paste_from_clipboard()
+        elif action_id == "rotate_left":
+            self.rotate_selection(clockwise=False)
+        elif action_id == "rotate_right":
+            self.rotate_selection(clockwise=True)
+        elif action_id == "edit_caption":
+            self.right_tag_dock.set_mode("info")
+            self.right_tag_dock.show()
+            self.right_tag_dock.txt_caption.setFocus()
+            self.right_tag_dock.txt_caption.selectAll()
+        elif action_id == "batch_people_tag":
+            self.open_batch_people_view()
+        elif action_id == "people_tag":
+            self._on_dock_person_tag_mode_requested()
+        elif action_id == "toggle_flag":
+            target_ids = (
+                [self.media_viewer.current_media_id]
+                if self.central_stack.currentWidget() == self.media_viewer
+                and self.media_viewer.current_media_id is not None
+                else list(self._selected_ids)
+            )
+            if target_ids:
+                flags_map = self.catalog_repo.get_field_map_for_ids(target_ids, "flag")
+                has_unflagged = any(flags_map.get(mid, 0) == 0 for mid in target_ids)
+                self.apply_flag_to_selection(1 if has_unflagged else 0)
+        elif action_id.startswith("rate_"):
+            try:
+                r_val = int(action_id.split("_")[1])
+                self.apply_rating_to_selection(r_val)
+            except ValueError:
+                pass
+        elif action_id == "toggle_scope_bar":
+            self.toggle_search_scope_bar()
+        elif action_id == "help":
+            QMessageBox.information(
+                self,
+                "About Photo Gallery",
+                "Windows Live Photo Gallery 64-Bit Clone\n"
+                "Google Antigravity Edition\n\n"
+                "A modern, high-performance 64-bit recreation of Windows Live Photo Gallery.\n"
+                "Supports lossless JPEG rotation, non-destructive editing, face tagging, and sub-10ms queries.",
+            )
+        elif action_id == "exit_app":
+            self.close()
+        elif action_id == "change_time_taken":
+            self.open_change_time_taken_dialog()
+        elif action_id == "delete":
+            self.delete_selection_to_recycle_bin()
+        elif action_id == "toggle_tag_pane":
+            self.toggle_right_pane("info")
+        elif action_id == "fine_tune":
+            if self.central_stack.currentWidget() != self.media_viewer:
+                sel = self.grid_view.selected_media_ids() or list(self._selected_ids)
+                if sel:
+                    self.open_single_viewer(sel[0])
+            self.toggle_right_pane("fine_tune")
+        elif action_id == "toggle_nav_pane":
+            new_vis = not self.left_nav_dock.isVisible()
+            self.left_nav_dock.setVisible(new_vis)
+            if new_vis:
+                self.left_nav_dock.show()
+                self.resizeDocks([self.left_nav_dock], [230], Qt.Horizontal)
+            if hasattr(self.ribbon, "btn_toggle_nav_pane"):
+                self.ribbon.btn_toggle_nav_pane.setChecked(new_vis)
+        elif action_id == "show_tag_hierarchy":
+            self.open_tag_hierarchy_dialog()
+        elif action_id == "toggle_map_view":
+            if self.central_stack.currentWidget() == self.map_view:
+                self.show_grid_view()
+            else:
+                self.show_map_view()
+        elif action_id in ("geotag", "open_map"):
+            self.toggle_right_pane("info")
+            if hasattr(self.right_tag_dock, "txt_add_geotag"):
+                self.right_tag_dock.txt_add_geotag.setFocus()
+                self.right_tag_dock.txt_add_geotag.selectAll()
+        elif action_id == "close_viewer":
+            self.show_grid_view()
+        elif action_id == "prev_media":
+            self.navigate_single_viewer(-1)
+        elif action_id == "next_media":
+            self.navigate_single_viewer(1)
+        elif action_id == "auto_adjust":
+            if self.central_stack.currentWidget() == self.media_viewer:
+                self.media_viewer.apply_auto_adjust()
+            else:
+                sel = self.grid_view.selected_media_ids() or list(self._selected_ids)
+                if len(sel) > 1:
+                    self._batch_auto_adjust(sel)
+                elif len(sel) == 1:
+                    self.open_single_viewer(sel[0])
+                    self.media_viewer.apply_auto_adjust()
+        elif action_id == "crop_photo":
+            if self.central_stack.currentWidget() != self.media_viewer:
+                sel = self.grid_view.selected_media_ids() or list(self._selected_ids)
+                if sel:
+                    self.open_single_viewer(sel[0])
+                    self.media_viewer.set_crop_mode(True)
+            else:
+                self.media_viewer.set_crop_mode(not self.media_viewer.is_crop_mode)
+        elif action_id == "revert_original":
+            if self.central_stack.currentWidget() == self.media_viewer:
+                self.media_viewer.revert_to_original()
+            else:
+                sel = self.grid_view.selected_media_ids()
+                if sel:
+                    for mid in sel:
+                        detail = self.catalog_repo.get_media_detail(mid)
+                        if not detail:
+                            continue
+                        folder_p = detail.get("folder_path")
+                        fname = detail.get("filename")
+                        fpath_str = detail.get("file_path")
+                        if not fpath_str and folder_p and fname:
+                            fpath_str = str(Path(folder_p) / fname)
+                        if not fpath_str:
+                            continue
+                        fpath = Path(fpath_str)
+                        bpath = detail.get("original_backup_path") or detail.get("edit_backup_path")
+                        if not bpath or not Path(bpath).exists():
+                            cand = fpath.parent / ".OriginalFiles" / fpath.name
+                            if cand.exists():
+                                bpath = str(cand)
+                        if bpath and Path(bpath).exists():
+                            shutil.copy2(bpath, fpath)
+                            try:
+                                Path(bpath).unlink()
+                            except OSError:
+                                pass
+                            self._on_pixel_edit_reverted(mid)
+                    self.rebuild_and_run_query()
+                    self._update_revert_button_state()
+        elif action_id.startswith("effect_"):
+            eff_name = action_id.split("_", 1)[1]
+            if self.central_stack.currentWidget() == self.media_viewer:
+                self.media_viewer.apply_preset_effect(eff_name)
+            else:
+                sel = self.grid_view.selected_media_ids() or list(self._selected_ids)
+                if len(sel) > 1:
+                    self._batch_apply_effect(sel, eff_name)
+                elif len(sel) == 1:
+                    self.open_single_viewer(sel[0])
+                    self.media_viewer.apply_preset_effect(eff_name)
+        elif action_id == "make_copy":
+            self.make_copy_of_selection()
+        elif action_id == "view_file":
+            target = self._lead_selected_id or (self._selected_ids[0] if self._selected_ids else None)
+            if target is not None:
+                self.open_single_viewer(target)
+        elif action_id == "rename_file":
+            self.rename_selection()
+        elif action_id == "resize_photo":
+            self.open_resize_dialog()
+        elif action_id == "straighten":
+            if self.central_stack.currentWidget() != self.media_viewer:
+                sel = self.grid_view.selected_media_ids() or list(self._selected_ids)
+                if sel:
+                    self.open_single_viewer(sel[0])
+            self.media_viewer.apply_auto_straighten()
+        elif action_id == "noise_reduction":
+            if self.central_stack.currentWidget() != self.media_viewer:
+                sel = self.grid_view.selected_media_ids() or list(self._selected_ids)
+                if sel:
+                    self.open_single_viewer(sel[0])
+            self._on_analyze_noise_requested()
+        elif action_id == "retouch":
+            if self.central_stack.currentWidget() != self.media_viewer:
+                sel = self.grid_view.selected_media_ids() or list(self._selected_ids)
+                if sel:
+                    self.open_single_viewer(sel[0])
+                    self.media_viewer.set_retouch_mode(True)
+            else:
+                self.media_viewer.set_retouch_mode(not self.media_viewer.is_retouch_mode)
+        elif action_id == "red_eye":
+            if self.central_stack.currentWidget() != self.media_viewer:
+                sel = self.grid_view.selected_media_ids() or list(self._selected_ids)
+                if sel:
+                    self.open_single_viewer(sel[0])
+                    self.media_viewer.set_red_eye_mode(True)
+            else:
+                self.media_viewer.set_red_eye_mode(not self.media_viewer.is_red_eye_mode)
+        elif action_id == "color_warm":
+            if self.central_stack.currentWidget() != self.media_viewer:
+                sel = self.grid_view.selected_media_ids()
+                if sel:
+                    self.open_single_viewer(sel[0])
+            self.media_viewer.set_color_parameters(
+                temperature=min(100.0, self.media_viewer.current_recipe.temperature + 25.0)
+            )
+        elif action_id == "color_cool":
+            if self.central_stack.currentWidget() != self.media_viewer:
+                sel = self.grid_view.selected_media_ids()
+                if sel:
+                    self.open_single_viewer(sel[0])
+            self.media_viewer.set_color_parameters(
+                temperature=max(-100.0, self.media_viewer.current_recipe.temperature - 25.0)
+            )
+        elif action_id == "color_sat_up":
+            if self.central_stack.currentWidget() != self.media_viewer:
+                sel = self.grid_view.selected_media_ids()
+                if sel:
+                    self.open_single_viewer(sel[0])
+            self.media_viewer.set_color_parameters(
+                saturation=min(100.0, self.media_viewer.current_recipe.saturation + 25.0)
+            )
+        elif action_id == "color_sat_down":
+            if self.central_stack.currentWidget() != self.media_viewer:
+                sel = self.grid_view.selected_media_ids()
+                if sel:
+                    self.open_single_viewer(sel[0])
+            self.media_viewer.set_color_parameters(
+                saturation=max(-100.0, self.media_viewer.current_recipe.saturation - 25.0)
+            )
+        elif action_id == "exposure_brighten":
+            if self.central_stack.currentWidget() != self.media_viewer:
+                sel = self.grid_view.selected_media_ids()
+                if sel:
+                    self.open_single_viewer(sel[0])
+            self.media_viewer.set_exposure_parameters(
+                brightness=min(100.0, self.media_viewer.current_recipe.brightness + 15.0)
+            )
+        elif action_id == "exposure_darken":
+            if self.central_stack.currentWidget() != self.media_viewer:
+                sel = self.grid_view.selected_media_ids()
+                if sel:
+                    self.open_single_viewer(sel[0])
+            self.media_viewer.set_exposure_parameters(
+                brightness=max(-100.0, self.media_viewer.current_recipe.brightness - 15.0)
+            )
+        elif action_id == "exposure_contrast_up":
+            if self.central_stack.currentWidget() != self.media_viewer:
+                sel = self.grid_view.selected_media_ids()
+                if sel:
+                    self.open_single_viewer(sel[0])
+            self.media_viewer.set_exposure_parameters(
+                contrast=min(100.0, self.media_viewer.current_recipe.contrast + 20.0)
+            )
+        elif action_id == "exposure_contrast_down":
+            if self.central_stack.currentWidget() != self.media_viewer:
+                sel = self.grid_view.selected_media_ids()
+                if sel:
+                    self.open_single_viewer(sel[0])
+            self.media_viewer.set_exposure_parameters(
+                contrast=max(-100.0, self.media_viewer.current_recipe.contrast - 20.0)
+            )
+        elif action_id == "tag_face":
+            self.media_viewer.tag_selected_crop_as_face()
+        elif action_id == "filter_flagged":
+            self.left_nav_dock.set_flagged_only(True)
+        elif action_id == "filter_photos":
+            self.left_nav_dock.set_media_type("image")
+        elif action_id == "filter_videos":
+            self.left_nav_dock.set_media_type("video")
+        elif action_id == "filter_clear":
+            self.left_nav_dock.clear_all_filters()
+        elif action_id == "slide_show":
+            records = self.catalog_model._records
+            if not records:
+                return
+            start_idx = 0
+            curr_id = (
+                self.media_viewer.current_media_id
+                if self.central_stack.currentWidget() == self.media_viewer
+                else (self._lead_selected_id or (self._selected_ids[0] if self._selected_ids else None))
+            )
+            if curr_id is not None:
+                start_idx = self.catalog_model.record_index_for_id(curr_id) or 0
+            dlg = FullscreenSlideshowDialog(
+                records=records,
+                start_index=start_idx,
+                catalog_repo=self.catalog_repo,
+                parent=self,
+            )
+            dlg.exec()
+            last_id = dlg.current_media_id()
+            if last_id is not None:
+                self._selected_ids = [last_id]
+                self._lead_selected_id = last_id
+                summary = self.catalog_repo.get_selection_summary([last_id])
+                self.right_tag_dock.bind_selection([last_id], summary)
+                if self.central_stack.currentWidget() == self.media_viewer:
+                    self.open_single_viewer(last_id)
+                else:
+                    self.grid_view.select_media_id(last_id)
+        elif action_id == "zoom_in":
+            if self.central_stack.currentWidget() == self.media_viewer:
+                self.media_viewer.zoom_in()
+            else:
+                self.slider_status_zoom.setValue(
+                    min(self.slider_status_zoom.maximum(), self.slider_status_zoom.value() + 25)
+                )
+        elif action_id == "zoom_out":
+            if self.central_stack.currentWidget() == self.media_viewer:
+                self.media_viewer.zoom_out()
+            else:
+                self.slider_status_zoom.setValue(
+                    max(self.slider_status_zoom.minimum(), self.slider_status_zoom.value() - 25)
+                )
+        elif action_id in ("viewer_zoom_actual", "zoom_actual"):
+            if self.central_stack.currentWidget() == self.media_viewer:
+                self.media_viewer.set_zoom_mode("100")
+        elif action_id in ("viewer_zoom_fit", "zoom_fit"):
+            if self.central_stack.currentWidget() == self.media_viewer:
+                self.media_viewer.set_zoom_mode("fit")
+        elif action_id == "toggle_pause_write_back":
+            self.toggle_pause_write_back()
+        elif action_id == "backup_catalog":
+            self.backup_catalog_dialog()
+        elif action_id == "open_settings":
+            self._open_settings_dialog()
+
+
+    def _open_settings_dialog(self, initial_tab: str | None = None) -> None:
+        dlg = AppSettingsDialog(
+            retention_days=self.retention_days,
+            current_theme=self.current_theme,
+            show_dates=getattr(self.left_nav_dock, "_show_dates", True),
+            show_tags=getattr(self.left_nav_dock, "_show_tags", True),
+            show_people=getattr(self.left_nav_dock, "_show_people", True),
+            show_ratings=getattr(self.left_nav_dock, "_show_ratings", True),
+            find_people_enabled=getattr(self, "find_people_enabled", True),
+            tooltip_previews=getattr(self, "tooltip_previews", True),
+            jpeg_quality=getattr(self, "jpeg_quality", 83),
+            auto_straighten=getattr(self, "auto_straighten", True),
+            auto_noise=getattr(self, "auto_noise", False),
+            auto_color=getattr(self, "auto_color", True),
+            auto_exposure=getattr(self, "auto_exposure", True),
+            originals_dir=str(Path.home() / "Pictures" / ".OriginalFiles"),
+            pause_write_back=self.write_back_paused,
+            icon_theme=getattr(self, "current_icon_theme", icon_provider.get_icon_theme()),
+            engine=self.engine,
+            initial_tab=initial_tab,
+            parent=self,
+        )
+        if dlg.exec() == AppSettingsDialog.Accepted:
+            self.retention_days = dlg.retention_days()
+            new_theme = dlg.selected_theme()
+            if new_theme != self.current_theme:
+                self.apply_theme(new_theme)
+
+            new_icon_theme = dlg.selected_icon_theme()
+            if new_icon_theme != getattr(self, "current_icon_theme", "wlpg_aero"):
+                self.current_icon_theme = new_icon_theme
+                icon_provider.set_icon_theme(new_icon_theme)
+
+            self.toggle_pause_write_back(dlg.pause_write_back_enabled())
+
+            # Update Navigation Pane Sections
+            self.nav_show_dates = dlg.show_dates()
+            self.nav_show_tags = dlg.show_tags()
+            self.nav_show_people = dlg.show_people()
+            self.nav_show_ratings = dlg.show_ratings()
+            self.left_nav_dock.set_navigation_sections_visibility(
+                show_dates=self.nav_show_dates,
+                show_tags=self.nav_show_tags,
+                show_people=self.nav_show_people,
+                show_ratings=self.nav_show_ratings,
+            )
+
+            old_find_people = getattr(self, "find_people_enabled", True)
+            self.find_people_enabled = dlg.find_people_enabled()
+            if self.find_people_enabled and not old_find_people:
+                self.start_face_detection()
+            elif not self.find_people_enabled and old_find_people:
+                self.stop_face_detection()
+
+            self.tooltip_previews = dlg.tooltip_previews_enabled()
+            self.jpeg_quality = dlg.jpeg_quality()
+            self.auto_straighten = dlg.auto_straighten()
+            self.auto_noise = dlg.auto_noise()
+            self.auto_color = dlg.auto_color()
+            self.auto_exposure = dlg.auto_exposure()
+
+            # Save to QSettings
+            settings = QSettings("PhotoGallery64", "PhotoGallery64")
+            settings.setValue("theme", self.current_theme)
+            settings.setValue("icon_theme", getattr(self, "current_icon_theme", "wlpg_aero"))
+            settings.setValue("nav_show_dates", self.nav_show_dates)
+            settings.setValue("nav_show_tags", self.nav_show_tags)
+            settings.setValue("nav_show_people", self.nav_show_people)
+            settings.setValue("nav_show_ratings", self.nav_show_ratings)
+            settings.setValue("find_people_enabled", self.find_people_enabled)
+            settings.setValue("tooltip_previews", self.tooltip_previews)
+            settings.setValue("jpeg_quality", self.jpeg_quality)
+            settings.setValue("retention_days", self.retention_days)
+            settings.setValue("auto_straighten", self.auto_straighten)
+            settings.setValue("auto_noise", self.auto_noise)
+            settings.setValue("auto_color", self.auto_color)
+            settings.setValue("auto_exposure", self.auto_exposure)
+
+            if dlg.compact_requested:
+                self.catalog_repo.compact_database()
+                self.thumbnail_repo.compact_database()
+
+            if dlg.prune_backups_requested:
+                expired = self.catalog_repo.prune_expired_backups(self.retention_days)
+                for p in expired:
+                    try:
+                        Path(p).unlink(missing_ok=True)
+                    except OSError:
+                        pass
+
+            if dlg.backup_requested:
+                QTimer.singleShot(100, self.backup_catalog_dialog)
+
+            if dlg.heal_faces_requested:
+                count = self.catalog_repo.reparse_and_heal_face_regions_from_files()
+                self.statusBar().showMessage(
+                    f"Re-parsed and queued face healing for {count} photos.", 5000
+                )
+                self.start_face_detection()
+
+        if getattr(dlg, "purge_rescan_requested", False):
+            if hasattr(self, "batch_people_view") and self.batch_people_view:
+                self.batch_people_view.refresh_suggestions()
+            if hasattr(self, "people_directory_view") and self.people_directory_view:
+                self.people_directory_view.reload_directory()
+            self.start_face_detection()
+        if getattr(dlg, "fast_rematch_requested", False):
+            if hasattr(self, "batch_people_view") and self.batch_people_view:
+                self.batch_people_view.refresh_suggestions()
+            if hasattr(self, "people_directory_view") and self.people_directory_view:
+                self.people_directory_view.reload_directory()
+
+    def toggle_pause_write_back(self, paused: bool | None = None) -> None:
+        """Toggles or sets the Pause Background File Write-Back (Catalog-Only Mode) setting."""
+        if paused is None:
+            self.write_back_paused = not self.write_back_paused
+        else:
+            self.write_back_paused = bool(paused)
+
+        self.xmp_daemon.set_paused(self.write_back_paused)
+        self.ribbon.set_write_back_paused(self.write_back_paused)
+
+        settings = QSettings("PhotoGallery64", "PhotoGallery64")
+        settings.setValue("write_back_paused", self.write_back_paused)
+
+        self._update_worker_monitor()
+
+        if not self.write_back_paused:
+            self.statusBar().showMessage("✓ Background file write-back resumed", 3000)
+            self.xmp_daemon.flush_now()
+        else:
+            dirty = self.catalog_repo.count_dirty_media()
+            self.statusBar().showMessage(f"⚠ Safe Mode active: File write-back paused ({dirty} pending)", 4000)
+
+    def open_tag_hierarchy_dialog(self) -> None:
+        """Opens the 'All of your tags' dialog matching WLPG."""
+        from src.ui.tag_hierarchy_dialog import TagHierarchyDialog
+        dlg = TagHierarchyDialog(self)
+        tags = self.catalog_repo.get_tag_tree()
+        dlg.populate(tags)
+        dlg.tags_added.connect(self._on_hierarchy_tags_selected)
+        dlg.exec()
+
+    def _on_hierarchy_tags_selected(self, tag_ids: list[int]) -> None:
+        if hasattr(self, "left_nav_dock") and self.left_nav_dock is not None:
+            for tid in tag_ids:
+                self.left_nav_dock.set_tag_filter_state(tid, "include")
+        else:
+            self._active_tag_ids = list(set(self._active_tag_ids) | set(tag_ids))
+            self.rebuild_and_run_query()
+
+    def backup_catalog_dialog(self) -> None:
+        """Prompts the user to save an online backup snapshot of catalog.db."""
+        import datetime
+        default_name = f"catalog_backup_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.db"
+        dest_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Backup Catalog Database",
+            str(Path.home() / "Documents" / default_name),
+            "SQLite Database (*.db);;All Files (*)",
+        )
+        if not dest_path:
+            return
+        try:
+            self.engine.backup_catalog(dest_path)
+            self.statusBar().showMessage(f"✓ Catalog backed up successfully to {Path(dest_path).name}", 5000)
+        except Exception as e:
+            QMessageBox.critical(self, "Backup Error", f"Failed to create database backup:\n{e}")
+
+    def toggle_pause_all_workers(self) -> None:
+        """Toggles pause/resume state across all background tasks (scanner, faces, and write-back)."""
+        self._workers_paused = not self._workers_paused
+        if self._workers_paused:
+            self._scanner_cancel.set()
+            self.stop_face_detection()
+            self.xmp_daemon.set_paused(True)
+            self.btn_pause_workers.setText("▶")
+            self.btn_pause_workers.setToolTip("Resume background indexing, face detection, and file write-back")
+            self.btn_pause_workers.setStyleSheet(
+                """
+                QPushButton {
+                    font-family: 'Segoe UI Symbol', 'Segoe UI', sans-serif;
+                    font-size: 11pt;
+                    border: none;
+                    background: transparent;
+                    color: #D9822B;
+                    padding: 0;
+                    min-width: 18px;
+                    max-width: 20px;
+                    height: 18px;
+                }
+                QPushButton:hover {
+                    color: #B56214;
+                }
+                """
+            )
+            self.statusBar().showMessage("Background workers paused", 3000)
+        else:
+            self._scanner_cancel.clear()
+            self._face_cancel.clear()
+            self.xmp_daemon.set_paused(self.write_back_paused)
+            if getattr(self, "find_people_enabled", False):
+                self.start_face_detection()
+            self.btn_pause_workers.setText("⏸")
+            self.btn_pause_workers.setToolTip("Pause background indexing, face detection, and file write-back")
+            self.btn_pause_workers.setStyleSheet(
+                """
+                QPushButton {
+                    font-family: 'Segoe UI Symbol', 'Segoe UI', sans-serif;
+                    font-size: 11pt;
+                    border: none;
+                    background: transparent;
+                    color: #1E395B;
+                    padding: 0;
+                    min-width: 18px;
+                    max-width: 20px;
+                    height: 18px;
+                }
+                QPushButton:hover {
+                    color: #0078D7;
+                }
+                """
+            )
+            self.statusBar().showMessage("✓ Background workers resumed", 3000)
+        self._update_worker_monitor()
+
+    def _update_worker_monitor(self) -> None:
+        """Updates the status bar live monitor for active background workers and safe-mode state."""
+        try:
+            dirty_count = self.catalog_repo.count_dirty_media()
+        except Exception:
+            dirty_count = 0
+
+        is_write_paused = self.xmp_daemon.is_paused()
+        if is_write_paused:
+            sync_detail = f"Write-Back Paused: {dirty_count:,} pending"
+        elif dirty_count > 0:
+            sync_detail = f"Sync: {dirty_count:,} pending"
+        else:
+            sync_detail = "Sync: Idle"
+
+        detailed_tooltip = (
+            f"📁 {self._scanner_status_text}\n"
+            f"👤 {self._face_status_text}\n"
+            f"💾 {sync_detail}\n\n"
+            "Click for details / background options"
+        )
+
+        is_scanning = "Idle" not in self._scanner_status_text
+        is_faces = "Idle" not in self._face_status_text
+
+        if self._workers_paused:
+            summary_text = "Workers Paused"
+            style = "color: #D9822B; font-weight: bold; font-size: 8.5pt;"
+        elif is_write_paused:
+            summary_text = f"Write-Back Paused ({dirty_count:,})"
+            style = "color: #C5221F; font-weight: 600; font-size: 8.5pt;"
+        elif is_scanning:
+            summary_text = self._scanner_status_text.replace("Scanning: ", "Indexing: ")
+            style = "color: #0066CC; font-size: 8.5pt;"
+        elif is_faces:
+            summary_text = self._face_status_text.replace("Faces: ", "Finding people: ")
+            style = "color: #0066CC; font-size: 8.5pt;"
+        elif dirty_count > 0:
+            summary_text = f"Saving metadata: {dirty_count:,}"
+            style = "color: #0066CC; font-size: 8.5pt;"
+        else:
+            summary_text = "Idle"
+            style = "color: #5A738E; font-size: 8.5pt;"
+
+        if hasattr(self, "lbl_worker_monitor"):
+            self.lbl_worker_monitor.setText(summary_text)
+            self.lbl_worker_monitor.setToolTip(detailed_tooltip)
+            self.lbl_worker_monitor.setStyleSheet(
+                f"QLabel {{ {style} padding: 1px 4px; border-radius: 3px; }} QLabel:hover {{ background: #E5F1FC; }}"
+            )
+
+    def _show_worker_details_menu(self, event: Any = None) -> None:
+        """Presents a clean detailed popup menu of background queues and worker statuses."""
+        menu = QMenu(self)
+        menu.setStyleSheet(
+            """
+            QMenu {
+                background: #FFFFFF;
+                border: 1px solid #7592B5;
+                padding: 4px;
+                font-family: 'Segoe UI', sans-serif;
+                font-size: 9pt;
+            }
+            QMenu::item {
+                padding: 4px 20px 4px 10px;
+            }
+            QMenu::item:disabled {
+                color: #2B3E50;
+                font-weight: 500;
+            }
+            QMenu::separator {
+                height: 1px;
+                background: #D8E5F0;
+                margin: 4px 0;
+            }
+            """
+        )
+
+        header = menu.addAction("Background Tasks")
+        header.setEnabled(False)
+        menu.addSeparator()
+
+        act_scan = menu.addAction(f"📁 Indexing: {self._scanner_status_text}")
+        act_scan.setEnabled(False)
+
+        act_face = menu.addAction(f"👤 Face Detection: {self._face_status_text}")
+        act_face.setEnabled(False)
+
+        try:
+            dirty_count = self.catalog_repo.count_dirty_media()
+        except Exception:
+            dirty_count = 0
+        is_write_paused = self.xmp_daemon.is_paused()
+        if is_write_paused:
+            sync_info = f"Paused ({dirty_count:,} pending)"
+        elif dirty_count > 0:
+            sync_info = f"Writing changes ({dirty_count:,} pending)"
+        else:
+            sync_info = "Up to date"
+        act_sync = menu.addAction(f"💾 Metadata Sync: {sync_info}")
+        act_sync.setEnabled(False)
+
+        menu.addSeparator()
+
+        if self._workers_paused:
+            act_toggle = menu.addAction("▶ Resume All Background Tasks")
+            act_toggle.triggered.connect(self.toggle_pause_all_workers)
+        else:
+            act_toggle = menu.addAction("⏸ Pause All Background Tasks")
+            act_toggle.triggered.connect(self.toggle_pause_all_workers)
+
+        pos = self.lbl_worker_monitor.mapToGlobal(QPoint(0, -menu.sizeHint().height() - 4))
+        menu.exec(pos)
+
+    def show_status_message(self, message: str = "", timeout_ms: int = 4000) -> None:
+        """Displays transient notifications in lbl_sync_status without hiding item counts or worker controls."""
+        if hasattr(self, "lbl_sync_status"):
+            self.lbl_sync_status.setText(message)
+            if hasattr(self, "sep_status_msg"):
+                self.sep_status_msg.setVisible(bool(message and message.strip()))
+            if timeout_ms > 0 and message:
+                QTimer.singleShot(
+                    timeout_ms,
+                    lambda: self.show_status_message("") if getattr(self, "lbl_sync_status", None) and self.lbl_sync_status.text() == message else None,
+                )
+
+    def _update_revert_button_state(self) -> None:
+        """Enables or disables 'Revert to original' ribbon button based on active viewer or selected grid items."""
+        if not hasattr(self, "ribbon"):
+            return
+        if self.central_stack.currentWidget() == self.media_viewer:
+            can_revert = False
+            if self.media_viewer.current_file_path is not None:
+                bpath = (
+                    self.media_viewer.current_file_path.parent
+                    / ".OriginalFiles"
+                    / self.media_viewer.current_file_path.name
+                )
+                if bpath.exists():
+                    can_revert = True
+            if not can_revert:
+                rec = getattr(self.media_viewer, "current_recipe", None)
+                can_revert = (rec is not None and not rec.is_default()) or (
+                    hasattr(self.media_viewer, "undo_stack") and self.media_viewer.undo_stack.canUndo()
+                )
+            self.ribbon.set_revert_enabled(can_revert)
+        else:
+            sel = self.grid_view.selected_media_ids() if hasattr(self, "grid_view") else []
+            can_revert = False
+            if sel:
+                for mid in sel[:25]:
+                    detail = self.catalog_repo.get_media_detail(mid)
+                    if detail:
+                        bpath = detail.get("original_backup_path") or detail.get("edit_backup_path")
+                        if bpath and Path(bpath).exists():
+                            can_revert = True
+                            break
+                        fpath_str = detail.get("file_path")
+                        if fpath_str:
+                            p = Path(fpath_str)
+                            if (p.parent / ".OriginalFiles" / p.name).exists():
+                                can_revert = True
+                                break
+            self.ribbon.set_revert_enabled(can_revert)
+
+    def _on_status_viewer_clicked(self) -> None:
+        target = self._lead_selected_id or (self._selected_ids[0] if self._selected_ids else None)
+        if target is not None:
+            self.open_single_viewer(target)
+
+    def _on_ribbon_zoom_changed(self, size_px: int) -> None:
+        self.slider_status_zoom.blockSignals(True)
+        self.slider_status_zoom.setValue(size_px)
+        self.slider_status_zoom.blockSignals(False)
+        self.grid_view.set_thumbnail_size(size_px)
+
+    def _on_status_zoom_changed(self, size_px: int) -> None:
+        self.ribbon.slider_zoom.blockSignals(True)
+        self.ribbon.slider_zoom.setValue(size_px)
+        self.ribbon.slider_zoom.blockSignals(False)
+        self.grid_view.set_thumbnail_size(size_px)
+
+    def _is_viewer_image_bigger_than_window(self) -> bool:
+        if self.central_stack.currentWidget() != self.media_viewer:
+            return False
+        if self.media_viewer.master_np_rgb is None:
+            return False
+        gv = self.media_viewer.graphics_view
+        vp = gv.viewport().size()
+        sr = self.media_viewer.scene.sceneRect()
+        if sr.isEmpty() or vp.isEmpty():
+            return False
+        cur_w = sr.width() * gv.transform().m11()
+        cur_h = sr.height() * gv.transform().m22()
+        return (cur_w > vp.width() + 2) or (cur_h > vp.height() + 2)
+
+    def _on_status_zoom_toggle_clicked(self) -> None:
+        if self._is_viewer_image_bigger_than_window():
+            self.media_viewer.set_zoom_mode("fit")
+        else:
+            if getattr(self.media_viewer, "current_zoom_mode", "") == "100":
+                self.media_viewer.set_zoom_mode("fit")
+            else:
+                self.media_viewer.set_zoom_mode("100")
+        self._update_status_zoom_toggle_button()
+
+    def _update_status_zoom_toggle_button(self) -> None:
+        if not hasattr(self, "btn_status_fit"):
+            return
+        if self._is_viewer_image_bigger_than_window():
+            self.btn_status_fit.setIcon(make_wlpg_icon("fit_window", 18))
+            self.btn_status_fit.setToolTip("Fit to window")
+        else:
+            self.btn_status_fit.setIcon(make_wlpg_icon("actual_size", 18))
+            self.btn_status_fit.setToolTip("Actual size (Ctrl+0)")
+
+    def resizeEvent(self, event: Any) -> None:
+        super().resizeEvent(event)
+        self._update_status_zoom_toggle_button()
+
+    # -------------------------------------------------------------------------
+    # Ribbon Exposure, Color & Effects Real-Time Previews & Commitments
+    # -------------------------------------------------------------------------
+    def _on_exposure_preview(self, brightness: float, contrast: float) -> None:
+        if self.central_stack.currentWidget() == self.media_viewer:
+            rec = self.media_viewer.current_recipe.copy()
+            rec.brightness = brightness
+            rec.contrast = contrast
+            self.media_viewer.preview_recipe(rec)
+
+    def _on_auto_exposure_preview(self) -> None:
+        if (
+            self.central_stack.currentWidget() == self.media_viewer
+            and self.media_viewer.master_np_rgb is not None
+        ):
+            from src.imaging.opencv_engine import analyze_auto_adjust
+            auto_rec = analyze_auto_adjust(self.media_viewer.master_np_rgb)
+            rec = self.media_viewer.current_recipe.copy()
+            rec.brightness = auto_rec.brightness
+            rec.contrast = auto_rec.contrast
+            rec.highlights = auto_rec.highlights
+            rec.shadows = auto_rec.shadows
+            self.media_viewer.preview_recipe(rec)
+
+    def _on_preview_cancelled(self) -> None:
+        if self.central_stack.currentWidget() == self.media_viewer:
+            self.media_viewer.preview_recipe(None)
+
+    def _on_exposure_selected(self, brightness: float, contrast: float) -> None:
+        if hasattr(self.ribbon, "menu_exposure"):
+            self.ribbon.menu_exposure.close()
+        if self.central_stack.currentWidget() == self.media_viewer:
+            new_rec = self.media_viewer.current_recipe.copy()
+            new_rec.brightness = brightness
+            new_rec.contrast = contrast
+            self.media_viewer.apply_recipe_adjustment(new_rec, "Adjust Exposure")
+        else:
+            sel = self.grid_view.selected_media_ids()
+            if sel:
+                from src.imaging.opencv_engine import render_adjusted_image, PhotoAdjustmentRecipe
+
+                def _adjust(rgb: np.ndarray) -> np.ndarray:
+                    return render_adjusted_image(
+                        rgb, PhotoAdjustmentRecipe(brightness=brightness, contrast=contrast)
+                    )
+
+                self._batch_apply_image_adjustment(sel, "Adjust Exposure", _adjust)
+
+    def _on_auto_exposure_selected(self) -> None:
+        if hasattr(self.ribbon, "menu_exposure"):
+            self.ribbon.menu_exposure.close()
+        if self.central_stack.currentWidget() == self.media_viewer:
+            self.media_viewer.apply_auto_exposure()
+        else:
+            sel = self.grid_view.selected_media_ids()
+            if sel:
+                from src.imaging.opencv_engine import analyze_auto_adjust, render_adjusted_image, PhotoAdjustmentRecipe
+
+                def _adjust(rgb: np.ndarray) -> np.ndarray:
+                    auto_rec = analyze_auto_adjust(rgb)
+                    exp_rec = PhotoAdjustmentRecipe(
+                        brightness=auto_rec.brightness,
+                        contrast=auto_rec.contrast,
+                        highlights=auto_rec.highlights,
+                        shadows=auto_rec.shadows,
+                    )
+                    return render_adjusted_image(rgb, exp_rec)
+
+                self._batch_apply_image_adjustment(sel, "Auto Adjust Exposure", _adjust)
+
+    def _on_exposure_menu_about_to_show(self) -> None:
+        base_img = None
+        if self.central_stack.currentWidget() == self.media_viewer:
+            base_img = self.media_viewer.get_preview_thumbnail(54, 38)
+        elif self.central_stack.currentWidget() == self.grid_view:
+            sel = self.grid_view.selected_media_ids()
+            if sel and sel[0] in self.pixmap_cache:
+                pm = self.pixmap_cache[sel[0]]
+                qimg = pm.toImage().convertToFormat(QImage.Format_RGB888)
+                ptr = qimg.bits()
+                ptr.setsize(qimg.sizeInBytes())
+                base_img = np.array(ptr, copy=True).reshape((qimg.height(), qimg.width(), 3))
+        self.ribbon.exposure_menu_widget.refresh_thumbnails(base_img)
+
+    def _on_color_preview(self, temp: float, tint: float) -> None:
+        if self.central_stack.currentWidget() == self.media_viewer:
+            rec = self.media_viewer.current_recipe.copy()
+            rec.temperature = temp
+            rec.tint = tint
+            self.media_viewer.preview_recipe(rec)
+
+    def _on_auto_color_preview(self) -> None:
+        if (
+            self.central_stack.currentWidget() == self.media_viewer
+            and self.media_viewer.master_np_rgb is not None
+        ):
+            from src.imaging.opencv_engine import analyze_auto_adjust
+            auto_rec = analyze_auto_adjust(self.media_viewer.master_np_rgb)
+            rec = self.media_viewer.current_recipe.copy()
+            rec.temperature = auto_rec.temperature
+            rec.tint = auto_rec.tint
+            rec.saturation = auto_rec.saturation
+            self.media_viewer.preview_recipe(rec)
+
+    def _on_color_selected(self, temp: float, tint: float) -> None:
+        if hasattr(self.ribbon, "menu_color"):
+            self.ribbon.menu_color.close()
+        if self.central_stack.currentWidget() == self.media_viewer:
+            new_rec = self.media_viewer.current_recipe.copy()
+            new_rec.temperature = temp
+            new_rec.tint = tint
+            self.media_viewer.apply_recipe_adjustment(new_rec, "Adjust Color")
+        else:
+            sel = self.grid_view.selected_media_ids()
+            if sel:
+                from src.imaging.opencv_engine import render_adjusted_image, PhotoAdjustmentRecipe
+
+                def _adjust(rgb: np.ndarray) -> np.ndarray:
+                    return render_adjusted_image(
+                        rgb, PhotoAdjustmentRecipe(temperature=temp, tint=tint)
+                    )
+
+                self._batch_apply_image_adjustment(sel, "Adjust Color", _adjust)
+
+    def _on_auto_color_selected(self) -> None:
+        if hasattr(self.ribbon, "menu_color"):
+            self.ribbon.menu_color.close()
+        if self.central_stack.currentWidget() == self.media_viewer:
+            self.media_viewer.apply_auto_color()
+        else:
+            sel = self.grid_view.selected_media_ids()
+            if sel:
+                from src.imaging.opencv_engine import analyze_auto_adjust, render_adjusted_image, PhotoAdjustmentRecipe
+
+                def _adjust(rgb: np.ndarray) -> np.ndarray:
+                    auto_rec = analyze_auto_adjust(rgb)
+                    col_rec = PhotoAdjustmentRecipe(
+                        temperature=auto_rec.temperature,
+                        tint=auto_rec.tint,
+                        saturation=auto_rec.saturation,
+                    )
+                    return render_adjusted_image(rgb, col_rec)
+
+                self._batch_apply_image_adjustment(sel, "Auto Adjust Color", _adjust)
+
+    def _on_color_menu_about_to_show(self) -> None:
+        base_img = None
+        if self.central_stack.currentWidget() == self.media_viewer:
+            base_img = self.media_viewer.get_preview_thumbnail(54, 38)
+        elif self.central_stack.currentWidget() == self.grid_view:
+            sel = self.grid_view.selected_media_ids()
+            if sel and sel[0] in self.pixmap_cache:
+                pm = self.pixmap_cache[sel[0]]
+                qimg = pm.toImage().convertToFormat(QImage.Format_RGB888)
+                ptr = qimg.bits()
+                ptr.setsize(qimg.sizeInBytes())
+                base_img = np.array(ptr, copy=True).reshape((qimg.height(), qimg.width(), 3))
+        self.ribbon.color_menu_widget.refresh_thumbnails(base_img)
+
+    def _on_effect_hovered(self, eff_id: str) -> None:
+        if self.central_stack.currentWidget() == self.media_viewer:
+            rec = self.media_viewer.current_recipe.copy()
+            rec.effect = eff_id
+            self.media_viewer.preview_recipe(rec)
+
+    # -------------------------------------------------------------------------
+    # Theme Application, Keyboard Shortcuts & Clean Shutdown
+    # -------------------------------------------------------------------------
+    def apply_theme(self, theme_name: str) -> None:
+        self.current_theme = theme_name  # type: ignore[assignment]
+        theme_file = (
+            Path(__file__).resolve().parents[2]
+            / "assets"
+            / "themes"
+            / f"{theme_name}.qss"
+        )
+        if theme_file.exists():
+            qss = theme_file.read_text(encoding="utf-8")
+            icons_dir = (
+                Path(__file__).resolve().parents[2] / "assets" / "icons"
+            ).as_posix()
+            qss = qss.replace("{ICONS_PATH}", icons_dir)
+            self.setStyleSheet(qss)
+            app = QApplication.instance()
+            if app:
+                app.setStyleSheet(qss)
+
+    def keyPressEvent(self, event: QKeyEvent) -> None:
+        focus_w = QApplication.focusWidget() or self.focusWidget()
+        if not focus_w and hasattr(self, "right_tag_dock") and self.right_tag_dock is not None:
+            focus_w = self.right_tag_dock.focusWidget()
+        is_text_entry = isinstance(focus_w, (QLineEdit, QTextEdit, QPlainTextEdit))
+
+        # Star ratings: 0, 1, 2, 3, 4, 5 (when not focused on a text entry and no Ctrl/Alt modifier)
+        if not is_text_entry and event.modifiers() in (Qt.NoModifier, Qt.KeypadModifier):
+            if Qt.Key_0 <= event.key() <= Qt.Key_5:
+                rating_val = event.key() - Qt.Key_0
+                self.apply_rating_to_selection(rating_val)
+                event.accept()
+                return
+
+        # Single Media Viewer: Left and Right arrow navigation
+        if self.central_stack.currentWidget() == self.media_viewer:
+            if not is_text_entry and not self.media_viewer.is_crop_mode:
+                if event.key() == Qt.Key_Left and event.modifiers() in (Qt.NoModifier, Qt.KeypadModifier):
+                    self.navigate_single_viewer(-1)
+                    event.accept()
+                    return
+                elif event.key() == Qt.Key_Right and event.modifiers() in (Qt.NoModifier, Qt.KeypadModifier):
+                    self.navigate_single_viewer(1)
+                    event.accept()
+                    return
+
+        # Thumbnail Grid View: Left and Right arrow navigation (when not focused on a text entry)
+        if self.central_stack.currentWidget() == self.grid_view:
+            if not is_text_entry and event.modifiers() in (Qt.NoModifier, Qt.KeypadModifier):
+                if event.key() in (Qt.Key_Left, Qt.Key_Right, Qt.Key_Up, Qt.Key_Down):
+                    self.grid_view.keyPressEvent(event)
+                    event.accept()
+                    return
+
+        if event.key() in (Qt.Key_F11, Qt.Key_F12):
+            self.dispatch_ribbon_action("slide_show")
+            event.accept()
+            return
+        if event.key() == Qt.Key_Escape:
+            if self.central_stack.currentWidget() == self.media_viewer:
+                if self.media_viewer.is_crop_mode:
+                    self.media_viewer.set_crop_mode(False)
+                else:
+                    self.show_grid_view()
+                event.accept()
+                return
+            if self.central_stack.currentWidget() == self.map_view:
+                self.show_grid_view()
+                event.accept()
+                return
+            if hasattr(self, "scope_bar") and self.scope_bar.isVisible() and not self.scope_bar.is_pinned():
+                self.hide_search_scope_bar()
+                event.accept()
+                return
+            if self.isFullScreen():
+                self.showNormal()
+                event.accept()
+                return
+
+        if event.modifiers() == Qt.ControlModifier and event.key() == Qt.Key_T:
+            self.focus_descriptive_tag_box()
+            event.accept()
+            return
+
+        if not is_text_entry:
+            # Enter / Return: Grid -> Open Single Viewer; Viewer -> Return to Grid
+            if event.key() in (Qt.Key_Return, Qt.Key_Enter):
+                if self.central_stack.currentWidget() == self.grid_view:
+                    target_id = self._lead_selected_id or (self._selected_ids[0] if self._selected_ids else None)
+                    if target_id is not None:
+                        self.open_single_viewer(target_id)
+                        event.accept()
+                        return
+                elif self.central_stack.currentWidget() == self.media_viewer:
+                    self.show_grid_view()
+                    event.accept()
+                    return
+
+            # Space: Grid -> Open Single Viewer; Viewer -> Next slide
+            if event.key() == Qt.Key_Space:
+                if self.central_stack.currentWidget() == self.grid_view:
+                    target_id = self._lead_selected_id or (self._selected_ids[0] if self._selected_ids else None)
+                    if target_id is not None:
+                        self.open_single_viewer(target_id)
+                        event.accept()
+                        return
+                elif self.central_stack.currentWidget() == self.media_viewer:
+                    if not self.media_viewer.is_crop_mode:
+                        self.navigate_single_viewer(1)
+                        event.accept()
+                        return
+
+            # Clipboard shortcuts: Ctrl+X (Cut), Ctrl+C (Copy), Ctrl+V (Paste)
+            if event.modifiers() == Qt.ControlModifier:
+                if event.key() == Qt.Key_X:
+                    self.cut_selection_to_clipboard()
+                    event.accept()
+                    return
+                elif event.key() == Qt.Key_C:
+                    self.copy_selection_to_clipboard()
+                    event.accept()
+                    return
+                elif event.key() == Qt.Key_V:
+                    self.paste_from_clipboard()
+                    event.accept()
+                    return
+
+            # Delete: Grid and Viewer modes
+            if event.key() == Qt.Key_Delete:
+                if self.central_stack.currentWidget() == self.media_viewer:
+                    curr_id = self.media_viewer.current_media_id
+                    if curr_id is not None:
+                        self._selected_ids = [curr_id]
+                        self.delete_selection_to_recycle_bin()
+                        records = self.catalog_model._records
+                        if records:
+                            self.navigate_single_viewer(0)
+                        else:
+                            self.show_grid_view()
+                    event.accept()
+                    return
+                elif self.central_stack.currentWidget() == self.grid_view:
+                    self.delete_selection_to_recycle_bin()
+                    event.accept()
+                    return
+        super().keyPressEvent(event)
+
+    def _save_app_state(self, force: bool = False) -> None:
+        """Persists window geometry, filter query, selected folder, docks, and view mode to QSettings."""
+        if not force and "PYTEST_CURRENT_TEST" in os.environ:
+            return
+        try:
+            settings = QSettings("PhotoGallery64", "PhotoGallery64")
+            settings.setValue("geometry", self.saveGeometry())
+            settings.setValue("windowState", self.saveState())
+            filter_state = self.left_nav_dock.current_filter_state()
+            settings.setValue("filter_state", json.dumps(filter_state))
+            settings.setValue("tag_dock_visible", not self.right_tag_dock.isHidden())
+            if self.central_stack.currentWidget() == self.media_viewer:
+                settings.setValue("nav_dock_visible", getattr(self, "_nav_dock_was_visible", True))
+            else:
+                settings.setValue("nav_dock_visible", not self.left_nav_dock.isHidden())
+            settings.setValue("arrange_by", self._arrange_by)
+            settings.setValue("reverse_sort", self._reverse_sort)
+            settings.setValue("group_by", self._group_by)
+            settings.setValue("sort_by", self._sort_by)
+            settings.setValue("zoom_val", self.slider_status_zoom.value())
+
+            current_view = "grid"
+            if self.central_stack.currentWidget() == self.media_viewer:
+                current_view = "viewer"
+            elif self.central_stack.currentWidget() == self.map_view:
+                current_view = "map"
+            settings.setValue("view_mode", current_view)
+
+            lead_id = (
+                self.media_viewer.current_media_id
+                if current_view == "viewer"
+                else (self._lead_selected_id or (self._selected_ids[0] if self._selected_ids else None))
+            )
+            if lead_id is not None:
+                settings.setValue("last_selected_id", lead_id)
+
+            settings.setValue("nav_show_dates", getattr(self.left_nav_dock, "_show_dates", True))
+            settings.setValue("nav_show_tags", getattr(self.left_nav_dock, "_show_tags", True))
+            settings.setValue("nav_show_people", getattr(self.left_nav_dock, "_show_people", True))
+            settings.setValue("nav_show_ratings", getattr(self.left_nav_dock, "_show_ratings", True))
+            settings.setValue("find_people_enabled", getattr(self, "find_people_enabled", False))
+            settings.setValue("tooltip_previews", getattr(self, "tooltip_previews", True))
+            settings.setValue("jpeg_quality", getattr(self, "jpeg_quality", 83))
+            settings.setValue("retention_days", getattr(self, "retention_days", 180))
+            settings.setValue("auto_straighten", getattr(self, "auto_straighten", True))
+            settings.setValue("auto_noise", getattr(self, "auto_noise", False))
+            settings.setValue("auto_color", getattr(self, "auto_color", True))
+            settings.setValue("auto_exposure", getattr(self, "auto_exposure", True))
+            settings.setValue("write_back_paused", getattr(self, "write_back_paused", False))
+            settings.setValue("theme", self.current_theme)
+            settings.setValue("icon_theme", getattr(self, "current_icon_theme", "wlpg_aero"))
+        except Exception:
+            pass
+
+    def _restore_app_state(self, force: bool = False) -> None:
+        """Restores window geometry, filter query, selected folder, docks, and view mode from QSettings."""
+        if not force and "PYTEST_CURRENT_TEST" in os.environ:
+            return
+        try:
+            settings = QSettings("PhotoGallery64", "PhotoGallery64")
+            geom = settings.value("geometry")
+            if geom is not None:
+                self.restoreGeometry(geom)
+            win_state = settings.value("windowState")
+            if win_state is not None:
+                self.restoreState(win_state)
+
+            f_json = settings.value("filter_state")
+            if f_json and isinstance(f_json, str):
+                try:
+                    f_dict = json.loads(f_json)
+                    self.left_nav_dock.restore_filter_state(f_dict)
+                except Exception:
+                    pass
+
+            zoom_val = settings.value("zoom_val", type=int)
+            if zoom_val and 72 <= zoom_val <= 320:
+                self.slider_status_zoom.setValue(zoom_val)
+
+            arr_by = settings.value("arrange_by", type=str)
+            rev_sort = settings.value("reverse_sort", type=bool)
+            if arr_by:
+                self._arrange_by = arr_by
+                self._reverse_sort = bool(rev_sort)
+                self.ribbon.set_arrange_by(self._arrange_by, self._reverse_sort)
+
+            grp_by = settings.value("group_by", type=str)
+            if grp_by:
+                self._group_by = grp_by
+            srt_by = settings.value("sort_by", type=str)
+            if srt_by:
+                self._sort_by = srt_by
+
+            tag_visible = settings.value("tag_dock_visible")
+            if tag_visible is not None:
+                is_vis = str(tag_visible).lower() in ("true", "1")
+                self.right_tag_dock.setVisible(is_vis)
+                if hasattr(self.ribbon, "btn_toggle_tag_pane"):
+                    self.ribbon.btn_toggle_tag_pane.setChecked(is_vis)
+
+            view_mode = settings.value("view_mode", type=str)
+            nav_visible = settings.value("nav_dock_visible")
+            if nav_visible is not None:
+                is_nav_vis = str(nav_visible).lower() in ("true", "1")
+            else:
+                is_nav_vis = True
+            if view_mode != "viewer":
+                is_nav_vis = True
+            self.left_nav_dock.setVisible(is_nav_vis)
+            if is_nav_vis:
+                self.left_nav_dock.show()
+                if hasattr(self.ribbon, "btn_toggle_nav_pane"):
+                    self.ribbon.btn_toggle_nav_pane.setChecked(True)
+            self.resizeDocks([self.left_nav_dock], [230], Qt.Horizontal)
+
+            def _to_bool(val, default):
+                if val is None:
+                    return default
+                return str(val).lower() in ("true", "1")
+
+            self.nav_show_dates = _to_bool(settings.value("nav_show_dates"), True)
+            self.nav_show_tags = _to_bool(settings.value("nav_show_tags"), True)
+            self.nav_show_people = _to_bool(settings.value("nav_show_people"), True)
+            self.nav_show_ratings = _to_bool(settings.value("nav_show_ratings"), True)
+            self.find_people_enabled = _to_bool(settings.value("find_people_enabled"), True)
+            self.tooltip_previews = _to_bool(settings.value("tooltip_previews"), True)
+            self.jpeg_quality = settings.value("jpeg_quality", 83, type=int)
+            self.retention_days = settings.value("retention_days", 180, type=int)
+            self.auto_straighten = _to_bool(settings.value("auto_straighten"), True)
+            self.auto_noise = _to_bool(settings.value("auto_noise"), False)
+            self.auto_color = _to_bool(settings.value("auto_color"), True)
+            self.auto_exposure = _to_bool(settings.value("auto_exposure"), True)
+            self.write_back_paused = _to_bool(settings.value("write_back_paused"), False)
+            self.xmp_daemon.set_paused(self.write_back_paused)
+            self.ribbon.set_write_back_paused(self.write_back_paused)
+
+            self.left_nav_dock.set_navigation_sections_visibility(
+                show_dates=self.nav_show_dates,
+                show_tags=self.nav_show_tags,
+                show_people=self.nav_show_people,
+                show_ratings=self.nav_show_ratings,
+            )
+
+            saved_theme = settings.value("theme", type=str)
+            if saved_theme and saved_theme in ("wlpg_aero", "modern", "dark"):
+                self.apply_theme(saved_theme)
+
+            saved_icon_theme = settings.value("icon_theme", type=str)
+            if saved_icon_theme and saved_icon_theme in ("wlpg_aero", "fluent", "minimal"):
+                self.current_icon_theme = saved_icon_theme
+                icon_provider.set_icon_theme(saved_icon_theme)
+
+            # Clean up any phantom/duplicate person tags on startup
+            try:
+                self.catalog_repo.deduplicate_media_people()
+            except Exception:
+                pass
+
+            # Re-run query with restored filter
+            records = self.rebuild_and_run_query()
+
+            last_id = settings.value("last_selected_id", type=int)
+            view_mode = settings.value("view_mode", type=str)
+            if last_id and any(r.id == last_id for r in records):
+                if view_mode == "viewer":
+                    self.open_single_viewer(last_id)
+                else:
+                    self._selected_ids = [last_id]
+                    self._lead_selected_id = last_id
+                    summary = self.catalog_repo.get_selection_summary([last_id])
+                    self.right_tag_dock.bind_selection([last_id], summary)
+                    self.grid_view.select_media_id(last_id)
+        except Exception:
+            pass
+
+    def shutdown(self) -> None:
+        """Cleanly stops all background workers, flushes XMP queue, prunes backups, and closes SQLite."""
+        if self._is_shutting_down:
+            return
+        self._is_shutting_down = True
+
+        self._scanner_cancel.set()
+        for flag in self._active_thumb_flags.values():
+            flag.set()
+        self._active_thumb_flags.clear()
+
+        self.scanner_pool.waitForDone(3000)
+        self.thumbnail_pool.waitForDone(3000)
+        self.stop_face_detection()
+        self.face_pool.waitForDone(2000)
+        self.xmp_daemon.stop()
+        if hasattr(self, "_monitor_timer") and self._monitor_timer.isActive():
+            self._monitor_timer.stop()
+        if hasattr(self, "folder_watcher"):
+            self.folder_watcher.stop()
+
+        # Prune expired '.OriginalFiles' backups older than self.retention_days
+        try:
+            expired_paths = self.catalog_repo.prune_expired_backups(
+                retention_days=self.retention_days
+            )
+            for p in expired_paths:
+                try:
+                    Path(p).unlink(missing_ok=True)
+                except OSError:
+                    pass
+        except Exception:
+            pass
+
+        app = QApplication.instance()
+        if app:
+            try:
+                app.removeEventFilter(self)
+            except Exception:
+                pass
+
+        self.engine.close_all()
+
+    def eventFilter(self, watched: Any, event: Any) -> bool:
+        if event.type() in (QEvent.Type.MouseButtonPress, QEvent.Type.MouseButtonRelease):
+            from PySide6.QtGui import QMouseEvent
+            if isinstance(event, QMouseEvent):
+                if event.button() == Qt.MouseButton.BackButton:
+                    if event.type() == QEvent.Type.MouseButtonPress:
+                        self.navigate_history_back()
+                    return True
+                elif event.button() == Qt.MouseButton.ForwardButton:
+                    if event.type() == QEvent.Type.MouseButtonPress:
+                        self.navigate_history_forward()
+                    return True
+        return super().eventFilter(watched, event)
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        if not getattr(self, "_initial_show_done", False):
+            self._initial_show_done = True
+            if self.central_stack.currentWidget() != self.media_viewer:
+                self.left_nav_dock.setVisible(True)
+                self.left_nav_dock.show()
+                self.resizeDocks([self.left_nav_dock], [230], Qt.Horizontal)
+                if hasattr(self.ribbon, "btn_toggle_nav_pane"):
+                    self.ribbon.btn_toggle_nav_pane.setChecked(True)
+            if (
+                getattr(self, "find_people_enabled", True)
+                and "PYTEST_CURRENT_TEST" not in os.environ
+                and self.catalog_model.rowCount() > 0
+            ):
+                QTimer.singleShot(400, self.start_face_detection)
+
+    def closeEvent(self, event) -> None:
+        self._save_app_state()
+        self.shutdown()
+        super().closeEvent(event)

@@ -1,0 +1,78 @@
+/* Dark Studio Theme */
+QMainWindow, QWidget {
+    background-color: #1E1E1E;
+    color: #E0E0E0;
+    font-family: "Segoe UI", sans-serif;
+}
+QListView {
+    background-color: #181818;
+    border: none;
+}
+QTreeWidget {
+    background-color: #252526;
+    color: #E0E0E0;
+    border: 1px solid #3C3C3C;
+}
+QPushButton {
+    background-color: #333337;
+    color: #E0E0E0;
+    border: 1px solid #555555;
+    border-radius: 3px;
+    padding: 3px 9px;
+}
+QLineEdit {
+    background-color: #2D2D30;
+    color: #FFFFFF;
+    border: 1px solid #555555;
+}
+QStatusBar {
+    background-color: #252526;
+    color: #CCCCCC;
+    border-top: 1px solid #3C3C3C;
+}
+
+QToolTip {
+    background-color: #2D2D30;
+    color: #FFFFFF;
+    border: 1px solid #555555;
+    border-radius: 2px;
+    padding: 3px 6px;
+    font-family: "Segoe UI", sans-serif;
+    font-size: 12px;
+}
+
+QCheckBox {
+    spacing: 6px;
+    color: #E0E0E0;
+    font-family: "Segoe UI", sans-serif;
+    font-size: 9pt;
+}
+
+QCheckBox::indicator {
+    width: 14px;
+    height: 14px;
+    border: 1px solid #555555;
+    border-radius: 3px;
+    background-color: #252526;
+}
+
+QCheckBox::indicator:hover {
+    border-color: #007ACC;
+    background-color: #2D2D30;
+}
+
+QCheckBox::indicator:checked {
+    border: 1px solid #007ACC;
+    background-color: #007ACC;
+    image: url({ICONS_PATH}/check_white.svg);
+}
+
+QCheckBox::indicator:checked:hover {
+    border-color: #0062A3;
+    background-color: #0062A3;
+}
+
+QCheckBox::indicator:disabled {
+    border-color: #3C3C3C;
+    background-color: #2D2D30;
+}

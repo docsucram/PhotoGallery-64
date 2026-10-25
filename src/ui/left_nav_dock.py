@@ -1,0 +1,1675 @@
+"""
+LeftNavigationDock (QDockWidget) implementing Windows Live Photo Gallery's Unified Filter Tree:
+- Folders (nested hierarchy with FavouritesMenu & 'Include subfolders' toggle)
+- Date taken (Year -> Month -> 'Day, Weekday' with item counts, including pre-1970 dates)
+- Descriptive tags (multi-level nested hierarchy with Boolean AND/OR and NOT exclusion)
+- People (face/person filter nodes with media counts and face avatars)
+- Ratings (5 stars .. 1 star, Unrated with counts)
+"""
+
+from __future__ import annotations
+
+import calendar
+import os
+from collections.abc import Sequence
+from pathlib import Path
+from typing import Any, Literal
+
+from PySide6.QtCore import QByteArray, QMimeData, QPoint, QSize, Qt, QTimer, QUrl, Signal
+from PySide6.QtGui import (
+    QAction,
+    QBrush,
+    QColor,
+    QCursor,
+    QDragEnterEvent,
+    QDragMoveEvent,
+    QDropEvent,
+    QFont,
+    QGuiApplication,
+    QIcon,
+    QPainter,
+    QPen,
+)
+from PySide6.QtWidgets import (
+    QAbstractItemView,
+    QCheckBox,
+    QComboBox,
+    QDockWidget,
+    QFrame,
+    QHBoxLayout,
+    QLabel,
+    QMenu,
+    QMessageBox,
+    QPushButton,
+    QToolTip,
+    QTreeWidget,
+    QTreeWidgetItem,
+    QVBoxLayout,
+    QWidget,
+)
+
+from legacy_reference.imgBrowserv13 import FavouritesMenu
+from src.db.repository import ArrangeMode, CatalogRepository, FilterQuerySpec
+from src.ui.ribbon_toolbar import make_person_avatar_pixmap, make_wlpg_icon
+
+_NODE_TYPE_ROLE = Qt.UserRole + 10
+_NODE_PAYLOAD_ROLE = Qt.UserRole + 11
+_TAG_FILTER_STATE_ROLE = Qt.UserRole + 12  # "neutral" | "include" | "exclude"
+_OLD_NAME_ROLE = Qt.UserRole + 13
+_OLD_PATH_ROLE = Qt.UserRole + 14
+
+
+class _LeftNavTree(QTreeWidget):
+    """Custom tree widget supporting Left and Right click drag-and-drop file moves/copies onto folder nodes."""
+
+    files_dropped = Signal(int, str, list, bool)  # target_folder_id, target_folder_path, [file_path_str], is_copy
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setAcceptDrops(True)
+        self.viewport().setAcceptDrops(True)
+        self.setDragDropMode(QAbstractItemView.DropOnly)
+        self._drop_hover_item: QTreeWidgetItem | None = None
+        self._last_drag_buttons: Qt.MouseButtons = Qt.NoButton
+        self._auto_right_drop_action: str | None = None  # For headless testing ("move" | "copy" | "cancel")
+
+        # Non-interfering child badge inside viewport (never steals WindowFromPoint during Windows OLE DoDragDrop)
+        self._drag_badge = QLabel(self.viewport())
+        self._drag_badge.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self._drag_badge.setStyleSheet(
+            """
+            QLabel {
+                background-color: #FFFFFF;
+                border: 1px solid #A0B8D0;
+                border-radius: 2px;
+                color: #003399;
+                font-family: 'Segoe UI';
+                font-size: 8.5pt;
+                padding: 1px 6px;
+            }
+            """
+        )
+        self._drag_badge.hide()
+
+        self._drag_expand_timer = QTimer(self)
+        self._drag_expand_timer.setSingleShot(True)
+        self._drag_expand_timer.setInterval(450)
+        self._drag_expand_timer.timeout.connect(self._on_drag_expand_timeout)
+
+    def _on_drag_expand_timeout(self) -> None:
+        if (
+            self._drop_hover_item is not None
+            and self._drop_hover_item.childCount() > 0
+            and not self._drop_hover_item.isExpanded()
+        ):
+            self._drop_hover_item.setExpanded(True)
+
+    def _folder_item_at(self, pos: QPoint) -> QTreeWidgetItem | None:
+        item = self.itemAt(pos)
+        if item is None:
+            item = self.itemAt(QPoint(max(24, self.viewport().width() // 2), pos.y()))
+        if item is not None and item.data(0, _NODE_TYPE_ROLE) == "folder":
+            return item
+        return None
+
+    def _clear_drag_hover(self) -> None:
+        self._drag_expand_timer.stop()
+        self._drag_badge.hide()
+        if self._drop_hover_item is not None:
+            self._drop_hover_item = None
+            self.viewport().update()
+
+    def paintEvent(self, event) -> None:
+        super().paintEvent(event)
+        if self._drop_hover_item is not None:
+            try:
+                rect = self.visualItemRect(self._drop_hover_item)
+                if rect.isValid():
+                    p = QPainter(self.viewport())
+                    p.setRenderHint(QPainter.Antialiasing, False)
+                    box = rect.adjusted(1, 0, -2, -1)
+                    p.setBrush(QColor(204, 232, 255, 95))
+                    p.setPen(QPen(QColor("#0078D7"), 1))
+                    p.drawRect(box)
+                    p.end()
+            except (RuntimeError, Exception):
+                self._drop_hover_item = None
+
+    def dragEnterEvent(self, event: QDragEnterEvent) -> None:
+        if event.mimeData().hasUrls():
+            if event.buttons() != Qt.NoButton:
+                self._last_drag_buttons = event.buttons()
+            is_copy = bool(event.modifiers() & Qt.ControlModifier)
+            action = Qt.CopyAction if is_copy else Qt.MoveAction
+            if action in event.possibleActions():
+                event.setDropAction(action)
+                event.accept()
+            else:
+                event.acceptProposedAction()
+            return
+        event.ignore()
+
+    def dragMoveEvent(self, event: QDragMoveEvent) -> None:
+        if event.mimeData().hasUrls():
+            if event.buttons() != Qt.NoButton:
+                self._last_drag_buttons = event.buttons()
+            pos = event.position().toPoint()
+            item = self._folder_item_at(pos)
+            if item is not None:
+                if self._drop_hover_item is not item:
+                    self._drop_hover_item = item
+                    prev_block = self.blockSignals(True)
+                    try:
+                        self.setCurrentItem(item)
+                    finally:
+                        self.blockSignals(prev_block)
+                    self.viewport().update()
+                    if item.childCount() > 0 and not item.isExpanded():
+                        self._drag_expand_timer.start()
+                    else:
+                        self._drag_expand_timer.stop()
+
+                folder_name = item.text(0)
+                is_copy = bool(event.modifiers() & Qt.ControlModifier)
+                verb = "Copy" if is_copy else "Move"
+                self._drag_badge.setText(f"➔ {verb} to {folder_name}")
+                self._drag_badge.adjustSize()
+                bx = min(
+                    max(4, pos.x() + 14),
+                    max(4, self.viewport().width() - self._drag_badge.width() - 4),
+                )
+                by = max(2, pos.y() + 16)
+                if by + self._drag_badge.height() > self.viewport().height() - 2:
+                    by = max(2, pos.y() - self._drag_badge.height() - 6)
+                self._drag_badge.move(bx, by)
+                self._drag_badge.show()
+                self._drag_badge.raise_()
+
+                action = Qt.CopyAction if is_copy else Qt.MoveAction
+                if action in event.possibleActions():
+                    event.setDropAction(action)
+                    event.accept()
+                else:
+                    event.acceptProposedAction()
+                return
+            else:
+                self._clear_drag_hover()
+                event.ignore()
+                return
+        event.ignore()
+
+    def dragLeaveEvent(self, event) -> None:
+        self._clear_drag_hover()
+        super().dragLeaveEvent(event)
+
+    def dropEvent(self, event: QDropEvent) -> None:
+        pos = event.position().toPoint()
+        item = self._folder_item_at(pos) or self._drop_hover_item
+        self._clear_drag_hover()
+
+        if event.mimeData().hasUrls() and item is not None and item.data(0, _NODE_TYPE_ROLE) == "folder":
+            fid = item.data(0, _NODE_PAYLOAD_ROLE)
+            fpath = item.data(0, _OLD_PATH_ROLE) or item.toolTip(0)
+            file_paths = [
+                url.toLocalFile() for url in event.mimeData().urls() if url.isLocalFile()
+            ]
+            if fid is not None and file_paths:
+                from src.ui.grid_view import ThumbnailGridView
+                is_right = (
+                    event.mimeData().data("application/x-photogallery64-drag-button") == b"right"
+                    or getattr(ThumbnailGridView, "_active_drag_button", Qt.LeftButton) == Qt.RightButton
+                    or bool(self._last_drag_buttons & Qt.RightButton)
+                    or bool(event.buttons() & Qt.RightButton)
+                )
+                self._last_drag_buttons = Qt.NoButton
+
+                if is_right:
+                    menu = QMenu(self)
+                    menu.setStyleSheet("""
+                        QMenu {
+                            background-color: #FFFFFF;
+                            border: 1px solid #7192BF;
+                            font-family: 'Segoe UI';
+                            font-size: 9pt;
+                            padding: 2px;
+                        }
+                        QMenu::item {
+                            padding: 4px 22px 4px 18px;
+                        }
+                        QMenu::item:selected {
+                            background-color: #CCE8FF;
+                            color: #000000;
+                        }
+                    """)
+                    act_move = menu.addAction("Move here")
+                    f = act_move.font()
+                    f.setBold(True)
+                    act_move.setFont(f)
+                    act_copy = menu.addAction("Copy here")
+                    menu.addSeparator()
+                    act_cancel = menu.addAction("Cancel")
+
+                    if self._auto_right_drop_action == "move":
+                        chosen = act_move
+                    elif self._auto_right_drop_action == "copy":
+                        chosen = act_copy
+                    elif self._auto_right_drop_action == "cancel":
+                        chosen = act_cancel
+                    else:
+                        chosen = menu.exec(QCursor.pos())
+
+                    if chosen == act_move:
+                        event.setDropAction(Qt.MoveAction)
+                        event.accept()
+                        self.files_dropped.emit(int(fid), str(fpath), file_paths, False)
+                    elif chosen == act_copy:
+                        event.setDropAction(Qt.CopyAction)
+                        event.accept()
+                        self.files_dropped.emit(int(fid), str(fpath), file_paths, True)
+                    else:
+                        event.ignore()
+                    return
+                else:
+                    is_copy = bool(event.modifiers() & Qt.ControlModifier)
+                    event.setDropAction(Qt.CopyAction if is_copy else Qt.MoveAction)
+                    event.accept()
+                    self.files_dropped.emit(int(fid), str(fpath), file_paths, is_copy)
+                    return
+        self._last_drag_buttons = Qt.NoButton
+        event.ignore()
+
+
+class LeftNavigationDock(QDockWidget):
+    """
+    Unified collapsible Left Navigation Pane matching WLPG's main_ui.png and find_ui.png.
+    Produces an immutable FilterQuerySpec in <1ms whenever any filter node is clicked or toggled.
+    """
+
+    filter_changed = Signal()
+    folder_add_requested = Signal()
+    folder_remove_requested = Signal(int, str, str)  # folder_id, folder_path, folder_name
+    folder_renamed = Signal(str, str, str)  # old_path, new_path, new_name
+    folder_created = Signal(str)  # new_folder_path
+    folder_deleted = Signal(int, str)  # folder_id, folder_path
+    favourite_path_selected = Signal(str)
+    files_dropped_on_folder = Signal(int, str, list, bool)
+    people_directory_requested = Signal()
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__("Navigation", parent)
+        self.setObjectName("LeftNavigationDock")
+        self.setFeatures(
+            QDockWidget.DockWidgetMovable
+        )
+        # Hide the dock titlebar so the left pane starts cleanly with the tree like WLPG
+        self.setTitleBarWidget(QWidget(self))
+        self.setMinimumWidth(200)
+
+        # Internal filter state
+        self._folder_id: int | None = None
+        self._folder_name: str = "All folders"
+        self._include_subfolders: bool = True
+        self._date_year: int | None = None
+        self._date_month: int | None = None
+        self._date_day: int | None = None
+        self._include_tag_ids: set[int] = set()
+        self._exclude_tag_ids: set[int] = set()
+        self._tag_boolean_mode: Literal["AND", "OR"] = "AND"
+        self._untagged_only: bool = False
+        self._person_ids: set[int] = set()
+        self._person_boolean_mode: Literal["AND", "OR"] = "OR"
+        self._ratings: set[int] = set()
+        self._flagged_only: bool = False
+        self._edited_only: bool = False
+        self._media_type: Literal["all", "image", "video", "raw"] = "all"
+        self._favourite_paths: list[str] = []
+
+        # Section visibility state (Options dialog)
+        self._show_dates: bool = True
+        self._show_tags: bool = True
+        self._show_people: bool = True
+        self._show_ratings: bool = True
+
+        # Fast lookup maps for tree items
+        self._folder_items: dict[int, QTreeWidgetItem] = {}
+        self._tag_items: dict[int, QTreeWidgetItem] = {}
+        self._person_items: dict[int, QTreeWidgetItem] = {}
+        self._rating_items: dict[int, QTreeWidgetItem] = {}
+        self._updating_tree: bool = False
+        self._checkbox_just_changed: bool = False
+
+        # Build UI
+        container = QFrame(self)
+        container.setObjectName("LeftNavContainer")
+        container.setMinimumWidth(200)
+
+        layout = QVBoxLayout(container)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        # Unified QTreeWidget occupying the primary vertical area (matches main_ui.png)
+        self.tree = _LeftNavTree(container)
+        self.tree.setObjectName("LeftNavTree")
+        self.tree.setHeaderHidden(True)
+        self.tree.setIndentation(16)
+        self.tree.setIconSize(QSize(16, 16))
+        self.tree.setAnimated(True)
+        self.tree.setFrameShape(QFrame.NoFrame)
+        self.tree.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.tree.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.tree.itemSelectionChanged.connect(self._on_tree_selection_changed)
+        self.tree.itemClicked.connect(self._on_item_clicked)
+        self.tree.itemChanged.connect(self._on_item_changed)
+        self.tree.customContextMenuRequested.connect(self._on_context_menu)
+        self.tree.files_dropped.connect(self.files_dropped_on_folder)
+        layout.addWidget(self.tree, 1)
+
+        # Clean bottom footer with only the Subfolders toggle (matching WLPG style)
+        footer = QFrame(container)
+        footer.setObjectName("LeftNavFooter")
+        footer_layout = QHBoxLayout(footer)
+        footer_layout.setContentsMargins(10, 4, 10, 5)
+        footer_layout.setSpacing(4)
+
+        self.chk_subfolders = QCheckBox("Subfolders", footer)
+        self.chk_subfolders.setToolTip("Include subfolders when a folder is selected")
+        self.chk_subfolders.setChecked(True)
+        self.chk_subfolders.toggled.connect(self._on_subfolders_toggled)
+        footer_layout.addWidget(self.chk_subfolders)
+        footer_layout.addStretch(1)
+
+        layout.addWidget(footer, 0)
+
+        self.setWidget(container)
+        self._apply_stylesheet()
+        self._init_root_sections()
+
+    def sizeHint(self) -> QSize:
+        return QSize(230, 600)
+
+    def _apply_stylesheet(self) -> None:
+        self.setStyleSheet(
+            """
+            QFrame#LeftNavContainer {
+                background: #FFFFFF;
+                border-right: 1px solid #C5D5E6;
+            }
+            QTreeWidget#LeftNavTree {
+                background: #FFFFFF;
+                border: none;
+                font-family: 'Segoe UI';
+                font-size: 9pt;
+                color: #1E395B;
+                outline: none;
+            }
+            QTreeWidget#LeftNavTree::item {
+                padding: 2px 4px;
+                border: 1px solid transparent;
+                border-radius: 2px;
+            }
+            QTreeWidget#LeftNavTree::item:hover {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #F4F9FE, stop:1 #E4F0FC);
+                border: 1px solid #B8D6F5;
+            }
+            QTreeWidget#LeftNavTree::item:selected {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #DCEBFC, stop:1 #C1DCFA);
+                border: 1px solid #84ACDD;
+                color: #1E395B;
+            }
+            QFrame#LeftNavFooter {
+                background: #F3F7FC;
+                border-top: 1px solid #D5E1F0;
+            }
+            """
+        )
+
+    def _init_root_sections(self) -> None:
+        self.tree.blockSignals(True)
+        try:
+            self.tree.clear()
+            self._folder_items.clear()
+            self._tag_items.clear()
+            self._person_items.clear()
+            self._rating_items.clear()
+
+            sec_font = QFont("Segoe UI", 9, QFont.Bold)
+            section_color = QBrush(QColor("#1E395B"))
+
+            # 1. All photos and videos (Top-level folder root - matches WLPG screenshot)
+            self.root_all = QTreeWidgetItem(self.tree, ["All photos and videos"])
+            self.root_all.setData(0, _NODE_TYPE_ROLE, "all_media")
+            self.root_all.setIcon(0, make_wlpg_icon("all_media", 16))
+            self.root_all.setFont(0, sec_font)
+            self.root_all.setForeground(0, section_color)
+            self.root_all.setExpanded(True)
+            self.root_folders = self.root_all  # All photos and videos is the top level of folders
+
+            # 2. Date taken root (matches order in docs/reference_ui/main_ui.png)
+            self.root_dates = QTreeWidgetItem(self.tree, ["Date taken"])
+            self.root_dates.setData(0, _NODE_TYPE_ROLE, "section_dates")
+            self.root_dates.setIcon(0, make_wlpg_icon("calendar", 16))
+            self.root_dates.setFont(0, sec_font)
+            self.root_dates.setForeground(0, section_color)
+            self.root_dates.setExpanded(True)
+
+            # 3. People root
+            self.root_people = QTreeWidgetItem(self.tree, ["People"])
+            self.root_people.setData(0, _NODE_TYPE_ROLE, "section_people")
+            self.root_people.setIcon(0, make_wlpg_icon("person", 16))
+            self.root_people.setFont(0, sec_font)
+            self.root_people.setForeground(0, section_color)
+            self.root_people.setExpanded(True)
+
+            # 4. Descriptive tags root
+            self.root_tags = QTreeWidgetItem(self.tree, ["Descriptive tags"])
+            self.root_tags.setData(0, _NODE_TYPE_ROLE, "section_tags")
+            self.root_tags.setIcon(0, make_wlpg_icon("tag", 16))
+            self.root_tags.setFont(0, sec_font)
+            self.root_tags.setForeground(0, section_color)
+            self.root_tags.setExpanded(True)
+
+            # 5. Ratings root
+            self.root_ratings = QTreeWidgetItem(self.tree, ["Ratings"])
+            self.root_ratings.setData(0, _NODE_TYPE_ROLE, "section_ratings")
+            self.root_ratings.setIcon(0, make_wlpg_icon("star_filled", 16))
+            self.root_ratings.setFont(0, sec_font)
+            self.root_ratings.setForeground(0, section_color)
+            self.root_ratings.setExpanded(False)
+
+            # Apply user-configured navigation section visibilities
+            if hasattr(self, "_show_dates"):
+                self.root_dates.setHidden(not self._show_dates)
+            if hasattr(self, "_show_people"):
+                self.root_people.setHidden(not self._show_people)
+            if hasattr(self, "_show_tags"):
+                self.root_tags.setHidden(not self._show_tags)
+            if hasattr(self, "_show_ratings"):
+                self.root_ratings.setHidden(not self._show_ratings)
+        finally:
+            self.tree.blockSignals(False)
+
+    def set_navigation_sections_visibility(
+        self,
+        show_dates: bool = True,
+        show_tags: bool = True,
+        show_people: bool = True,
+        show_ratings: bool = True,
+    ) -> None:
+        """Shows or hides top-level navigation sections per Photo Gallery Options dialog."""
+        self._show_dates = bool(show_dates)
+        self._show_tags = bool(show_tags)
+        self._show_people = bool(show_people)
+        self._show_ratings = bool(show_ratings)
+        if hasattr(self, "root_dates"):
+            self.root_dates.setHidden(not self._show_dates)
+        if hasattr(self, "root_tags"):
+            self.root_tags.setHidden(not self._show_tags)
+        if hasattr(self, "root_people"):
+            self.root_people.setHidden(not self._show_people)
+        if hasattr(self, "root_ratings"):
+            self.root_ratings.setHidden(not self._show_ratings)
+
+    def set_section_visible(self, section_name: str, visible: bool) -> None:
+        """Toggles visibility of an individual section by name ('dates', 'tags', 'people', 'ratings')."""
+        sec = section_name.lower()
+        if "date" in sec:
+            self._show_dates = bool(visible)
+            if hasattr(self, "root_dates"):
+                self.root_dates.setHidden(not self._show_dates)
+        elif "tag" in sec:
+            self._show_tags = bool(visible)
+            if hasattr(self, "root_tags"):
+                self.root_tags.setHidden(not self._show_tags)
+        elif "people" in sec or "person" in sec:
+            self._show_people = bool(visible)
+            if hasattr(self, "root_people"):
+                self.root_people.setHidden(not self._show_people)
+        elif "rating" in sec:
+            self._show_ratings = bool(visible)
+            if hasattr(self, "root_ratings"):
+                self.root_ratings.setHidden(not self._show_ratings)
+
+    # -------------------------------------------------------------------------
+    # Populate / Refresh from CatalogRepository
+    # -------------------------------------------------------------------------
+    def refresh_trees(self, repo: CatalogRepository) -> None:
+        """Populates Folders, Date Taken, Descriptive Tags, People, and Ratings from catalog.db."""
+        self._repo = repo
+        self._updating_tree = True
+        self.tree.blockSignals(True)
+        try:
+            had_existing_folders = bool(self._folder_items)
+            expanded_folder_ids = {
+                fid for fid, itm in self._folder_items.items() if itm.isExpanded()
+            }
+            self._init_root_sections()
+            self.tree.blockSignals(True)
+
+            folder_icon = make_wlpg_icon("folder", 16)
+            cal_icon = make_wlpg_icon("calendar", 16)
+            tag_icon = make_wlpg_icon("tag", 16)
+            person_icon = make_wlpg_icon("person", 16)
+            star_icon = make_wlpg_icon("star_filled", 16)
+            empty_star_icon = make_wlpg_icon("star_empty", 16)
+
+            # 1. Populate Folders hierarchy under All photos and videos
+            folders = repo.get_folders()
+            for f in folders:
+                fid = int(f["id"])
+                fname = str(f["name"])
+                fpath_str = str(f["path"])
+                fname_lower = fname.lower()
+                if "picture" in fname_lower:
+                    f_icon = make_wlpg_icon("pictures_library", 16)
+                elif "video" in fname_lower:
+                    f_icon = make_wlpg_icon("videos_library", 16)
+                else:
+                    f_icon = folder_icon
+
+                item = QTreeWidgetItem([fname])
+                item.setData(0, _NODE_TYPE_ROLE, "folder")
+                item.setData(0, _NODE_PAYLOAD_ROLE, fid)
+                item.setData(0, _OLD_NAME_ROLE, fname)
+                item.setData(0, _OLD_PATH_ROLE, fpath_str)
+                item.setIcon(0, f_icon)
+                item.setToolTip(0, fpath_str)
+                self._folder_items[fid] = item
+
+            for f in folders:
+                fid = int(f["id"])
+                pid = f["parent_id"]
+                item = self._folder_items[fid]
+                if pid is not None and int(pid) in self._folder_items:
+                    self._folder_items[int(pid)].addChild(item)
+                else:
+                    self.root_all.addChild(item)
+
+            for fid, item in self._folder_items.items():
+                if fid in expanded_folder_ids:
+                    item.setExpanded(True)
+
+            # 2. Populate Date Taken hierarchy (Year -> Month -> Day, Weekday)
+            date_rows = repo.get_date_tree_counts()
+            # Strict nested aggregation: year -> month -> list of (day, day_label, cnt)
+            years_data: dict[int, dict[int, list[tuple[int, str, int]]]] = {}
+            for d in date_rows:
+                y = int(d["year"])
+                m = int(d["month"])
+                day = int(d["day"])
+                day_label = str(d["day_label"])
+                cnt = int(d["count"])
+                years_data.setdefault(y, {}).setdefault(m, []).append((day, day_label, cnt))
+
+            for y in sorted(years_data.keys(), reverse=True):
+                months_data = years_data[y]
+                year_total = sum(cnt for m_days in months_data.values() for (_, _, cnt) in m_days)
+                y_item = QTreeWidgetItem([f"{y} ({year_total})"])
+                y_item.setData(0, _NODE_TYPE_ROLE, "date")
+                y_item.setData(0, _NODE_PAYLOAD_ROLE, (y, None, None))
+                y_item.setIcon(0, cal_icon)
+                self.root_dates.addChild(y_item)
+
+                for m in sorted(months_data.keys(), reverse=True):
+                    days_list = months_data[m]
+                    month_total = sum(cnt for (_, _, cnt) in days_list)
+                    m_name = calendar.month_name[m] if 1 <= m <= 12 else f"Month {m}"
+                    m_item = QTreeWidgetItem([f"{m_name} ({month_total})"])
+                    m_item.setData(0, _NODE_TYPE_ROLE, "date")
+                    m_item.setData(0, _NODE_PAYLOAD_ROLE, (y, m, None))
+                    m_item.setIcon(0, cal_icon)
+                    y_item.addChild(m_item)
+
+                    for day, day_label, cnt in sorted(days_list, key=lambda x: x[0], reverse=True):
+                        d_item = QTreeWidgetItem([f"{day_label} ({cnt})"])
+                        d_item.setData(0, _NODE_TYPE_ROLE, "date")
+                        d_item.setData(0, _NODE_PAYLOAD_ROLE, (y, m, day))
+                        d_item.setIcon(0, cal_icon)
+                        m_item.addChild(d_item)
+
+            # 3. Populate Descriptive Tags hierarchy + "Not tagged" node
+            self.item_untagged = QTreeWidgetItem(["Not tagged"])
+            self.item_untagged.setData(0, _NODE_TYPE_ROLE, "untagged")
+            self.item_untagged.setIcon(0, tag_icon)
+            if self._untagged_only:
+                self.item_untagged.setSelected(True)
+            self.root_tags.addChild(self.item_untagged)
+
+            tag_rows = repo.get_tag_tree()
+            for t in tag_rows:
+                tid = int(t["id"])
+                tname = str(t["name"])
+                cnt = int(t["direct_count"])
+                label = f"{tname} ({cnt})" if cnt > 0 else tname
+                t_item = QTreeWidgetItem([label])
+                t_item.setData(0, _NODE_TYPE_ROLE, "tag")
+                t_item.setData(0, _NODE_PAYLOAD_ROLE, tid)
+                t_item.setData(0, _TAG_FILTER_STATE_ROLE, "neutral")
+                t_item.setIcon(0, tag_icon)
+                t_item.setToolTip(0, f"{t['full_path']} (Click to select, Ctrl+click to multi-select)")
+                self._tag_items[tid] = t_item
+
+            for t in tag_rows:
+                tid = int(t["id"])
+                pid = t["parent_id"]
+                t_item = self._tag_items[tid]
+                if pid is not None and int(pid) in self._tag_items:
+                    self._tag_items[int(pid)].addChild(t_item)
+                else:
+                    self.root_tags.addChild(t_item)
+                if tid in self._include_tag_ids:
+                    t_item.setSelected(True)
+                    self._apply_tag_item_visual_state(t_item, "include")
+                elif tid in self._exclude_tag_ids:
+                    self._apply_tag_item_visual_state(t_item, "exclude")
+
+            # 4. Populate People nodes (with real face avatar icon when available)
+            people_rows = repo.get_people_list()
+            for p in people_rows:
+                pid = int(p["id"])
+                pname = str(p["name"])
+                cnt = int(p["media_count"])
+                blob = p.get("thumbnail_blob")
+                p_item = QTreeWidgetItem([f"{pname} ({cnt})" if cnt > 0 else pname])
+                p_item.setData(0, _NODE_TYPE_ROLE, "person")
+                p_item.setData(0, _NODE_PAYLOAD_ROLE, pid)
+                if blob:
+                    p_item.setIcon(0, QIcon(make_person_avatar_pixmap(pname, blob, 18)))
+                else:
+                    p_item.setIcon(0, person_icon)
+                if pid in self._person_ids:
+                    p_item.setSelected(True)
+                self.root_people.addChild(p_item)
+                self._person_items[pid] = p_item
+
+            # 5. Populate Ratings nodes (5 stars .. 1 star, Unrated)
+            rating_counts = repo.get_rating_counts()
+            rating_labels = [
+                (5, "★★★★★ (5 stars)"),
+                (4, "★★★★☆ (4 stars)"),
+                (3, "★★★☆☆ (3 stars)"),
+                (2, "★★☆☆☆ (2 stars)"),
+                (1, "★☆☆☆☆ (1 star)"),
+                (0, "Unrated"),
+            ]
+            for r_val, r_label in rating_labels:
+                cnt = rating_counts.get(r_val, 0)
+                r_item = QTreeWidgetItem([f"{r_label} ({cnt})"])
+                r_item.setData(0, _NODE_TYPE_ROLE, "rating")
+                r_item.setData(0, _NODE_PAYLOAD_ROLE, r_val)
+                r_item.setIcon(0, star_icon if r_val > 0 else empty_star_icon)
+                r_item.setFlags(r_item.flags() | Qt.ItemIsUserCheckable)
+                r_item.setCheckState(
+                    0, Qt.Checked if r_val in self._ratings else Qt.Unchecked
+                )
+                self.root_ratings.addChild(r_item)
+                self._rating_items[r_val] = r_item
+
+            self.root_folders.setExpanded(True)
+            self.root_tags.setExpanded(True)
+            self.root_people.setExpanded(True)
+        finally:
+            self.tree.blockSignals(False)
+            self._updating_tree = False
+        self._update_summary_label()
+
+    def _apply_tag_item_visual_state(
+        self, item: QTreeWidgetItem, state: Literal["neutral", "include", "exclude"]
+    ) -> None:
+        base_text = item.text(0)
+        if base_text.startswith("[NOT] "):
+            base_text = base_text[6:]
+        item.setData(0, _TAG_FILTER_STATE_ROLE, state)
+        font = item.font(0)
+        if state == "include":
+            font.setStrikeOut(False)
+            font.setBold(True)
+            item.setFont(0, font)
+            item.setForeground(0, QBrush(QColor("#005A9E")))
+            item.setText(0, base_text)
+            item.setSelected(True)
+        elif state == "exclude":
+            font.setStrikeOut(True)
+            font.setBold(True)
+            item.setFont(0, font)
+            item.setForeground(0, QBrush(QColor("#C50F1F")))
+            item.setText(0, f"[NOT] {base_text}")
+        else:
+            font.setStrikeOut(False)
+            font.setBold(False)
+            item.setFont(0, font)
+            item.setForeground(0, QBrush(QColor("#1E395B")))
+            item.setText(0, base_text)
+
+    # -------------------------------------------------------------------------
+    # User Interaction Slots
+    # -------------------------------------------------------------------------
+    def _on_subfolders_toggled(self, checked: bool) -> None:
+        self._include_subfolders = bool(checked)
+        self._update_summary_label()
+        self.filter_changed.emit()
+
+    def _on_tag_boolean_changed(self, _index: int) -> None:
+        if hasattr(self, "cmb_tag_boolean"):
+            mode = self.cmb_tag_boolean.currentData()
+            self._tag_boolean_mode = "OR" if mode == "OR" else "AND"
+        self._update_summary_label()
+        self.filter_changed.emit()
+
+    def _on_tree_selection_changed(self) -> None:
+        if self._updating_tree:
+            return
+        selected = self.tree.selectedItems()
+        if not selected:
+            return
+
+        tag_ids: set[int] = set()
+        person_ids: set[int] = set()
+        untagged_sel = False
+        folder_tuple: tuple[int, str] | None = None
+        date_tuple: tuple | None = None
+        all_media = False
+
+        for it in selected:
+            ntype = it.data(0, _NODE_TYPE_ROLE)
+            payload = it.data(0, _NODE_PAYLOAD_ROLE)
+            if ntype == "tag" and payload is not None:
+                tag_ids.add(int(payload))
+            elif ntype == "untagged":
+                untagged_sel = True
+            elif ntype == "person" and payload is not None:
+                person_ids.add(int(payload))
+            elif ntype == "folder" and payload is not None:
+                folder_tuple = (int(payload), it.text(0))
+            elif ntype == "date" and isinstance(payload, tuple):
+                date_tuple = payload
+            elif ntype == "all_media":
+                all_media = True
+
+        if all_media:
+            self.clear_all_filters()
+            return
+
+        changed = False
+        if folder_tuple is not None:
+            if self._folder_id != folder_tuple[0]:
+                self._folder_id, self._folder_name = folder_tuple
+                changed = True
+        if date_tuple is not None:
+            y, m, d = date_tuple
+            if (self._date_year, self._date_month, self._date_day) != (y, m, d):
+                self._date_year, self._date_month, self._date_day = y, m, d
+                changed = True
+
+        if self._include_tag_ids != tag_ids:
+            self._include_tag_ids = tag_ids
+            changed = True
+        if self._untagged_only != untagged_sel:
+            self._untagged_only = untagged_sel
+            changed = True
+        if self._person_ids != person_ids:
+            self._person_ids = person_ids
+            changed = True
+
+        if changed:
+            self._update_summary_label()
+            self.filter_changed.emit()
+
+    def _on_item_clicked(self, item: QTreeWidgetItem, _column: int) -> None:
+        if self._updating_tree:
+            return
+        if self._checkbox_just_changed:
+            self._checkbox_just_changed = False
+            return
+
+        ntype = item.data(0, _NODE_TYPE_ROLE)
+        payload = item.data(0, _NODE_PAYLOAD_ROLE)
+        ctrl_held = bool(QGuiApplication.keyboardModifiers() & Qt.ControlModifier)
+
+        if ntype == "all_media":
+            self.clear_all_filters()
+            return
+        if ntype == "section_folders":
+            self._folder_id = None
+            self._folder_name = "All folders"
+            item.setExpanded(True)
+            self._update_summary_label()
+            self.filter_changed.emit()
+            return
+        if ntype == "section_dates":
+            self._date_year = None
+            self._date_month = None
+            self._date_day = None
+            self._update_summary_label()
+            self.filter_changed.emit()
+            return
+        if ntype == "section_tags":
+            self._updating_tree = True
+            try:
+                self._include_tag_ids.clear()
+                self._exclude_tag_ids.clear()
+                self._untagged_only = False
+                for t_item in self._tag_items.values():
+                    t_item.setSelected(False)
+                    self._apply_tag_item_visual_state(t_item, "neutral")
+            finally:
+                self._updating_tree = False
+            self._update_summary_label()
+            self.filter_changed.emit()
+            return
+        if ntype == "section_people":
+            self.select_person(None)
+            self.people_directory_requested.emit()
+            return
+        if ntype == "section_ratings":
+            self.select_ratings([])
+            return
+        if ntype == "folder":
+            self._folder_id = int(payload)
+            self._folder_name = item.text(0)
+            if item.childCount() > 0:
+                item.setExpanded(True)
+            self._update_summary_label()
+            self.filter_changed.emit()
+            return
+        if ntype == "date" and isinstance(payload, tuple):
+            self._date_year, self._date_month, self._date_day = payload
+            self._update_summary_label()
+            self.filter_changed.emit()
+            return
+        if ntype in ("tag", "untagged", "person"):
+            # Handled reactively by itemSelectionChanged
+            return
+        if ntype == "rating":
+            r_val = int(payload)
+            if ctrl_held:
+                new_set = set(self._ratings)
+                if r_val in new_set:
+                    new_set.discard(r_val)
+                else:
+                    new_set.add(r_val)
+                self.select_ratings(sorted(new_set))
+            else:
+                self.select_ratings([r_val])
+            return
+
+    def _on_item_changed(self, item: QTreeWidgetItem, _column: int) -> None:
+        if self._updating_tree:
+            return
+        ntype = item.data(0, _NODE_TYPE_ROLE)
+        payload = item.data(0, _NODE_PAYLOAD_ROLE)
+
+        # Handle inline folder rename completion
+        if ntype == "folder" and getattr(self, "_editing_folder_item", None) is item:
+            new_name = item.text(0).strip()
+            old_name = self._editing_folder_old_name
+            if new_name == old_name:
+                return  # Initial setFlags trigger; editing still active
+
+            # User committed a new name: finish editing
+            old_path = self._editing_folder_old_path
+            self._editing_folder_item = None
+            item.setFlags(item.flags() & ~Qt.ItemIsEditable)
+
+            if not new_name:
+                self._updating_tree = True
+                try:
+                    item.setText(0, old_name)
+                finally:
+                    self._updating_tree = False
+                return
+
+            invalid_chars = set(r'\/:*?"<>|')
+            if any(c in invalid_chars for c in new_name):
+                self._updating_tree = True
+                try:
+                    item.setText(0, old_name)
+                finally:
+                    self._updating_tree = False
+                QToolTip.showText(
+                    QCursor.pos(),
+                    "A folder name cannot contain any of the following characters:\n\\ / : * ? \" < > |",
+                    self.tree,
+                )
+                return
+
+            old_p = Path(old_path)
+            new_p = old_p.parent / new_name
+
+            if new_p.exists():
+                self._updating_tree = True
+                try:
+                    item.setText(0, old_name)
+                finally:
+                    self._updating_tree = False
+                QToolTip.showText(
+                    QCursor.pos(),
+                    f"A folder named '{new_name}' already exists in this location.",
+                    self.tree,
+                )
+                return
+
+            try:
+                os.rename(str(old_p), str(new_p))
+            except Exception as exc:
+                self._updating_tree = True
+                try:
+                    item.setText(0, old_name)
+                finally:
+                    self._updating_tree = False
+                QToolTip.showText(
+                    QCursor.pos(),
+                    f"Could not rename folder: {exc}",
+                    self.tree,
+                )
+                return
+
+            self._updating_tree = True
+            try:
+                item.setText(0, new_name)
+                item.setToolTip(0, str(new_p))
+            finally:
+                self._updating_tree = False
+
+            if old_path in self._favourite_paths:
+                idx = self._favourite_paths.index(old_path)
+                self._favourite_paths[idx] = str(new_p)
+                self._rebuild_favourites_menu()
+
+            self.folder_renamed.emit(str(old_p), str(new_p), new_name)
+            return
+
+        self._checkbox_just_changed = True
+        checked = item.checkState(0) == Qt.Checked
+
+        self._updating_tree = True
+        try:
+            if ntype == "tag":
+                tid = int(payload)
+                if checked:
+                    self._include_tag_ids.add(tid)
+                    self._exclude_tag_ids.discard(tid)
+                    self._apply_tag_item_visual_state(item, "include")
+                else:
+                    self._include_tag_ids.discard(tid)
+                    self._exclude_tag_ids.discard(tid)
+                    self._apply_tag_item_visual_state(item, "neutral")
+            elif ntype == "untagged":
+                self._untagged_only = checked
+            elif ntype == "person":
+                pid = int(payload)
+                if checked:
+                    self._person_ids.add(pid)
+                else:
+                    self._person_ids.discard(pid)
+            elif ntype == "rating":
+                r_val = int(payload)
+                if checked:
+                    self._ratings.add(r_val)
+                else:
+                    self._ratings.discard(r_val)
+        finally:
+            self._updating_tree = False
+
+        self._update_summary_label()
+        self.filter_changed.emit()
+
+    def _build_context_menu(self, item: QTreeWidgetItem) -> QMenu:
+        """Constructs the QMenu corresponding to the given navigation item."""
+        ntype = item.data(0, _NODE_TYPE_ROLE)
+        payload = item.data(0, _NODE_PAYLOAD_ROLE)
+
+        menu = QMenu(self)
+        menu.setStyleSheet(
+            """
+            QMenu {
+                background-color: #FFFFFF;
+                border: 1px solid #CBD5E1;
+                border-radius: 6px;
+                padding: 4px;
+                color: #0F172A;
+                font-family: 'Segoe UI', sans-serif;
+                font-size: 12px;
+            }
+            QMenu::item {
+                padding: 6px 20px 6px 12px;
+                border-radius: 4px;
+            }
+            QMenu::item:selected {
+                background-color: #F1F5F9;
+                color: #0F172A;
+            }
+            QMenu::separator {
+                height: 1px;
+                background-color: #E2E8F0;
+                margin: 4px 6px;
+            }
+            """
+        )
+        if ntype == "section_tags":
+            act_clean = QAction("Delete unused tags", menu)
+            act_clean.triggered.connect(self._on_delete_unused_tags)
+            menu.addAction(act_clean)
+        elif ntype == "tag":
+            tid = int(payload)
+            act_inc = QAction("Include tag", menu)
+            act_exc = QAction("Exclude tag (NOT)", menu)
+            act_clr = QAction("Clear tag filter", menu)
+            act_inc.triggered.connect(lambda: self.set_tag_filter_state(tid, "include"))
+            act_exc.triggered.connect(lambda: self.set_tag_filter_state(tid, "exclude"))
+            act_clr.triggered.connect(lambda: self.set_tag_filter_state(tid, "neutral"))
+            menu.addAction(act_inc)
+            menu.addAction(act_exc)
+            menu.addAction(act_clr)
+            menu.addSeparator()
+
+            act_del_this = QAction("Delete tag", menu)
+            act_del_this.triggered.connect(lambda: self._on_delete_tag(tid, item.text(0)))
+            menu.addAction(act_del_this)
+
+            act_clean = QAction("Delete unused tags", menu)
+            act_clean.triggered.connect(self._on_delete_unused_tags)
+            menu.addAction(act_clean)
+        elif ntype == "folder":
+            folder_path = item.toolTip(0)
+            folder_name = item.text(0)
+            fid = int(payload) if payload is not None else 0
+
+            # 1. Expand / Collapse (matches WLPG folder context menu)
+            is_expanded = item.isExpanded()
+            act_expand = QAction("Collapse" if is_expanded else "Expand", menu)
+            act_expand.setEnabled(item.childCount() > 0)
+            act_expand.triggered.connect(lambda: item.setExpanded(not is_expanded))
+            menu.addAction(act_expand)
+
+            if folder_path:
+                act_open_loc = QAction("Open folder location", menu)
+                act_open_loc.triggered.connect(lambda _c=False, fp=folder_path: self._open_folder_location(fp))
+                menu.addAction(act_open_loc)
+
+            menu.addSeparator()
+
+            # 2. Cut & Copy
+            act_cut = QAction("Cut", menu)
+            act_cut.triggered.connect(lambda: self._clipboard_copy_folder(folder_path, is_cut=True))
+            menu.addAction(act_cut)
+
+            act_copy = QAction("Copy", menu)
+            act_copy.triggered.connect(lambda: self._clipboard_copy_folder(folder_path, is_cut=False))
+            menu.addAction(act_copy)
+
+            menu.addSeparator()
+
+            # 3. Delete & Rename
+            act_delete = QAction("Delete", menu)
+            act_delete.triggered.connect(lambda: self._delete_folder_action(item, fid, folder_path, folder_name))
+            menu.addAction(act_delete)
+
+            act_rename = QAction("Rename", menu)
+            act_rename.triggered.connect(lambda: self._start_inline_rename(item))
+            menu.addAction(act_rename)
+
+            menu.addSeparator()
+
+            # 4. Create new folder
+            act_new_folder = QAction("Create new folder", menu)
+            act_new_folder.triggered.connect(lambda: self._create_new_folder_action(item, folder_path))
+            menu.addAction(act_new_folder)
+
+            menu.addSeparator()
+
+            # Favourites & Remove from Library
+            if folder_path:
+                act_fav = QAction("Add to Favourites", menu)
+                act_fav.triggered.connect(lambda: self.add_favourite(folder_path))
+                menu.addAction(act_fav)
+
+            act_rem = QAction("Remove from library", menu)
+            act_rem.triggered.connect(
+                lambda _c=False, fid_val=fid, fp=folder_path, fn=folder_name: self.folder_remove_requested.emit(
+                    fid_val, fp, fn
+                )
+            )
+            menu.addAction(act_rem)
+        elif ntype == "section_folders":
+            act_add = QAction("Add folder to gallery...", menu)
+            act_add.triggered.connect(self.folder_add_requested.emit)
+            menu.addAction(act_add)
+
+        return menu
+
+    def _on_context_menu(self, pos) -> None:
+        item = self.tree.itemAt(pos)
+        if item is None:
+            return
+        menu = self._build_context_menu(item)
+        if not menu.isEmpty():
+            menu.exec(self.tree.viewport().mapToGlobal(pos))
+
+    def _on_delete_unused_tags(self) -> None:
+        if not hasattr(self, "_repo") or self._repo is None:
+            return
+        deleted = self._repo.delete_unused_tags()
+        self.refresh_trees(self._repo)
+        self.filter_changed.emit()
+        QMessageBox.information(
+            self,
+            "Clean Up Tags",
+            f"Removed {deleted} unused tag{'s' if deleted != 1 else ''}.\n\n"
+            "This only removed tags with zero associated photos. If a photo with these tags is imported later, "
+            "the tags will be automatically recreated.",
+        )
+
+    def _on_delete_tag(self, tag_id: int, tag_label: str) -> None:
+        if not hasattr(self, "_repo") or self._repo is None:
+            return
+        clean_name = tag_label.split(" (")[0] if " (" in tag_label else tag_label
+        reply = QMessageBox.question(
+            self,
+            "Delete Tag",
+            f"Are you sure you want to delete the tag '{clean_name}'?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply == QMessageBox.StandardButton.Yes:
+            self._repo.delete_tag(tag_id)
+            self.refresh_trees(self._repo)
+            self.filter_changed.emit()
+
+    def _open_folder_location(self, folder_path: str) -> None:
+        """Reveals the folder in Windows File Explorer."""
+        if not folder_path:
+            return
+        norm = os.path.normpath(folder_path)
+        if os.path.exists(norm):
+            try:
+                import subprocess
+                subprocess.Popen(f'explorer.exe "{norm}"')
+            except Exception as e:
+                logger.warning("Could not open folder location in File Explorer: %s", e)
+
+    def _start_inline_rename(self, item: QTreeWidgetItem) -> None:
+        """Starts in-place inline renaming on the tree item, exactly like Windows File Explorer."""
+        self._editing_folder_item = item
+        self._editing_folder_old_name = item.text(0)
+        self._editing_folder_old_path = item.toolTip(0)
+        item.setFlags(item.flags() | Qt.ItemIsEditable)
+        self.tree.setCurrentItem(item)
+        self.tree.editItem(item, 0)
+
+    def _create_new_folder_action(self, parent_item: QTreeWidgetItem, parent_path_str: str) -> None:
+        """Creates a new folder on disk and enters inline rename mode in the tree."""
+        parent_p = Path(parent_path_str)
+        if not parent_p.is_dir():
+            return
+
+        candidate = "New folder"
+        i = 2
+        while (parent_p / candidate).exists():
+            candidate = f"New folder ({i})"
+            i += 1
+
+        new_dir = parent_p / candidate
+        try:
+            new_dir.mkdir(parents=True, exist_ok=True)
+        except Exception as exc:
+            QToolTip.showText(QCursor.pos(), f"Could not create folder: {exc}", self.tree)
+            return
+
+        child = QTreeWidgetItem(parent_item, [candidate])
+        child.setData(0, _NODE_TYPE_ROLE, "folder")
+        child.setData(0, _NODE_PAYLOAD_ROLE, None)
+        child.setToolTip(0, str(new_dir))
+        child.setIcon(0, make_wlpg_icon("folder", 16))
+        parent_item.setExpanded(True)
+        self.tree.setCurrentItem(child)
+
+        self._editing_folder_item = child
+        self._editing_folder_old_name = candidate
+        self._editing_folder_old_path = str(new_dir)
+        child.setFlags(child.flags() | Qt.ItemIsEditable)
+        self.tree.editItem(child, 0)
+
+        self.folder_created.emit(str(new_dir))
+
+    def _delete_folder_action(
+        self,
+        item: QTreeWidgetItem,
+        folder_id: int,
+        folder_path: str,
+        folder_name: str,
+    ) -> None:
+        """Confirms and moves the folder to the Windows Recycle Bin."""
+        reply = QMessageBox.question(
+            self,
+            "Delete Folder",
+            f"Are you sure you want to move '{folder_name}' and all its contents to the Recycle Bin?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+
+        p = Path(folder_path)
+        if p.exists():
+            try:
+                import send2trash
+                send2trash.send2trash(str(p))
+            except Exception:
+                pass
+
+        parent_item = item.parent()
+        if parent_item:
+            parent_item.removeChild(item)
+        else:
+            idx = self.tree.indexOfTopLevelItem(item)
+            if idx >= 0:
+                self.tree.takeTopLevelItem(idx)
+
+        self.folder_deleted.emit(folder_id, folder_path)
+
+    def _clipboard_copy_folder(self, folder_path: str, is_cut: bool = False) -> None:
+        """Copies or cuts a folder to the clipboard with Windows Explorer Preferred DropEffect."""
+        if not folder_path:
+            return
+        mime = QMimeData()
+        mime.setUrls([QUrl.fromLocalFile(folder_path)])
+        effect = QByteArray(b"\x02\x00\x00\x00" if is_cut else b"\x05\x00\x00\x00")
+        mime.setData("Preferred DropEffect", effect)
+        QGuiApplication.clipboard().setMimeData(mime)
+
+    def add_favourite(self, folder_path: str) -> None:
+        if folder_path and folder_path not in self._favourite_paths:
+            self._favourite_paths.append(folder_path)
+            self._rebuild_favourites_menu()
+
+    def _remove_folder_from_favourites(self, folder_path: str) -> None:
+        if folder_path in self._favourite_paths:
+            self._favourite_paths.remove(folder_path)
+            self._rebuild_favourites_menu()
+
+    def _rebuild_favourites_menu(self) -> None:
+        if hasattr(self, "favourites_menu"):
+            self.favourites_menu.clear()
+            for p in self._favourite_paths:
+                act = QAction(p, self.favourites_menu)
+                act.setData(p)
+                act.triggered.connect(
+                    lambda _checked=False, path=p: self.favourite_path_selected.emit(path)
+                )
+                self.favourites_menu.addAction(act)
+
+    # -------------------------------------------------------------------------
+    # Programmatic Filter Control & Inspection API
+    # -------------------------------------------------------------------------
+    def select_folder(
+        self, folder_id: int | None, include_subfolders: bool | None = None
+    ) -> None:
+        self._folder_id = folder_id
+        if folder_id is not None and folder_id in self._folder_items:
+            self._folder_name = self._folder_items[folder_id].text(0)
+            self.tree.setCurrentItem(self._folder_items[folder_id])
+        else:
+            self._folder_name = "All folders"
+        if include_subfolders is not None:
+            self._include_subfolders = bool(include_subfolders)
+            self.chk_subfolders.blockSignals(True)
+            self.chk_subfolders.setChecked(self._include_subfolders)
+            self.chk_subfolders.blockSignals(False)
+        self._update_summary_label()
+        self.filter_changed.emit()
+
+    def clear_folder_filter(self) -> None:
+        """Removes the folder filter, searching all folders while keeping all other filters intact."""
+        self._folder_id = None
+        self._folder_name = "All folders"
+        curr = self.tree.currentItem()
+        if curr and any(curr is item for item in self._folder_items.values()):
+            self.tree.setCurrentItem(None)
+        self._update_summary_label()
+        self.filter_changed.emit()
+
+    def selected_folder_name(self) -> str | None:
+        """Returns the name of the currently filtered folder, or None if searching all folders."""
+        if self._folder_id is not None:
+            return self._folder_name
+        return None
+
+    def select_date(
+        self,
+        year: int | None = None,
+        month: int | None = None,
+        day: int | None = None,
+    ) -> None:
+        self._date_year = year
+        self._date_month = month
+        self._date_day = day
+        self._update_summary_label()
+        self.filter_changed.emit()
+
+    def set_tag_filter_state(
+        self, tag_id: int, state: Literal["neutral", "include", "exclude"]
+    ) -> None:
+        self._updating_tree = True
+        try:
+            self._include_tag_ids.discard(tag_id)
+            self._exclude_tag_ids.discard(tag_id)
+            if state == "include":
+                self._include_tag_ids.add(tag_id)
+            elif state == "exclude":
+                self._exclude_tag_ids.add(tag_id)
+
+            item = self._tag_items.get(tag_id)
+            if item is not None:
+                self._apply_tag_item_visual_state(item, state)
+        finally:
+            self._updating_tree = False
+        self._update_summary_label()
+        self.filter_changed.emit()
+
+    def clear_tag_filters(self) -> None:
+        self._updating_tree = True
+        try:
+            self._include_tag_ids.clear()
+            self._exclude_tag_ids.clear()
+            self._untagged_only = False
+            if hasattr(self, "item_untagged"):
+                self.item_untagged.setSelected(False)
+            for t_item in self._tag_items.values():
+                self._apply_tag_item_visual_state(t_item, "neutral")
+        finally:
+            self._updating_tree = False
+        self._update_summary_label()
+        self.filter_changed.emit()
+
+    def set_tag_boolean_mode(self, mode: Literal["AND", "OR"]) -> None:
+        self._tag_boolean_mode = mode
+        if hasattr(self, "cmb_tag_boolean"):
+            idx = 1 if mode == "OR" else 0
+            self.cmb_tag_boolean.blockSignals(True)
+            self.cmb_tag_boolean.setCurrentIndex(idx)
+            self.cmb_tag_boolean.blockSignals(False)
+        self._update_summary_label()
+        self.filter_changed.emit()
+
+    def set_person_boolean_mode(self, mode: Literal["AND", "OR"]) -> None:
+        self._person_boolean_mode = mode
+        self._update_summary_label()
+        self.filter_changed.emit()
+
+    def set_untagged_only(self, untagged: bool) -> None:
+        self._untagged_only = bool(untagged)
+        if hasattr(self, "item_untagged"):
+            self._updating_tree = True
+            self.item_untagged.setSelected(self._untagged_only)
+            self._updating_tree = False
+        self._update_summary_label()
+        self.filter_changed.emit()
+
+    def select_person(self, person_id: int | None, toggle: bool = False) -> None:
+        self._updating_tree = True
+        try:
+            if person_id is None:
+                self._person_ids.clear()
+            elif toggle:
+                if person_id in self._person_ids:
+                    self._person_ids.discard(person_id)
+                else:
+                    self._person_ids.add(person_id)
+            else:
+                self._person_ids = {person_id}
+
+            for pid, p_item in self._person_items.items():
+                p_item.setSelected(pid in self._person_ids)
+        finally:
+            self._updating_tree = False
+        self._update_summary_label()
+        self.filter_changed.emit()
+
+    def unselect_person(self, person_id: int) -> None:
+        """Removes a single person from active people filters."""
+        if person_id in self._person_ids:
+            self.select_person(person_id, toggle=True)
+
+    def select_ratings(self, ratings: Sequence[int]) -> None:
+        self._updating_tree = True
+        try:
+            self._ratings = {int(r) for r in ratings}
+            for r_val, r_item in self._rating_items.items():
+                r_item.setCheckState(
+                    0, Qt.Checked if r_val in self._ratings else Qt.Unchecked
+                )
+        finally:
+            self._updating_tree = False
+        self._update_summary_label()
+        self.filter_changed.emit()
+
+    def clear_rating_filters(self) -> None:
+        """Clears all active star rating filters."""
+        self.select_ratings(())
+
+    def set_flagged_only(self, flagged_only: bool) -> None:
+        self._flagged_only = bool(flagged_only)
+        self._flag_filter = 1 if flagged_only else None
+        self._update_summary_label()
+        self.filter_changed.emit()
+
+    def set_flag_filter(self, flag_filter: int | None) -> None:
+        self._flag_filter = flag_filter
+        self._flagged_only = (flag_filter == 1)
+        self._update_summary_label()
+        self.filter_changed.emit()
+
+    def set_edited_only(self, edited_only: bool) -> None:
+        self._edited_only = bool(edited_only)
+        self._update_summary_label()
+        self.filter_changed.emit()
+
+    def set_media_type(self, media_type: Literal["all", "image", "video", "raw"]) -> None:
+        self._media_type = media_type
+        self._update_summary_label()
+        self.filter_changed.emit()
+
+    def clear_all_filters(self) -> None:
+        self._updating_tree = True
+        try:
+            self._folder_id = None
+            self._folder_name = "All folders"
+            self._date_year = None
+            self._date_month = None
+            self._date_day = None
+            self._include_tag_ids.clear()
+            self._exclude_tag_ids.clear()
+            self._untagged_only = False
+            self._person_ids.clear()
+            self._person_boolean_mode = "OR"
+            self._ratings.clear()
+            self._flagged_only = False
+            self._edited_only = False
+            self._media_type = "all"
+
+            self.tree.clearSelection()
+            if hasattr(self, "item_untagged"):
+                self.item_untagged.setSelected(False)
+            for t_item in self._tag_items.values():
+                t_item.setSelected(False)
+                self._apply_tag_item_visual_state(t_item, "neutral")
+            for p_item in self._person_items.values():
+                p_item.setSelected(False)
+            for r_item in self._rating_items.values():
+                r_item.setCheckState(0, Qt.Unchecked)
+        finally:
+            self._updating_tree = False
+        self._update_summary_label()
+        self.filter_changed.emit()
+
+    def selected_scope_description(self) -> str:
+        parts: list[str] = []
+        if self._folder_id is not None:
+            parts.append(f"Folder: {self._folder_name}")
+        if self._date_year is not None:
+            if self._date_day is not None and self._date_month is not None:
+                parts.append(f"Date: {self._date_day}/{self._date_month:02d}/{self._date_year}")
+            elif self._date_month is not None:
+                parts.append(f"Date: {self._date_month:02d}/{self._date_year}")
+            else:
+                parts.append(f"Year: {self._date_year}")
+        if self._include_tag_ids:
+            parts.append(f"Tags ({self._tag_boolean_mode}): {len(self._include_tag_ids)}")
+        if self._exclude_tag_ids:
+            parts.append(f"Excluded Tags: {len(self._exclude_tag_ids)}")
+        if self._untagged_only:
+            parts.append("Not tagged")
+        if self._person_ids:
+            parts.append(f"People: {len(self._person_ids)}")
+        if self._ratings:
+            parts.append(f"Ratings: {sorted(self._ratings, reverse=True)}")
+        if self._flagged_only:
+            parts.append("Flagged")
+        if self._edited_only:
+            parts.append("Edited")
+        if self._media_type == "image":
+            parts.append("Photos only")
+        elif self._media_type == "video":
+            parts.append("Videos only")
+        elif self._media_type == "raw":
+            parts.append("RAW photos only")
+        return " | ".join(parts) if parts else "All photos and videos"
+
+    def _update_summary_label(self) -> None:
+        if hasattr(self, "lbl_active_summary"):
+            self.lbl_active_summary.setText(self.selected_scope_description())
+
+    def current_filter_state(self) -> dict[str, Any]:
+        return {
+            "folder_id": self._folder_id,
+            "include_subfolders": self._include_subfolders,
+            "date_year": self._date_year,
+            "date_month": self._date_month,
+            "date_day": self._date_day,
+            "include_tag_ids": tuple(sorted(self._include_tag_ids)),
+            "tag_boolean_mode": self._tag_boolean_mode,
+            "exclude_tag_ids": tuple(sorted(self._exclude_tag_ids)),
+            "untagged_only": self._untagged_only,
+            "person_ids": tuple(sorted(self._person_ids)),
+            "person_boolean_mode": self._person_boolean_mode,
+            "ratings": tuple(sorted(self._ratings)),
+            "flagged_only": self._flagged_only,
+            "edited_only": self._edited_only,
+            "media_type": self._media_type,
+        }
+
+    def restore_filter_state(self, state: dict[str, Any]) -> None:
+        """Restores filter state from a dictionary (used for back/forward navigation history and startup restore)."""
+        self._folder_id = state.get("folder_id")
+        self._include_subfolders = state.get("include_subfolders", True)
+        self._date_year = state.get("date_year")
+        self._date_month = state.get("date_month")
+        self._date_day = state.get("date_day")
+        self._include_tag_ids = set(state.get("include_tag_ids", ()))
+        self._tag_boolean_mode = state.get("tag_boolean_mode", "AND")
+        self._exclude_tag_ids = set(state.get("exclude_tag_ids", ()))
+        self._untagged_only = state.get("untagged_only", False)
+        self._person_ids = set(state.get("person_ids", ()))
+        self._person_boolean_mode = state.get("person_boolean_mode", "OR")
+        self._ratings = set(state.get("ratings", ()))
+        self._flagged_only = state.get("flagged_only", False)
+        self._edited_only = state.get("edited_only", False)
+        self._media_type = state.get("media_type", "all")
+
+        self._updating_tree = True
+        try:
+            # Update folder selection
+            if self._folder_id is not None and self._folder_id in self._folder_items:
+                f_item = self._folder_items[self._folder_id]
+                self._folder_name = f_item.text(0)
+                self.tree.setCurrentItem(f_item)
+                # Ensure parent folders are expanded
+                p = f_item.parent()
+                while p:
+                    p.setExpanded(True)
+                    p = p.parent()
+            else:
+                self._folder_name = "All folders"
+                if hasattr(self, "root_folders"):
+                    self.tree.setCurrentItem(self.root_folders)
+
+            # Update subfolders checkbox
+            if hasattr(self, "chk_subfolders"):
+                self.chk_subfolders.blockSignals(True)
+                self.chk_subfolders.setChecked(self._include_subfolders)
+                self.chk_subfolders.blockSignals(False)
+
+            # Update tag checkboxes/visual states
+            if hasattr(self, "item_untagged"):
+                self.item_untagged.setSelected(self._untagged_only)
+            for tid, t_item in self._tag_items.items():
+                if tid in self._include_tag_ids:
+                    self._apply_tag_item_visual_state(t_item, "include")
+                elif tid in self._exclude_tag_ids:
+                    self._apply_tag_item_visual_state(t_item, "exclude")
+                else:
+                    self._apply_tag_item_visual_state(t_item, "neutral")
+
+            # Update person items
+            for pid, p_item in self._person_items.items():
+                p_item.setSelected(pid in self._person_ids)
+
+            # Update rating items
+            for r_val, r_item in self._rating_items.items():
+                r_item.setCheckState(0, Qt.Checked if r_val in self._ratings else Qt.Unchecked)
+        finally:
+            self._updating_tree = False
+
+        self._update_summary_label()
+
+    def select_month(self, month: int) -> None:
+        """Filters to photos taken in the specified month (1..12) or all dates (0)."""
+        if month <= 0:
+            self._date_month = None
+        else:
+            self._date_month = month
+        self._update_summary_label()
+        self.filter_changed.emit()
+
+    def build_filter_spec(
+        self,
+        arrange_by: ArrangeMode = "date",
+        reverse_sort: bool = False,
+        search_text: str = "",
+        bbox: tuple[float, float, float, float] | None = None,
+        media_ids: tuple[int, ...] | None = None,
+        group_by: str = "month",
+        sort_by: str = "date",
+        sort_reverse: bool = False,
+        group_reverse: bool = False,
+    ) -> FilterQuerySpec:
+        """Constructs an immutable FilterQuerySpec ready for CatalogRepository.query_media_records."""
+        return FilterQuerySpec(
+            folder_id=self._folder_id,
+            include_subfolders=self._include_subfolders,
+            date_year=self._date_year,
+            date_month=self._date_month,
+            date_day=self._date_day,
+            include_tag_ids=tuple(sorted(self._include_tag_ids)),
+            tag_boolean_mode=self._tag_boolean_mode,
+            exclude_tag_ids=tuple(sorted(self._exclude_tag_ids)),
+            untagged_only=self._untagged_only,
+            person_ids=tuple(sorted(self._person_ids)),
+            person_boolean_mode=self._person_boolean_mode,
+            ratings=tuple(sorted(self._ratings)),
+            flagged_only=self._flagged_only,
+            flag_filter=getattr(self, "_flag_filter", (1 if self._flagged_only else None)),
+            edited_only=self._edited_only,
+            media_type=self._media_type,
+            search_text=search_text,
+            bbox=bbox,
+            media_ids=media_ids,
+            arrange_by=arrange_by,
+            reverse_sort=reverse_sort,
+            group_by=group_by,
+            sort_by=sort_by,
+            sort_reverse=sort_reverse,
+            group_reverse=group_reverse,
+        )
