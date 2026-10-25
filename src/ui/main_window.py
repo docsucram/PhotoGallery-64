@@ -538,6 +538,7 @@ class PhotoGalleryMainWindow(QMainWindow):
         self.scope_bar.setFixedHeight(62)
         self.scope_bar.hide()
         self.grid_view.set_search_scope_bar(self.scope_bar)
+        self.grid_view.try_search_all_requested.connect(self._on_search_all_requested)
         self.ribbon.remove_embedded_scope_bar()
         self.ribbon.scope_bar = self.scope_bar
         self.ribbon.txt_search = self.scope_bar.txt_search
@@ -2042,6 +2043,22 @@ class PhotoGalleryMainWindow(QMainWindow):
         )
         records = self.catalog_repo.query_media_records(spec)
         self.catalog_model.set_records(records, group_headers_enabled=headers_enabled)
+
+        # Update empty state overlay
+        is_empty = (len(records) == 0)
+        is_search = bool(self._search_text and self._search_text.strip())
+        is_scoped = bool(
+            spec.folder_id
+            or spec.folder_ids
+            or (hasattr(self, "left_nav_dock") and self.left_nav_dock.selected_folder_name() is not None)
+            or spec.tag_ids
+            or spec.person_ids
+            or spec.date_range
+            or spec.rating_min
+            or spec.flagged is not None
+        )
+        self.grid_view.set_empty_state(is_empty=is_empty, is_search=is_search, is_scoped=is_scoped)
+
         if preserve_selection and prev_ids:
             self.grid_view.set_selected_media_ids(prev_ids)
         else:
@@ -3800,11 +3817,11 @@ class PhotoGalleryMainWindow(QMainWindow):
                 new_file = default_save_path
 
             # If in single media viewer and active edits exist, save current edited pixels
-            if (
+            in_viewer = (
                 self.central_stack.currentWidget() == self.media_viewer
                 and self.media_viewer.current_media_id == mid
-                and self.media_viewer.current_pil_image is not None
-            ):
+            )
+            if in_viewer and self.media_viewer.current_pil_image is not None:
                 save_fmt = "JPEG" if new_file.suffix.lower() in (".jpg", ".jpeg") else "PNG"
                 self.media_viewer.current_pil_image.save(new_file, format=save_fmt, quality=95)
             else:
@@ -3812,6 +3829,42 @@ class PhotoGalleryMainWindow(QMainWindow):
 
             # Rescan destination directory so the copy shows in gallery
             self.scan_folder(new_file.parent, include_subfolders=False)
+            self.rebuild_and_run_query()
+
+            # Find the new media ID in database and clone tags / star rating / caption / flag
+            new_mid = None
+            try:
+                conn = self.engine.catalog_conn()
+                f_row = conn.execute("SELECT id FROM folders WHERE path = ?;", (str(new_file.parent),)).fetchone()
+                if f_row:
+                    m_row = conn.execute(
+                        "SELECT id FROM media WHERE folder_id = ? AND filename = ?;",
+                        (f_row[0], new_file.name),
+                    ).fetchone()
+                    if m_row:
+                        new_mid = int(m_row[0])
+                        conn.execute(
+                            "UPDATE media SET rating = (SELECT rating FROM media WHERE id = ?), "
+                            "caption = (SELECT caption FROM media WHERE id = ?), "
+                            "flagged = (SELECT flagged FROM media WHERE id = ?) "
+                            "WHERE id = ?;",
+                            (mid, mid, mid, new_mid),
+                        )
+                        conn.execute(
+                            "INSERT OR IGNORE INTO media_tags (media_id, tag_id) "
+                            "SELECT ?, tag_id FROM media_tags WHERE media_id = ?;",
+                            (new_mid, mid),
+                        )
+                        conn.commit()
+            except Exception:
+                pass
+
+            if in_viewer and new_mid:
+                # Switch viewer to the newly created copy so user seamlessly continues editing it
+                self.open_single_viewer(new_mid)
+            else:
+                self._select_file_in_grid(new_file)
+
             self.lbl_sync_status.setText(f"✓ Created copy: {new_file.name}")
             return [new_file]
 

@@ -785,10 +785,25 @@ def extract_media_metadata(file_path: Path, is_video: bool) -> dict[str, Any]:
                         if orient in (5, 6, 7, 8):
                             meta["width"], meta["height"] = img.height, img.width
 
+                    # First, check Exif SubIFD (where cameras store DateTimeOriginal and DateTimeDigitized)
+                    sub = {}
+                    try:
+                        exif_ifd = exif_raw.get_ifd(ExifTags.IFD.Exif)
+                        if exif_ifd:
+                            sub = {
+                                ExifTags.TAGS.get(k, k): v for k, v in exif_ifd.items()
+                            }
+                    except Exception:
+                        pass
+
+                    # DateTimeOriginal is the true Date Taken. Fall back to DateTimeDigitized, then DateTime tag 306
                     dt_str = (
-                        readable.get("DateTimeOriginal")
+                        sub.get("DateTimeOriginal")
+                        or readable.get("DateTimeOriginal")
+                        or sub.get("DateTimeDigitized")
                         or readable.get("DateTimeDigitized")
                         or readable.get("DateTime")
+                        or sub.get("DateTime")
                     )
                     if dt_str:
                         meta["date_taken"] = _parse_iso_or_exif_datetime(str(dt_str))
@@ -800,31 +815,20 @@ def extract_media_metadata(file_path: Path, is_video: bool) -> dict[str, Any]:
                     if readable.get("Artist"):
                         meta["author"] = str(readable["Artist"]).strip("\x00 ")
 
-                    # Check Exif SubIFD for ExposureTime, FNumber, FocalLength, ISO, DateTimeOriginal
-                    try:
-                        exif_ifd = exif_raw.get_ifd(ExifTags.IFD.Exif)
-                        if exif_ifd:
-                            sub = {
-                                ExifTags.TAGS.get(k, k): v for k, v in exif_ifd.items()
-                            }
-                            if meta["date_taken"] is None:
-                                sub_dt = sub.get("DateTimeOriginal") or sub.get("DateTimeDigitized")
-                                if sub_dt:
-                                    meta["date_taken"] = _parse_iso_or_exif_datetime(str(sub_dt))
-                            if "ExposureTime" in sub:
-                                meta["exposure_time"] = _format_exposure_str(sub["ExposureTime"])
-                            if "FNumber" in sub:
-                                meta["f_number"] = _format_rational(sub["FNumber"])
-                            if "FocalLength" in sub:
-                                meta["focal_length"] = _format_rational(sub["FocalLength"])
-                            if "ISOSpeedRatings" in sub:
-                                try:
-                                    iso_val = sub["ISOSpeedRatings"]
-                                    meta["iso"] = int(iso_val[0] if isinstance(iso_val, tuple) else iso_val)
-                                except Exception:
-                                    pass
-                    except Exception:
-                        pass
+                    # Check Exif SubIFD for ExposureTime, FNumber, FocalLength, ISO
+                    if sub:
+                        if "ExposureTime" in sub:
+                            meta["exposure_time"] = _format_exposure_str(sub["ExposureTime"])
+                        if "FNumber" in sub:
+                            meta["f_number"] = _format_rational(sub["FNumber"])
+                        if "FocalLength" in sub:
+                            meta["focal_length"] = _format_rational(sub["FocalLength"])
+                        if "ISOSpeedRatings" in sub:
+                            try:
+                                iso_val = sub["ISOSpeedRatings"]
+                                meta["iso"] = int(iso_val[0] if isinstance(iso_val, tuple) else iso_val)
+                            except Exception:
+                                pass
 
                     # Check GPS IFD
                     try:

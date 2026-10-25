@@ -59,13 +59,16 @@ from PySide6.QtGui import (
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
+    QLabel,
     QLineEdit,
     QListView,
     QMenu,
+    QPushButton,
     QStyle,
     QStyledItemDelegate,
     QStyleOptionViewItem,
     QToolTip,
+    QVBoxLayout,
     QWidget,
 )
 
@@ -622,6 +625,72 @@ class MediaCardDelegate(QStyledItemDelegate):
         return super().editorEvent(event, model, option, index)
 
 
+class EmptyStateWidget(QWidget):
+    """
+    Authentic Windows Live Photo Gallery empty state overlay:
+    - Displayed centered in the grid viewport when no items match the query.
+    - If restricted to a folder or scoped filter, provides a clickable 'Try searching all photos and videos' link.
+    """
+    search_all_clicked = Signal()
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setAttribute(Qt.WA_StyledBackground, False)
+        self.setStyleSheet("background: transparent;")
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(6)
+        layout.setAlignment(Qt.AlignCenter)
+
+        self.btn_try_all = QPushButton("Try searching all photos and videos", self)
+        self.btn_try_all.setCursor(Qt.PointingHandCursor)
+        self.btn_try_all.setStyleSheet(
+            """
+            QPushButton {
+                color: #0066CC;
+                font-family: 'Segoe UI', sans-serif;
+                font-size: 11pt;
+                border: none;
+                background: transparent;
+                padding: 0;
+            }
+            QPushButton:hover {
+                color: #004499;
+                text-decoration: underline;
+            }
+            """
+        )
+        self.btn_try_all.clicked.connect(self.search_all_clicked.emit)
+        layout.addWidget(self.btn_try_all, 0, Qt.AlignCenter)
+
+        self.lbl_message = QLabel("No items match your current search.", self)
+        self.lbl_message.setAlignment(Qt.AlignCenter)
+        self.lbl_message.setStyleSheet(
+            "color: #555555; font-family: 'Segoe UI', sans-serif; font-size: 9.5pt; border: none; background: transparent;"
+        )
+        layout.addWidget(self.lbl_message, 0, Qt.AlignCenter)
+        self.hide()
+
+    def set_state(self, is_empty: bool, is_search: bool, is_scoped: bool) -> None:
+        if not is_empty:
+            self.hide()
+            return
+
+        if is_search and is_scoped:
+            self.btn_try_all.show()
+            self.lbl_message.setText("No items match your current search.")
+        elif is_search and not is_scoped:
+            self.btn_try_all.hide()
+            self.lbl_message.setText("No items match your current search.")
+        else:
+            self.btn_try_all.hide()
+            self.lbl_message.setText("There are no pictures or videos in this view.")
+
+        self.adjustSize()
+        self.show()
+        self.raise_()
+
+
 class ThumbnailGridView(QListView):
     """
     Virtualized 2D Canvas View backed by CatalogListModel's O(G) geometry engine.
@@ -632,6 +701,7 @@ class ThumbnailGridView(QListView):
     viewport_range_changed = Signal(list)         # list[int] of visible + buffer media_ids
     selection_ids_changed = Signal(list, int)     # selected_media_ids, lead_media_id (-1 if none)
     media_activated = Signal(int)                 # media_id on double-click or Enter
+    try_search_all_requested = Signal()           # user clicked 'Try searching all photos and videos'
     _active_drag_button: Qt.MouseButton = Qt.LeftButton
 
     def __init__(
@@ -653,6 +723,8 @@ class ThumbnailGridView(QListView):
         self._pending_single_select: QModelIndex | None = None
         self._press_index: QModelIndex = QModelIndex()
         self.scope_bar: SearchScopeBar | None = None
+        self.empty_state_overlay = EmptyStateWidget(self.viewport())
+        self.empty_state_overlay.search_all_clicked.connect(self.try_search_all_requested.emit)
 
         self.setMouseTracking(True)
         self.viewport().setMouseTracking(True)
@@ -841,7 +913,23 @@ class ThumbnailGridView(QListView):
         super().resizeEvent(event)
         self._update_scope_bar_geometry()
         self._sync_metrics_and_scrollbar()
+        self._reposition_empty_state()
         self._scroll_debounce.start()
+
+    def _reposition_empty_state(self) -> None:
+        if hasattr(self, "empty_state_overlay") and self.empty_state_overlay.isVisible():
+            vp = self.viewport()
+            ow = max(360, self.empty_state_overlay.sizeHint().width())
+            oh = max(70, self.empty_state_overlay.sizeHint().height())
+            x = (vp.width() - ow) // 2
+            sb_h = self.scope_bar.height() if (self.scope_bar and self.scope_bar.isVisible()) else 0
+            y = sb_h + max(40, (vp.height() - sb_h - oh) // 2)
+            self.empty_state_overlay.setGeometry(x, y, ow, oh)
+
+    def set_empty_state(self, is_empty: bool, is_search: bool = False, is_scoped: bool = False) -> None:
+        """Configures and displays the WLPG empty search/filter state."""
+        self.empty_state_overlay.set_state(is_empty, is_search, is_scoped)
+        self._reposition_empty_state()
 
     # -------------------------------------------------------------------------
     # Custom 2D Virtualized Painting & Hit-Testing Overrides

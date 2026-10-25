@@ -3549,6 +3549,9 @@ class RibbonToolbar(QWidget):
                 for i in range(page.layout().count()):
                     w = page.layout().itemAt(i).widget()
                     if w and hasattr(w, "content_layout") and hasattr(w, "content_widget"):
+                        # Clear old min widths so group box can shrink when children are hidden
+                        w.content_widget.setMinimumWidth(0)
+                        w.setMinimumWidth(0)
                         # Invalidate sub-layouts to ensure compacted button sizes are reflected
                         for j in range(w.content_layout.count()):
                             sub = w.content_layout.itemAt(j)
@@ -4347,6 +4350,12 @@ class RibbonToolbar(QWidget):
             self.grp_edit_adjust.setTitle("Adjustments" if is_viewer else "Quick adjustments")
         if hasattr(self, "grp_edit_close"):
             self.grp_edit_close.setTitle("Close" if is_viewer else "View")
+
+        # Re-apply responsive layout to resize group boxes snugly around visible controls
+        if hasattr(self, "grp_edit_manage"):
+            self.grp_edit_manage.content_widget.setMinimumWidth(0)
+            self.grp_edit_manage.setMinimumWidth(0)
+        self._apply_responsive_layout(self.width())
 
     def _build_find_tab(self) -> QWidget:
         """
