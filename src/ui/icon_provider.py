@@ -43,6 +43,7 @@ _FLUENT_MAP: dict[str, tuple[str, str]] = {
     "rotate_ccw": ("ri.anticlockwise-2-line", "#0078D4"),
     "rotate_cw": ("ri.clockwise-2-line", "#0078D4"),
     # Find / Dates / Media
+    "print": ("ri.printer-line", "#0078D4"),
     "calendar": ("msc.calendar", "#0078D4"),
     "dates": ("msc.calendar", "#0078D4"),
     "dates_grid": ("msc.calendar", "#0078D4"),

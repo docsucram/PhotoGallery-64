@@ -3001,12 +3001,12 @@ class SingleMediaViewer(QWidget):
                     return True
 
             # Zoom in (+) / Zoom out (-)
-            if not self.is_crop_mode and event.modifiers() in (Qt.NoModifier, Qt.KeypadModifier):
-                if event.key() in (Qt.Key_Plus, Qt.Key_Equal):
+            if not self.is_crop_mode and not (event.modifiers() & (Qt.ControlModifier | Qt.AltModifier)):
+                if event.key() in (Qt.Key_Plus, Qt.Key_Equal) or event.text() in ("+", "="):
                     self.zoom_in()
                     event.accept()
                     return True
-                elif event.key() == Qt.Key_Minus:
+                elif event.key() in (Qt.Key_Minus, Qt.Key_Underscore) or event.text() in ("-", "_"):
                     self.zoom_out()
                     event.accept()
                     return True
@@ -3087,6 +3087,11 @@ class SingleMediaViewer(QWidget):
         if is_mw and hasattr(mw, "set_desktop_background_for_media"):
             act_bg = menu.addAction("Set as desktop background")
             act_bg.triggered.connect(lambda: mw.set_desktop_background_for_media(self.current_media_id))
+
+        if is_mw and hasattr(mw, "open_print_dialog") and not self.current_is_video:
+            act_print = menu.addAction("Print...")
+            act_print.setShortcut("Ctrl+P")
+            act_print.triggered.connect(mw.open_print_dialog)
 
         if is_mw and hasattr(mw, "toggle_right_pane"):
             act_prop = menu.addAction("Properties")

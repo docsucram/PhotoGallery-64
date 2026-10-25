@@ -1188,6 +1188,25 @@ def _render_aero_raw(kind: str, size: int = 20) -> QIcon:
         p.setPen(QPen(QColor("#246BB2"), 2.0, Qt.SolidLine, Qt.RoundCap))
         p.drawLine(QPointF(s * 0.25, s * 0.80), QPointF(s * 0.75, s * 0.20))
 
+    elif kind == "print":
+        # Classic Aero Printer icon
+        p.setPen(QPen(QColor("#406892"), 1.0))
+        # Top paper feeder sheet
+        p.setBrush(QColor("#FFFFFF"))
+        p.drawRoundedRect(QRectF(s * 0.28, s * 0.12, s * 0.44, s * 0.35), 1.0, 1.0)
+        # Printer body
+        p.setBrush(QColor("#E8F1FC"))
+        p.drawRoundedRect(QRectF(s * 0.14, s * 0.36, s * 0.72, s * 0.42), 2.5, 2.5)
+        # Output slot
+        p.setBrush(QColor("#244268"))
+        p.drawRect(QRectF(s * 0.24, s * 0.60, s * 0.52, s * 0.12))
+        # Paper coming out
+        p.setBrush(QColor("#FFFFFF"))
+        p.drawRect(QRectF(s * 0.28, s * 0.64, s * 0.44, s * 0.24))
+        # Blue status LED
+        p.setBrush(QColor("#3399FF"))
+        p.drawEllipse(QRectF(s * 0.72, s * 0.44, s * 0.08, s * 0.08))
+
     else:
         p.setPen(QPen(QColor("#3E6B99"), 1.1))
         p.setBrush(QColor("#D8EAF9"))
@@ -2869,6 +2888,17 @@ class RibbonToolbar(QWidget):
 
         self.qat_layout.addSpacing(2)
 
+        self.btn_print = QToolButton(self.qat_container)
+        self.btn_print.setObjectName("QATBtn")
+        self.btn_print.setIcon(make_wlpg_icon("print", 16))
+        self.btn_print.setIconSize(QSize(16, 16))
+        self.btn_print.setFixedSize(22, 22)
+        self.btn_print.setToolTip("Print (Ctrl+P)")
+        self.btn_print.setCursor(Qt.PointingHandCursor)
+        self.btn_print.setVisible(False)
+        self.btn_print.clicked.connect(lambda: self.action_triggered.emit("print"))
+        self.qat_layout.addWidget(self.btn_print)
+
         self.btn_undo = QToolButton(self.qat_container)
         self.btn_undo.setObjectName("QATBtn")
         self.btn_undo.setIcon(make_wlpg_icon("undo", 16))
@@ -2914,10 +2944,7 @@ class RibbonToolbar(QWidget):
         self.act_qat_print = qat_menu.addAction("Print")
         self.act_qat_print.setCheckable(True)
         self.act_qat_print.setChecked(False)
-
-        self.act_qat_order = qat_menu.addAction("Order prints")
-        self.act_qat_order.setCheckable(True)
-        self.act_qat_order.setChecked(False)
+        self.act_qat_print.toggled.connect(self.btn_print.setVisible)
 
         self.act_qat_back = qat_menu.addAction("Back")
         self.act_qat_back.setCheckable(True)
@@ -2995,6 +3022,8 @@ class RibbonToolbar(QWidget):
         file_menu.addAction(make_wlpg_icon("import", 16), "Import from camera or scanner...", lambda: self.action_triggered.emit("import_media"))
         file_menu.addAction(make_wlpg_icon("folder_add", 16), "Add folder to gallery...", lambda: self.action_triggered.emit("add_folder"))
         file_menu.addAction(make_wlpg_icon("calendar", 16), "Change date and time...", lambda: self.action_triggered.emit("change_time_taken"))
+        file_menu.addSeparator()
+        file_menu.addAction(make_wlpg_icon("print", 16), "Print...\tCtrl+P", lambda: self.action_triggered.emit("print"))
         file_menu.addSeparator()
         file_menu.addAction("Backup Catalog...", lambda: self.action_triggered.emit("backup_catalog"))
         file_menu.addSeparator()

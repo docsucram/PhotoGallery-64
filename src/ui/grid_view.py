@@ -1319,14 +1319,14 @@ class ThumbnailGridView(QListView):
         event.ignore()
 
     def keyPressEvent(self, event: QKeyEvent) -> None:
-        if event.modifiers() in (Qt.NoModifier, Qt.KeypadModifier):
-            if event.key() in (Qt.Key_Plus, Qt.Key_Equal):
+        if not (event.modifiers() & (Qt.ControlModifier | Qt.AltModifier)):
+            if event.key() in (Qt.Key_Plus, Qt.Key_Equal) or event.text() in ("+", "="):
                 main_win = getattr(self, "main_window", None) or self.window()
                 if hasattr(main_win, "dispatch_ribbon_action"):
                     main_win.dispatch_ribbon_action("zoom_in")
                 event.accept()
                 return
-            elif event.key() == Qt.Key_Minus:
+            elif event.key() in (Qt.Key_Minus, Qt.Key_Underscore) or event.text() in ("-", "_"):
                 main_win = getattr(self, "main_window", None) or self.window()
                 if hasattr(main_win, "dispatch_ribbon_action"):
                     main_win.dispatch_ribbon_action("zoom_out")
@@ -1644,6 +1644,11 @@ class ThumbnailGridView(QListView):
             act_bg = menu.addAction("Set as desktop background")
             if is_mw:
                 act_bg.triggered.connect(lambda: main_win.set_desktop_background_for_media(media_id))
+
+            act_print = menu.addAction("Print...")
+            act_print.setShortcut("Ctrl+P")
+            if is_mw:
+                act_print.triggered.connect(main_win.open_print_dialog)
 
             # 5. Rotate right
             act_rr = menu.addAction("Rotate right")

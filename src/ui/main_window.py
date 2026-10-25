@@ -1089,16 +1089,20 @@ class PhotoGalleryMainWindow(QMainWindow):
             sc.activated.connect(lambda val=r: self._on_rating_shortcut(val))
             self._rating_shortcuts.append(sc)
 
-        # Zoom in / out shortcuts (+, =, -)
+        # Zoom in / out shortcuts (+, =, -, _) and Print shortcut (Ctrl+P)
         self._zoom_shortcuts = []
-        for seq in ("+", "=", Qt.Key_Plus):
+        for seq in ("+", "="):
             sc = QShortcut(QKeySequence(seq), self)
             sc.activated.connect(self._on_zoom_in_shortcut)
             self._zoom_shortcuts.append(sc)
-        for seq in ("-", Qt.Key_Minus):
+        for seq in ("-", "_"):
             sc = QShortcut(QKeySequence(seq), self)
             sc.activated.connect(self._on_zoom_out_shortcut)
             self._zoom_shortcuts.append(sc)
+
+        sc_print = QShortcut(QKeySequence("Ctrl+P"), self)
+        sc_print.activated.connect(self.open_print_dialog)
+        self._zoom_shortcuts.append(sc_print)
 
         # SingleMediaViewer
         self.media_viewer.closed.connect(self.show_grid_view)
@@ -4066,10 +4070,67 @@ class PhotoGalleryMainWindow(QMainWindow):
                 self.media_viewer.set_zoom_mode("fit")
         elif action_id == "toggle_pause_write_back":
             self.toggle_pause_write_back()
+        elif action_id == "print":
+            self.open_print_dialog()
         elif action_id == "backup_catalog":
             self.backup_catalog_dialog()
         elif action_id == "open_settings":
             self._open_settings_dialog()
+
+    def open_print_dialog(self) -> None:
+        """Opens the fully-featured Print Pictures dialog for active/selected photos."""
+        from src.ui.print_dialog import PrintPicturesDialog
+
+        items_to_print: list[Any] = []
+
+        if self.central_stack.currentWidget() == self.media_viewer:
+            if getattr(self.media_viewer, "current_is_video", False):
+                QMessageBox.information(self, "Print", "Videos cannot be printed. Please select a photo to print.")
+                return
+            if self.media_viewer.master_np_rgb is not None:
+                # If adjustments exist, render adjusted image
+                try:
+                    if hasattr(self.media_viewer, "get_current_display_pixmap"):
+                        pm = self.media_viewer.get_current_display_pixmap()
+                        qimg = pm.toImage()
+                    else:
+                        rendered_np = self.media_viewer.display_proxy_rgb or self.media_viewer.master_np_rgb
+                        h, w = rendered_np.shape[:2]
+                        qimg = QImage(rendered_np.data, w, h, 3 * w, QImage.Format.Format_RGB888).copy()
+                except Exception:
+                    rendered_np = self.media_viewer.master_np_rgb
+                    h, w = rendered_np.shape[:2]
+                    qimg = QImage(rendered_np.data, w, h, 3 * w, QImage.Format.Format_RGB888).copy()
+
+                fname = "Photo"
+                if self.media_viewer.current_file_path:
+                    fname = self.media_viewer.current_file_path.name
+                items_to_print.append((fname, qimg))
+        else:
+            # Grid view selection
+            target_ids = list(self._selected_ids)
+            if not target_ids:
+                cur_id = getattr(self.grid_view, "_last_selected_id", None)
+                if cur_id:
+                    target_ids = [cur_id]
+
+            for mid in target_ids:
+                try:
+                    detail = self.catalog_repo.get_media_detail(mid)
+                    if detail.get("is_video"):
+                        continue
+                    full_path = Path(detail["folder_path"]) / str(detail["filename"])
+                    if full_path.is_file():
+                        items_to_print.append(full_path)
+                except Exception:
+                    continue
+
+        if not items_to_print:
+            QMessageBox.information(self, "Print", "No pictures are selected to print.")
+            return
+
+        dlg = PrintPicturesDialog(items_to_print, self)
+        dlg.exec()
 
 
     def _open_settings_dialog(self, initial_tab: str | None = None) -> None:
