@@ -2004,6 +2004,21 @@ class PhotoGalleryMainWindow(QMainWindow):
         self._group_by = str(mode).lower()
         if reverse is not None:
             self._group_reverse = bool(reverse)
+        if hasattr(self, "ribbon"):
+            self.ribbon._arrange_by = self._group_by
+            if reverse is not None:
+                self.ribbon._reverse_sort = self._group_reverse
+                if hasattr(self.ribbon, "btn_reverse_sort"):
+                    self.ribbon.btn_reverse_sort.setChecked(self._group_reverse)
+            if hasattr(self.ribbon, "_arrange_buttons"):
+                if self._group_by in self.ribbon._arrange_buttons:
+                    self.ribbon._arrange_buttons[self._group_by].setChecked(True)
+                elif hasattr(self.ribbon, "_arrange_btn_group"):
+                    cb = self.ribbon._arrange_btn_group.checkedButton()
+                    if cb:
+                        self.ribbon._arrange_btn_group.setExclusive(False)
+                        cb.setChecked(False)
+                        self.ribbon._arrange_btn_group.setExclusive(True)
         self.rebuild_and_run_query()
 
     def set_sort_by(self, mode: str, reverse: bool | None = None) -> None:

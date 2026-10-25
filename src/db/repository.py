@@ -28,7 +28,27 @@ def _iter_id_chunks(media_ids: Sequence[int], chunk_size: int = 900) -> Iterator
         yield media_ids[i : i + chunk_size]
 
 ArrangeMode = Literal[
-    "date", "geotag", "person", "name", "tag", "published", "folder", "media_type", "rating"
+    "auto",
+    "date",
+    "month",
+    "year",
+    "time",
+    "size",
+    "image_size",
+    "orientation",
+    "file_type",
+    "media_type",
+    "rating",
+    "flag",
+    "folder",
+    "tag",
+    "people",
+    "person",
+    "published",
+    "geotag",
+    "camera",
+    "name",
+    "none",
 ]
 
 # EXIF Orientation rotation lookup tables
@@ -781,26 +801,66 @@ class CatalogRepository:
 
         grp_dir = "ASC" if getattr(spec, "group_reverse", False) else "DESC"
         grp_expr = None
-        if group_mode in ("month", "month taken", "date", "date taken"):
-            grp_expr = "strftime('%Y-%m', datetime(m.date_taken, 'unixepoch'))"
+        extra_joins = ""
+        extra_col = "'' AS group_name"
+
+        if group_mode in ("auto",):
+            grp_expr = "strftime('%Y-%m', datetime(COALESCE(m.date_taken, m.mtime, 0), 'unixepoch'))"
+        elif group_mode in ("date", "date taken", "day"):
+            grp_expr = "strftime('%Y-%m-%d', datetime(COALESCE(m.date_taken, m.mtime, 0), 'unixepoch'))"
+        elif group_mode in ("month", "month taken"):
+            grp_expr = "strftime('%Y-%m', datetime(COALESCE(m.date_taken, m.mtime, 0), 'unixepoch'))"
         elif group_mode in ("year", "year taken"):
-            grp_expr = "strftime('%Y', datetime(m.date_taken, 'unixepoch'))"
-        elif group_mode in ("day",):
-            grp_expr = "strftime('%Y-%m-%d', datetime(m.date_taken, 'unixepoch'))"
-        elif group_mode == "rating":
-            grp_expr = "m.rating"
-        elif group_mode == "folder":
-            grp_expr = "m.folder_id"
+            grp_expr = "strftime('%Y', datetime(COALESCE(m.date_taken, m.mtime, 0), 'unixepoch'))"
+        elif group_mode in ("time", "time taken"):
+            grp_expr = "CASE WHEN m.date_taken IS NULL THEN 5 WHEN strftime('%H', datetime(m.date_taken, 'unixepoch')) BETWEEN '06' AND '11' THEN 1 WHEN strftime('%H', datetime(m.date_taken, 'unixepoch')) BETWEEN '12' AND '17' THEN 2 WHEN strftime('%H', datetime(m.date_taken, 'unixepoch')) BETWEEN '18' AND '21' THEN 3 ELSE 4 END"
             grp_dir = "DESC" if getattr(spec, "group_reverse", False) else "ASC"
-        elif group_mode in ("media_type", "file_type"):
+        elif group_mode in ("size", "file size", "file_size"):
+            grp_expr = "CASE WHEN m.size >= 104857600 THEN 1 WHEN m.size >= 26214400 THEN 2 WHEN m.size >= 5242880 THEN 3 WHEN m.size >= 1048576 THEN 4 ELSE 5 END"
+            grp_dir = "DESC" if getattr(spec, "group_reverse", False) else "ASC"
+        elif group_mode in ("image_size", "image size", "dimensions"):
+            grp_expr = "CASE WHEN (COALESCE(m.width, 0) * COALESCE(m.height, 0)) >= 16000000 THEN 1 WHEN (COALESCE(m.width, 0) * COALESCE(m.height, 0)) >= 8000000 THEN 2 WHEN (COALESCE(m.width, 0) * COALESCE(m.height, 0)) >= 2000000 THEN 3 WHEN (COALESCE(m.width, 0) * COALESCE(m.height, 0)) > 0 THEN 4 ELSE 5 END"
+            grp_dir = "DESC" if getattr(spec, "group_reverse", False) else "ASC"
+        elif group_mode in ("orientation",):
+            grp_expr = "CASE WHEN m.orientation IN (5, 6, 7, 8) THEN CASE WHEN m.height > m.width THEN 1 WHEN m.width > m.height THEN 2 ELSE 3 END ELSE CASE WHEN m.width > m.height THEN 1 WHEN m.height > m.width THEN 2 WHEN m.width > 0 THEN 3 ELSE 4 END END"
+            grp_dir = "DESC" if getattr(spec, "group_reverse", False) else "ASC"
+        elif group_mode in ("file_type", "file type"):
+            grp_expr = "LOWER(COALESCE(m.ext, ''))"
+            grp_dir = "DESC" if getattr(spec, "group_reverse", False) else "ASC"
+        elif group_mode in ("media_type", "media type"):
             grp_expr = "m.is_video"
-        elif group_mode == "flag":
-            grp_expr = "m.flag"
-        elif group_mode == "size":
-            grp_expr = "m.size"
-        elif group_mode == "geotag":
-            grp_expr = "COALESCE(m.location_name, 'ZZZ')"
             grp_dir = "DESC" if getattr(spec, "group_reverse", False) else "ASC"
+        elif group_mode in ("rating",):
+            grp_expr = "m.rating"
+            grp_dir = "ASC" if getattr(spec, "group_reverse", False) else "DESC"
+        elif group_mode in ("flag",):
+            grp_expr = "m.flag"
+            grp_dir = "ASC" if getattr(spec, "group_reverse", False) else "DESC"
+        elif group_mode in ("folder",):
+            grp_expr = "COALESCE(f.name, '') COLLATE NOCASE"
+            grp_dir = "DESC" if getattr(spec, "group_reverse", False) else "ASC"
+        elif group_mode in ("published",):
+            grp_expr = "m.published"
+            grp_dir = "ASC" if getattr(spec, "group_reverse", False) else "DESC"
+        elif group_mode in ("geotag", "location"):
+            grp_expr = "CASE WHEN m.location_name IS NOT NULL AND m.location_name != '' THEN 1 WHEN m.lat IS NOT NULL THEN 2 ELSE 3 END, COALESCE(m.location_name, '') COLLATE NOCASE"
+            grp_dir = "DESC" if getattr(spec, "group_reverse", False) else "ASC"
+        elif group_mode in ("camera",):
+            grp_expr = "CASE WHEN (m.camera_make IS NULL OR m.camera_make = '') AND (m.camera_model IS NULL OR m.camera_model = '') THEN 1 ELSE 0 END, COALESCE(NULLIF(TRIM(COALESCE(m.camera_make, '') || ' ' || COALESCE(m.camera_model, '')), ''), NULLIF(m.camera_model, ''), NULLIF(m.camera_make, ''), 'Unknown Camera') COLLATE NOCASE"
+            grp_dir = "DESC" if getattr(spec, "group_reverse", False) else "ASC"
+        elif group_mode in ("person", "people"):
+            extra_joins = "LEFT JOIN (SELECT DISTINCT media_id, person_id FROM media_people WHERE state = 1) mp ON mp.media_id = m.id LEFT JOIN people p ON p.id = mp.person_id"
+            extra_col = "COALESCE(p.name, 'Not tagged') AS group_name"
+            p_dir = "DESC" if getattr(spec, "group_reverse", False) else "ASC"
+            grp_expr = f"CASE WHEN p.name IS NULL THEN 1 ELSE 0 END, COALESCE(p.name, 'Not tagged') COLLATE NOCASE {p_dir}"
+        elif group_mode in ("tag", "tags"):
+            extra_joins = "LEFT JOIN (SELECT DISTINCT media_id, tag_id FROM media_tags) mt ON mt.media_id = m.id LEFT JOIN tags t ON t.id = mt.tag_id"
+            extra_col = "COALESCE(t.name, 'Not tagged') AS group_name"
+            t_dir = "DESC" if getattr(spec, "group_reverse", False) else "ASC"
+            grp_expr = f"CASE WHEN t.name IS NULL THEN 1 ELSE 0 END, COALESCE(t.name, 'Not tagged') COLLATE NOCASE {t_dir}"
+        elif group_mode == "name":
+            name_dir = "DESC" if (getattr(spec, "group_reverse", False) or getattr(spec, "sort_reverse", False) or getattr(spec, "reverse_sort", False)) else "ASC"
+            grp_expr = f"m.filename COLLATE NOCASE {name_dir}"
         elif group_mode in ("none", "flat"):
             grp_expr = None
 
@@ -821,117 +881,45 @@ class CatalogRepository:
             sort_dir = "ASC" if is_sort_rev else "DESC"
             sort_expr = "COALESCE(m.date_taken, m.mtime, 0)"
 
-        if group_mode in ("person", "people"):
-            order_sql = f"ORDER BY CASE WHEN p.name IS NULL THEN 1 ELSE 0 END, COALESCE(p.name, 'Not tagged') COLLATE NOCASE {grp_dir}, {sort_expr} {sort_dir}, m.id ASC"
-            sql = f"""
-                SELECT
-                    m.id,
-                    m.folder_id,
-                    m.filename,
-                    m.size,
-                    m.mtime,
-                    m.date_taken,
-                    m.rating,
-                    m.flag,
-                    COALESCE(m.width, 0),
-                    COALESCE(m.height, 0),
-                    m.orientation,
-                    m.is_video,
-                    m.caption,
-                    COALESCE(m.location_name, ''),
-                    COALESCE(p.name, 'Not tagged') AS group_name
-                FROM media m
-                LEFT JOIN (SELECT DISTINCT media_id, person_id FROM media_people WHERE state = 1) mp ON mp.media_id = m.id
-                LEFT JOIN people p ON p.id = mp.person_id
-                {where_sql}
-                {order_sql};
-            """
-        elif group_mode in ("tag", "tags"):
-            order_sql = f"ORDER BY CASE WHEN t.name IS NULL THEN 1 ELSE 0 END, COALESCE(t.name, 'Not tagged') COLLATE NOCASE {grp_dir}, {sort_expr} {sort_dir}, m.id ASC"
-            sql = f"""
-                SELECT
-                    m.id,
-                    m.folder_id,
-                    m.filename,
-                    m.size,
-                    m.mtime,
-                    m.date_taken,
-                    m.rating,
-                    m.flag,
-                    COALESCE(m.width, 0),
-                    COALESCE(m.height, 0),
-                    m.orientation,
-                    m.is_video,
-                    m.caption,
-                    COALESCE(m.location_name, ''),
-                    COALESCE(t.name, 'Not tagged') AS group_name
-                FROM media m
-                LEFT JOIN (SELECT DISTINCT media_id, tag_id FROM media_tags) mt ON mt.media_id = m.id
-                LEFT JOIN tags t ON t.id = mt.tag_id
-                {where_sql}
-                {order_sql};
-            """
-        elif group_mode == "name":
-            name_dir = "DESC" if (getattr(spec, "group_reverse", False) or is_sort_rev) else "ASC"
-            order_sql = f"ORDER BY m.filename COLLATE NOCASE {name_dir}, m.id ASC"
-            sql = f"""
-                SELECT
-                    m.id,
-                    m.folder_id,
-                    m.filename,
-                    m.size,
-                    m.mtime,
-                    m.date_taken,
-                    m.rating,
-                    m.flag,
-                    COALESCE(m.width, 0),
-                    COALESCE(m.height, 0),
-                    m.orientation,
-                    m.is_video,
-                    m.caption,
-                    COALESCE(m.location_name, '')
-                FROM media m
-                {where_sql}
-                {order_sql};
-            """
-        else:
-            is_date_grain = group_mode in ("month", "month taken", "year", "year taken", "date", "day", "date taken")
-            if is_date_grain and sort_mode == "date" and grp_dir == sort_dir:
-                order_sql = f"ORDER BY {sort_expr} {sort_dir}, m.id ASC"
-            elif grp_expr is not None:
-                order_sql = f"ORDER BY {grp_expr} {grp_dir}, {sort_expr} {sort_dir}, m.id ASC"
+        if grp_expr is not None:
+            if " COLLATE " in grp_expr or grp_expr.endswith(" ASC") or grp_expr.endswith(" DESC"):
+                order_sql = f"ORDER BY {grp_expr}, {sort_expr} {sort_dir}, m.id ASC"
             else:
-                order_sql = f"ORDER BY {sort_expr} {sort_dir}, m.id ASC"
+                order_sql = f"ORDER BY {grp_expr} {grp_dir}, {sort_expr} {sort_dir}, m.id ASC"
+        else:
+            order_sql = f"ORDER BY {sort_expr} {sort_dir}, m.id ASC"
 
-            sql = f"""
-                SELECT
-                    m.id,
-                    m.folder_id,
-                    m.filename,
-                    m.size,
-                    m.mtime,
-                    m.date_taken,
-                    m.rating,
-                    m.flag,
-                    COALESCE(m.width, 0),
-                    COALESCE(m.height, 0),
-                    m.orientation,
-                    m.is_video,
-                    m.caption,
-                    COALESCE(m.location_name, '')
-                FROM media m
-                {where_sql}
-                {order_sql};
-            """
+        sql = f"""
+            SELECT
+                m.id,
+                m.folder_id,
+                m.filename,
+                m.size,
+                m.mtime,
+                m.date_taken,
+                m.rating,
+                m.flag,
+                COALESCE(m.width, 0),
+                COALESCE(m.height, 0),
+                m.orientation,
+                m.is_video,
+                m.caption,
+                COALESCE(m.location_name, ''),
+                COALESCE(m.ext, ''),
+                COALESCE(m.published, 0),
+                COALESCE(NULLIF(TRIM(COALESCE(m.camera_make, '') || ' ' || COALESCE(m.camera_model, '')), ''), NULLIF(m.camera_model, ''), NULLIF(m.camera_make, ''), 'Unknown Camera') AS camera_name,
+                COALESCE(f.name, '') AS folder_name,
+                m.lat,
+                m.lon,
+                {extra_col}
+            FROM media m
+            LEFT JOIN folders f ON f.id = m.folder_id
+            {extra_joins}
+            {where_sql}
+            {order_sql};
+        """
 
         raw_rows = cur.execute(sql, params).fetchall()
-        arrange = spec.arrange_by
-
-        folder_names: dict[int, str] = {}
-        if (group_mode == "folder" or arrange == "folder") and raw_rows:
-            folder_names = dict(
-                cur.execute("SELECT id, name FROM folders;").fetchall()
-            )
 
         cur_m_start = 1
         cur_m_end = 0
@@ -954,8 +942,14 @@ class CatalogRepository:
                 is_vid,
                 caption,
                 loc_name,
-            ) = row[:14]
-            g_extra = row[14] if len(row) > 14 else ""
+                ext,
+                published,
+                camera_name,
+                folder_name,
+                lat,
+                lon,
+            ) = row[:20]
+            g_extra = row[20] if len(row) > 20 else ""
 
             if group_mode in ("none", "flat"):
                 gkey = ""
@@ -965,7 +959,13 @@ class CatalogRepository:
                 gkey = g_extra or "Not tagged"
             elif group_mode == "name":
                 gkey = "All photos and videos"
-            elif group_mode in ("month", "month taken", "date", "date taken"):
+            elif group_mode in ("date", "date taken", "day"):
+                if dt_taken is None:
+                    gkey = "Unknown Date"
+                else:
+                    dt = _epoch_to_datetime_utc(dt_taken)
+                    gkey = dt.strftime("%A, %d %B %Y")
+            elif group_mode in ("month", "month taken", "auto"):
                 if dt_taken is None:
                     gkey = "Unknown Date"
                 elif cur_m_start <= dt_taken <= cur_m_end:
@@ -981,33 +981,94 @@ class CatalogRepository:
                 else:
                     dt = _epoch_to_datetime_utc(dt_taken)
                     gkey = dt.strftime("%Y")
-            elif group_mode in ("day",):
+            elif group_mode in ("time", "time taken"):
                 if dt_taken is None:
-                    gkey = "Unknown Date"
+                    gkey = "Unknown Time"
                 else:
                     dt = _epoch_to_datetime_utc(dt_taken)
-                    gkey = dt.strftime("%A, %d %B %Y")
-            elif group_mode == "rating":
-                gkey = _RATING_LABELS.get(rating, "Unrated")
-            elif group_mode == "media_type" or group_mode == "file_type":
-                gkey = "Videos" if is_vid else "Photos"
-            elif group_mode == "folder":
-                gkey = folder_names.get(fid, f"Folder {fid}")
-            elif group_mode == "flag":
-                gkey = "Flagged" if flag else "Not flagged"
-            elif group_mode == "size":
-                if size < 1024 * 1024:
-                    gkey = "Tiny (< 1 MB)"
-                elif size < 5 * 1024 * 1024:
-                    gkey = "Small (1 - 5 MB)"
-                elif size < 25 * 1024 * 1024:
+                    hour = dt.hour
+                    if 6 <= hour < 12:
+                        gkey = "Morning (6:00 AM - 12:00 PM)"
+                    elif 12 <= hour < 18:
+                        gkey = "Afternoon (12:00 PM - 6:00 PM)"
+                    elif 18 <= hour < 22:
+                        gkey = "Evening (6:00 PM - 10:00 PM)"
+                    else:
+                        gkey = "Night (10:00 PM - 6:00 AM)"
+            elif group_mode in ("size", "file size", "file_size"):
+                if size >= 104857600:
+                    gkey = "Huge (> 100 MB)"
+                elif size >= 26214400:
+                    gkey = "Large (25 - 100 MB)"
+                elif size >= 5242880:
                     gkey = "Medium (5 - 25 MB)"
+                elif size >= 1048576:
+                    gkey = "Small (1 - 5 MB)"
                 else:
-                    gkey = "Large (> 25 MB)"
-            elif group_mode == "geotag":
-                gkey = loc_name if loc_name else "No Geotag"
-            elif group_mode == "published":
-                gkey = "Published" if rating > 0 else "Not Published"
+                    gkey = "Tiny (< 1 MB)"
+            elif group_mode in ("image_size", "image size", "dimensions"):
+                mp = (w * h) / 1_000_000.0 if (w and h) else 0.0
+                if mp >= 16.0:
+                    gkey = "Extra Large (> 16 MP)"
+                elif mp >= 8.0:
+                    gkey = "Large (8 - 16 MP)"
+                elif mp >= 2.0:
+                    gkey = "Medium (2 - 8 MP)"
+                elif mp > 0.0:
+                    gkey = "Small (< 2 MP)"
+                else:
+                    gkey = "Unknown Size"
+            elif group_mode in ("orientation",):
+                eff_w, eff_h = (h, w) if orient in (5, 6, 7, 8) else (w, h)
+                if eff_w > eff_h and eff_w > 0:
+                    gkey = "Landscape"
+                elif eff_h > eff_w and eff_h > 0:
+                    gkey = "Portrait"
+                elif eff_w > 0 and eff_w == eff_h:
+                    gkey = "Square"
+                else:
+                    gkey = "Unknown Orientation"
+            elif group_mode in ("file_type", "file type"):
+                e = (ext or "").lower().strip()
+                if e in (".jpg", ".jpeg"):
+                    gkey = "JPEG Image (*.jpg, *.jpeg)"
+                elif e == ".png":
+                    gkey = "PNG Image (*.png)"
+                elif e in (".dng", ".cr2", ".nef", ".arw", ".raf", ".rw2", ".orf"):
+                    gkey = "RAW Digital Negative (*.raw, *.dng)"
+                elif e == ".mp4":
+                    gkey = "MP4 Video (*.mp4)"
+                elif e in (".mov", ".qt"):
+                    gkey = "QuickTime Video (*.mov)"
+                elif e == ".webp":
+                    gkey = "WebP Image (*.webp)"
+                elif e in (".tif", ".tiff"):
+                    gkey = "TIFF Image (*.tif, *.tiff)"
+                elif e == ".gif":
+                    gkey = "GIF Image (*.gif)"
+                elif e:
+                    gkey = f"{e[1:].upper()} File (*{e})"
+                else:
+                    gkey = "Unknown Format"
+            elif group_mode in ("media_type", "media type"):
+                gkey = "Videos" if is_vid else "Photos"
+            elif group_mode in ("rating",):
+                gkey = _RATING_LABELS.get(rating, "Unrated")
+            elif group_mode in ("flag",):
+                gkey = "Flagged" if flag else "Not flagged"
+            elif group_mode in ("folder",):
+                gkey = folder_name or f"Folder {fid}"
+            elif group_mode in ("published",):
+                gkey = "Published" if published else "Not published"
+            elif group_mode in ("geotag", "location"):
+                if loc_name:
+                    gkey = loc_name
+                elif lat is not None and lon is not None:
+                    gkey = "Geotagged"
+                else:
+                    gkey = "No Geotag"
+            elif group_mode in ("camera",):
+                gkey = camera_name or "Unknown Camera"
             else:
                 if dt_taken is None:
                     gkey = "Unknown Date"

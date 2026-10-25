@@ -1841,15 +1841,24 @@ class ThumbnailGridView(QListView):
         grp_group.setExclusive(True)
 
         group_criteria = [
-            ("Auto (Month)", "month"),
+            ("Auto", "auto"),
+            ("Date taken", "date"),
             ("Month taken", "month"),
             ("Year taken", "year"),
-            ("Date taken", "date"),
-            ("Rating", "rating"),
-            ("Folder", "folder"),
-            ("Media type", "media_type"),
-            ("Flag", "flag"),
+            ("Time taken", "time"),
             ("File size", "size"),
+            ("Image size", "image_size"),
+            ("Orientation", "orientation"),
+            ("File type", "file_type"),
+            ("Media type", "media_type"),
+            ("Rating", "rating"),
+            ("Flag", "flag"),
+            ("Folder", "folder"),
+            ("Tag", "tag"),
+            ("People", "people"),
+            ("Published", "published"),
+            ("Geotag", "geotag"),
+            ("Camera", "camera"),
             ("None", "none"),
         ]
 
@@ -1858,14 +1867,17 @@ class ThumbnailGridView(QListView):
         curr_sort = getattr(main_win, "_sort_by", "date") if is_mw else "date"
         curr_sort_rev = getattr(main_win, "_sort_reverse", False) if is_mw else False
 
+        checked_any = False
         for label, mode_key in group_criteria:
             act = group_menu.addAction(label)
             act.setCheckable(True)
             grp_group.addAction(act)
-            if mode_key == curr_group and label != "Auto (Month)":
+            if mode_key == curr_group:
                 act.setChecked(True)
-            elif curr_group == "month" and label == "Month taken":
+                checked_any = True
+            elif curr_group == "month" and mode_key == "month":
                 act.setChecked(True)
+                checked_any = True
 
             def _make_group_handler(mode_val: str):
                 return lambda: (
@@ -1875,6 +1887,10 @@ class ThumbnailGridView(QListView):
                 )
 
             act.triggered.connect(_make_group_handler(mode_key))
+
+        if not checked_any and grp_group.actions():
+            # Fallback check first action if somehow none matched
+            grp_group.actions()[0].setChecked(True)
 
         group_menu.addSeparator()
 

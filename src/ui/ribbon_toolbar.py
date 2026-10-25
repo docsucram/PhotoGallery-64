@@ -28,6 +28,7 @@ from PySide6.QtGui import (
     QAction,
     QActionGroup,
     QColor,
+    QCursor,
     QFont,
     QFontMetrics,
     QIcon,
@@ -4940,6 +4941,8 @@ class RibbonToolbar(QWidget):
         btn_more = QPushButton("▾", grp_arrange)
         btn_more.setFixedSize(13, 14)
         btn_more.setStyleSheet("QPushButton { border: 1px solid #C4D5E8; border-radius: 1px; background: #F7FAFD; font-size: 5pt; color: #5A7A9E; padding: 0px; } QPushButton:hover { background: #E4F0FC; }")
+        self.btn_arrange_more = btn_more
+        btn_more.clicked.connect(self._show_arrange_more_menu)
         v_arrows.addWidget(btn_up)
         v_arrows.addWidget(btn_dn)
         v_arrows.addWidget(btn_more)
@@ -5202,6 +5205,14 @@ class RibbonToolbar(QWidget):
 
     def _on_arrange_button_clicked(self, mode: ArrangeMode) -> None:
         self._arrange_by = mode
+        if hasattr(self, "_arrange_buttons") and mode in self._arrange_buttons:
+            self._arrange_buttons[mode].setChecked(True)
+        elif hasattr(self, "_arrange_btn_group"):
+            checked_b = self._arrange_btn_group.checkedButton()
+            if checked_b:
+                self._arrange_btn_group.setExclusive(False)
+                checked_b.setChecked(False)
+                self._arrange_btn_group.setExclusive(True)
         if hasattr(self, "cmb_arrange"):
             self.cmb_arrange.blockSignals(True)
             for i in range(self.cmb_arrange.count()):
@@ -5209,6 +5220,105 @@ class RibbonToolbar(QWidget):
                     self.cmb_arrange.setCurrentIndex(i)
                     break
             self.cmb_arrange.blockSignals(False)
+        self.arrange_changed.emit(self._arrange_by, self._reverse_sort)
+
+    def _show_arrange_more_menu(self) -> None:
+        menu = QMenu(self)
+        menu.setFont(QFont("Segoe UI", 9))
+        menu.setStyleSheet(
+            """
+            QMenu {
+                background-color: #FFFFFF;
+                border: 1px solid #70A6E8;
+                border-radius: 3px;
+                padding: 4px;
+            }
+            QMenu::item {
+                padding: 3px 20px 3px 24px;
+                color: #1E395B;
+            }
+            QMenu::item:selected {
+                background-color: #EBF3FD;
+                color: #0F172A;
+            }
+            QMenu::separator {
+                height: 1px;
+                background-color: #DDE7F2;
+                margin: 4px 6px;
+            }
+            """
+        )
+        grp = QActionGroup(menu)
+        grp.setExclusive(True)
+
+        group_criteria = [
+            ("Auto", "auto"),
+            ("Date taken", "date"),
+            ("Month taken", "month"),
+            ("Year taken", "year"),
+            ("Time taken", "time"),
+            ("File size", "size"),
+            ("Image size", "image_size"),
+            ("Orientation", "orientation"),
+            ("File type", "file_type"),
+            ("Media type", "media_type"),
+            ("Rating", "rating"),
+            ("Flag", "flag"),
+            ("Folder", "folder"),
+            ("Tag", "tag"),
+            ("People", "people"),
+            ("Published", "published"),
+            ("Geotag", "geotag"),
+            ("Camera", "camera"),
+            ("None", "none"),
+        ]
+
+        curr = getattr(self, "_arrange_by", "date")
+
+        for label, mode_key in group_criteria:
+            act = menu.addAction(label)
+            act.setCheckable(True)
+            grp.addAction(act)
+            if mode_key == curr:
+                act.setChecked(True)
+            elif curr == "date" and mode_key == "date":
+                act.setChecked(True)
+
+            def _make_handler(m=mode_key):
+                return lambda: self._on_arrange_button_clicked(m)
+
+            act.triggered.connect(_make_handler(mode_key))
+
+        menu.addSeparator()
+
+        act_asc = menu.addAction("Ascending")
+        act_asc.setCheckable(True)
+        act_desc = menu.addAction("Descending")
+        act_desc.setCheckable(True)
+        dir_grp = QActionGroup(menu)
+        dir_grp.setExclusive(True)
+        dir_grp.addAction(act_asc)
+        dir_grp.addAction(act_desc)
+
+        is_rev = getattr(self, "_reverse_sort", False)
+        if is_rev:
+            act_desc.setChecked(True)
+        else:
+            act_asc.setChecked(True)
+
+        act_asc.triggered.connect(lambda: self._set_reverse_sort(False))
+        act_desc.triggered.connect(lambda: self._set_reverse_sort(True))
+
+        btn = getattr(self, "btn_arrange_more", None)
+        if btn is not None:
+            menu.exec(btn.mapToGlobal(QPoint(0, btn.height())))
+        else:
+            menu.exec(QCursor.pos())
+
+    def _set_reverse_sort(self, reverse: bool) -> None:
+        self._reverse_sort = bool(reverse)
+        if hasattr(self, "btn_reverse_sort"):
+            self.btn_reverse_sort.setChecked(self._reverse_sort)
         self.arrange_changed.emit(self._arrange_by, self._reverse_sort)
 
     def _on_reverse_sort_clicked(self) -> None:
