@@ -1641,6 +1641,15 @@ class _RibbonEffectsGallery(QFrame):
                 background: #CCE4F7;
                 border: 1px solid #3399FF;
             }
+            QToolTip {
+                background-color: #FFFFFF;
+                color: #1E395B;
+                border: 1px solid #7DA2CE;
+                border-radius: 2px;
+                padding: 3px 6px;
+                font-family: 'Segoe UI';
+                font-size: 8.5pt;
+            }
             """
         )
         hbox = QHBoxLayout(self)
@@ -1693,6 +1702,8 @@ class _RibbonEffectsGallery(QFrame):
             self.btn_group.addButton(btn)
             self.cards_layout.addWidget(btn)
             self.buttons[eff_id] = btn
+
+        self.cards_layout.addStretch(1)
 
         # Legacy effect aliases for backwards compatibility with existing tests
         if "cool_cinema" in self.buttons:
@@ -1787,10 +1798,7 @@ class _RibbonEffectsGallery(QFrame):
         visible_count = getattr(self, "_visible_tiles", 6)
         max_idx = max(0, len(self._effects_data) - visible_count)
         self._scroll_index = max(0, min(self._scroll_index, max_idx))
-        for i, (eff_id, _, _) in enumerate(self._effects_data):
-            btn = self.buttons.get(eff_id)
-            if btn:
-                btn.setVisible(self._scroll_index <= i < self._scroll_index + visible_count)
+        self.cards_holder.move(-self._scroll_index * self.CARD_STRIDE, 0)
         self.btn_up.setEnabled(self._scroll_index > 0)
         self.btn_dn.setEnabled(self._scroll_index < max_idx)
 

@@ -1775,6 +1775,13 @@ class PhotoGalleryMainWindow(QMainWindow):
                 self.ribbon.set_scope_label(lbl)
                 self._update_scope_bar_visibility()
                 self.rebuild_and_run_query()
+            elif view == "batch_people":
+                if hasattr(self, "media_viewer") and self.central_stack.currentWidget() == self.media_viewer:
+                    if self.media_viewer.has_unsaved_adjustments():
+                        self.media_viewer.save_current_image_with_backup()
+                        self.rebuild_and_run_query()
+                    self.media_viewer.media_player.stop()
+                self.open_batch_people_view(person_id=state.get("person_id"))
             else:
                 # Standard grid view (view == "grid" or legacy filter dict)
                 if hasattr(self, "media_viewer") and self.central_stack.currentWidget() == self.media_viewer:
@@ -2312,22 +2319,14 @@ class PhotoGalleryMainWindow(QMainWindow):
         if self.central_stack.currentWidget() == self.media_viewer:
             self.media_viewer.highlight_person_face(person_id if is_hovered else None)
 
-    def _on_dock_person_search_requested(self, person_id: int, person_name: str) -> None:
+    def _on_dock_person_search_requested(self, person_id: int, person_name: str = "") -> None:
         if self.central_stack.currentWidget() != self.grid_view:
             self.show_grid_view()
         self.left_nav_dock.show()
-        self.left_nav_dock.root_people.setExpanded(True)
-        for i in range(self.left_nav_dock.root_people.childCount()):
-            child = self.left_nav_dock.root_people.child(i)
-            data = child.data(0, Qt.UserRole)
-            if isinstance(data, dict) and data.get("type") == "person" and data.get("id") == person_id:
-                self.left_nav_dock.tree.setCurrentItem(child)
-                self.left_nav_dock._emit_current_filter()
-                return
-        self.current_filter.person_ids = [person_id]
+        self.left_nav_dock.select_person(person_id)
         self.rebuild_and_run_query()
 
-    def _on_dock_person_view_suggestions_requested(self, person_id: int, person_name: str) -> None:
+    def _on_dock_person_view_suggestions_requested(self, person_id: int, *args: Any) -> None:
         self.open_batch_people_view(person_id=person_id)
 
     def _on_dock_person_tag_as_other_requested(self, person_id: int, old_name: str = "") -> None:
@@ -2839,6 +2838,7 @@ class PhotoGalleryMainWindow(QMainWindow):
         )
         if ok:
             if self.central_stack.currentWidget() != self.media_viewer:
+                self._prev_central_widget = self.central_stack.currentWidget()
                 self._prev_ribbon_tab = self.ribbon.tab_widget.currentIndex()
                 if self.isVisible():
                     self._nav_dock_was_visible = not self.left_nav_dock.isHidden()
@@ -2898,6 +2898,27 @@ class PhotoGalleryMainWindow(QMainWindow):
             self.media_viewer.save_current_image_with_backup()
             self.rebuild_and_run_query()
         self.media_viewer.media_player.stop()
+
+        prev_widget = getattr(self, "_prev_central_widget", None)
+        self._prev_central_widget = None
+        if hasattr(self, "batch_people_view") and prev_widget == self.batch_people_view:
+            self.central_stack.setCurrentWidget(self.batch_people_view)
+            self.ribbon.set_active_mode("grid")
+            self._update_undo_redo_enabled()
+            if hasattr(self, "_prev_ribbon_tab"):
+                self.ribbon.tab_widget.setCurrentIndex(self._prev_ribbon_tab)
+            self.left_nav_dock.hide()
+            self.right_tag_dock.hide()
+            self.btn_status_prev.setVisible(False)
+            self.btn_status_next.setVisible(False)
+            self.btn_status_fit.setVisible(False)
+            self.btn_status_actual.setVisible(False)
+            self.setWindowTitle("Batch People Tagging - Photo Gallery")
+            if hasattr(self.ribbon, "lbl_app_title"):
+                self.ribbon.lbl_app_title.setText("Photo Gallery")
+            self.lbl_sync_status.setText("Batch people tag view")
+            return
+
         self.central_stack.setCurrentWidget(self.grid_view)
         self.ribbon.set_active_mode("grid")
         self._update_undo_redo_enabled()
@@ -2965,6 +2986,8 @@ class PhotoGalleryMainWindow(QMainWindow):
         self.left_nav_dock.hide()
         self.right_tag_dock.hide()
         self.lbl_sync_status.setText("Batch people tag view")
+        if not self._is_navigating_history:
+            self._push_nav_state({"view": "batch_people", "person_id": person_id})
 
     def close_batch_people_view(self) -> None:
         """Returns to standard grid view from BatchPeopleView."""
@@ -2973,6 +2996,9 @@ class PhotoGalleryMainWindow(QMainWindow):
         self.refresh_navigation_and_autocomplete()
         self.rebuild_and_run_query()
         self.lbl_sync_status.setText("✓ Returned to gallery")
+        if not self._is_navigating_history:
+            filt = self.current_filter.to_dict() if hasattr(self, "current_filter") and self.current_filter else {}
+            self._push_nav_state({"view": "grid", "filter": filt})
 
     def _on_batch_faces_confirmed(self, face_ids: list[int], person_id: int) -> None:
         """Slot called when faces are confirmed in BatchPeopleView."""

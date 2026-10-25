@@ -177,15 +177,20 @@ class _FaceCardDelegate(QStyledItemDelegate):
         is_hovered = (index.row() == self.hovered_row)
 
         card_rect = rect.adjusted(4, 4, -4, -4)
+        is_conf = getattr(rec, "is_confirmed", False)
 
-        # 1. Background card fill & border
-        bg_color = QColor("#E5F1FB") if is_selected else (QColor("#F0F8FF") if is_hovered else QColor("#FFFFFF"))
-        border_color = QColor("#70C0E7") if is_selected else (QColor("#B8D6FB") if is_hovered else QColor("#D9D9D9"))
+        # 1. Background card fill & border (Distinct soft green for confirmed/tagged vs aero for suggestions)
+        if is_conf:
+            bg_color = QColor("#DDF3E4") if is_selected else (QColor("#EAF7EE") if is_hovered else QColor("#F3FAF5"))
+            border_color = QColor("#2E7D32") if is_selected else (QColor("#4CAF50") if is_hovered else QColor("#81C784"))
+        else:
+            bg_color = QColor("#E5F1FB") if is_selected else (QColor("#F0F8FF") if is_hovered else QColor("#FFFFFF"))
+            border_color = QColor("#70C0E7") if is_selected else (QColor("#B8D6FB") if is_hovered else QColor("#D9D9D9"))
 
         path = QPainterPath()
         path.addRoundedRect(QRectF(card_rect), 4.0, 4.0)
         painter.fillPath(path, QBrush(bg_color))
-        painter.setPen(QPen(border_color, 1.5 if is_selected else 1.0))
+        painter.setPen(QPen(border_color, 1.8 if (is_selected or is_conf) else 1.0))
         painter.drawPath(path)
 
         # 2. Draw 96x96 Face Thumbnail
@@ -217,19 +222,32 @@ class _FaceCardDelegate(QStyledItemDelegate):
             painter.setFont(QFont("Segoe UI", 9))
             painter.drawText(thumb_rect, Qt.AlignCenter, "Face")
 
-        # 3. Match Confidence Badge (e.g. "94%")
-        if rec.confidence > 0.05:
-            pct_text = f"{int(round(rec.confidence * 100))}%"
-            badge_font = QFont("Segoe UI", 7, QFont.Bold)
-            painter.setFont(badge_font)
-            bw = 30
-            bh = 14
-            badge_rect = QRect(thumb_x + THUMB_SIZE - bw - 2, thumb_y + THUMB_SIZE - bh - 2, bw, bh)
+        # 3. Status Badge: "✓ Tagged" (green) vs "? Suggestion" / "? 94%" (amber)
+        badge_font = QFont("Segoe UI", 7, QFont.Bold)
+        painter.setFont(badge_font)
+        if is_conf:
+            badge_text = "✓ Tagged"
+            badge_bg = QColor("#2E7D32")
+            bw = 50
+            bh = 15
+            badge_rect = QRect(thumb_x + 3, thumb_y + 3, bw, bh)
             badge_path = QPainterPath()
             badge_path.addRoundedRect(QRectF(badge_rect), 3.0, 3.0)
-            painter.fillPath(badge_path, QBrush(QColor(0, 0, 0, 160)))
+            painter.fillPath(badge_path, QBrush(badge_bg))
             painter.setPen(QColor("#FFFFFF"))
-            painter.drawText(badge_rect, Qt.AlignCenter, pct_text)
+            painter.drawText(badge_rect, Qt.AlignCenter, badge_text)
+        else:
+            pct_val = int(round(rec.confidence * 100)) if rec.confidence > 0.05 else None
+            badge_text = f"? {pct_val}%" if pct_val is not None else "? Suggestion"
+            badge_bg = QColor("#D97706") if pct_val is not None else QColor("#0284C7")
+            bw = 44 if pct_val is not None else 64
+            bh = 15
+            badge_rect = QRect(thumb_x + 3, thumb_y + 3, bw, bh)
+            badge_path = QPainterPath()
+            badge_path.addRoundedRect(QRectF(badge_rect), 3.0, 3.0)
+            painter.fillPath(badge_path, QBrush(badge_bg))
+            painter.setPen(QColor("#FFFFFF"))
+            painter.drawText(badge_rect, Qt.AlignCenter, badge_text)
 
         # 4. Hover Action Overlay Buttons: [✓] (Confirm) and [✕] (Reject)
         if is_hovered or is_selected:
