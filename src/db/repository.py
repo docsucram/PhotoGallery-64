@@ -1750,6 +1750,45 @@ class CatalogRepository:
             conn.commit()
             return count
 
+    def deduplicate_media_tags(self) -> int:
+        """
+        Cleans up redundant root tag assignments where a media item is tagged with
+        both a hierarchical tag (e.g. 'Subject/Occasions/Christmas') and a redundant
+        flat root tag sharing the same leaf name (e.g. 'Christmas' from dc:subject).
+        Returns the number of redundant media_tag associations removed.
+        """
+        with self.engine.write_lock:
+            conn = self.engine.catalog_conn()
+            rows = conn.execute(
+                """
+                SELECT mt_root.media_id, mt_root.tag_id AS root_tag_id
+                FROM media_tags mt_root
+                JOIN tags t_root ON mt_root.tag_id = t_root.id
+                JOIN media_tags mt_hier ON mt_root.media_id = mt_hier.media_id AND mt_root.tag_id != mt_hier.tag_id
+                JOIN tags t_hier ON mt_hier.tag_id = t_hier.id
+                WHERE t_root.parent_id IS NULL
+                  AND t_hier.parent_id IS NOT NULL
+                  AND LOWER(t_root.name) = LOWER(t_hier.name);
+                """
+            ).fetchall()
+            if not rows:
+                return 0
+
+            conn.executemany(
+                "DELETE FROM media_tags WHERE media_id = ? AND tag_id = ?;",
+                [(r["media_id"], r["root_tag_id"]) for r in rows],
+            )
+            conn.execute(
+                """
+                DELETE FROM tags
+                WHERE parent_id IS NULL
+                  AND id NOT IN (SELECT DISTINCT tag_id FROM media_tags)
+                  AND id NOT IN (SELECT DISTINCT parent_id FROM tags WHERE parent_id IS NOT NULL);
+                """
+            )
+            conn.commit()
+            return len(rows)
+
     def get_tag_tree(self) -> list[dict[str, Any]]:
         conn = self.engine.catalog_conn()
         rows = conn.execute(

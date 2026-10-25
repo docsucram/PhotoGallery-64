@@ -387,6 +387,43 @@ class DualDatabaseEngine:
                 )
         except Exception as exc:
             logger.warning("Error in clean_xmp_media_people_v3 migration: %s", exc)
+
+        # 9. One-time deduplication of redundant flat root tags:
+        try:
+            cur.execute("CREATE TABLE IF NOT EXISTS schema_flags (name TEXT PRIMARY KEY);")
+            done = cur.execute(
+                "SELECT 1 FROM schema_flags WHERE name = 'dedup_media_tags_v1';"
+            ).fetchone()
+            if not done:
+                if cur.execute("PRAGMA table_info(media_tags);").fetchall():
+                    cur.execute(
+                        """
+                        DELETE FROM media_tags
+                        WHERE (media_id, tag_id) IN (
+                            SELECT mt_root.media_id, mt_root.tag_id
+                            FROM media_tags mt_root
+                            JOIN tags t_root ON mt_root.tag_id = t_root.id
+                            JOIN media_tags mt_hier ON mt_root.media_id = mt_hier.media_id AND mt_root.tag_id != mt_hier.tag_id
+                            JOIN tags t_hier ON mt_hier.tag_id = t_hier.id
+                            WHERE t_root.parent_id IS NULL
+                              AND t_hier.parent_id IS NOT NULL
+                              AND LOWER(t_root.name) = LOWER(t_hier.name)
+                        );
+                        """
+                    )
+                    cur.execute(
+                        """
+                        DELETE FROM tags
+                        WHERE parent_id IS NULL
+                          AND id NOT IN (SELECT DISTINCT tag_id FROM media_tags)
+                          AND id NOT IN (SELECT DISTINCT parent_id FROM tags WHERE parent_id IS NOT NULL);
+                        """
+                    )
+                cur.execute(
+                    "INSERT OR IGNORE INTO schema_flags(name) VALUES ('dedup_media_tags_v1');"
+                )
+        except Exception as exc:
+            logger.warning("Error in dedup_media_tags_v1 migration: %s", exc)
         conn.commit()
 
     def _migrate_thumbnails_schema(self, conn: sqlite3.Connection) -> None:

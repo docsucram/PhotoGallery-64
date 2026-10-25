@@ -163,7 +163,7 @@ def _format_exposure_str(val: Any) -> str | None:
 _MAC_EPOCH_OFFSET = 2082844800  # seconds between 1904-01-01 (HFS+) and 1970-01-01 (Unix)
 
 _FILENAME_TS_RE = re.compile(
-    r"(?:VID_|IMG_)?(\d{4})[-_.]?(\d{2})[-_.]?(\d{2})[\s_-]+(\d{2})[._:-](\d{2})[._:-](\d{2})"
+    r"(?:VID_|IMG_|PXL_|WP_|PANO_|PHOTO_)?(\d{4})[-_.]?(\d{2})[-_.]?(\d{2})[\s_T-]+(\d{2})[._:-]?(\d{2})[._:-]?(\d{2})"
 )
 
 
@@ -534,20 +534,36 @@ def parse_xmp_packet_bytes(
                 pass
 
         # Hierarchical and descriptive tags
-        tags_found: list[str] = []
-        for li in root.findall(".//MicrosoftPhoto:LastKeywordXMP/rdf:Bag/rdf:li", _XMP_NS):
-            if li.text and li.text.strip() and li.text.strip() not in tags_found:
-                tags_found.append(li.text.strip())
-        for li in root.findall(".//lr:hierarchicalSubject/rdf:Bag/rdf:li", _XMP_NS):
-            if li.text and li.text.strip() and li.text.strip() not in tags_found:
-                tags_found.append(li.text.strip())
-        for li in root.findall(".//digiKam:TagsList/rdf:Seq/rdf:li", _XMP_NS):
-            if li.text and li.text.strip() and li.text.strip() not in tags_found:
-                tags_found.append(li.text.strip())
+        hier_tags: list[str] = []
+        for tag_xpath in (
+            ".//MicrosoftPhoto:LastKeywordXMP/rdf:Bag/rdf:li",
+            ".//lr:hierarchicalSubject/rdf:Bag/rdf:li",
+            ".//digiKam:TagsList/rdf:Seq/rdf:li",
+        ):
+            for li in root.findall(tag_xpath, _XMP_NS):
+                if li.text and li.text.strip():
+                    norm = li.text.strip().replace("|", "/")
+                    if norm not in hier_tags:
+                        hier_tags.append(norm)
+
+        # Collect leaf names of all hierarchical tags (case-insensitive)
+        hier_leaves = {t.split("/")[-1].strip().lower() for t in hier_tags}
+
+        # Flat tags from dc:subject (Dublin Core flat fallback).
+        # Only add if not already represented as a leaf or path of a hierarchical tag.
         for li in root.findall(".//dc:subject/rdf:Bag/rdf:li", _XMP_NS):
-            if li.text and li.text.strip() and li.text.strip() not in tags_found:
-                tags_found.append(li.text.strip())
-        result["hierarchical_tags"] = tags_found
+            if li.text and li.text.strip():
+                raw_t = li.text.strip().replace("|", "/")
+                if "/" in raw_t:
+                    if raw_t not in hier_tags:
+                        hier_tags.append(raw_t)
+                        hier_leaves.add(raw_t.split("/")[-1].strip().lower())
+                else:
+                    if raw_t.lower() not in hier_leaves and raw_t not in hier_tags:
+                        hier_tags.append(raw_t)
+                        hier_leaves.add(raw_t.lower())
+
+        result["hierarchical_tags"] = hier_tags
 
         # ---------------------------------------------------------------------
         # Deterministic Face Region Parsing:
@@ -805,14 +821,14 @@ def extract_media_metadata(file_path: Path, is_video: bool) -> dict[str, Any]:
                     except Exception:
                         pass
 
-                    # DateTimeOriginal is the true Date Taken. Fall back to DateTimeDigitized, then DateTime tag 306
+                    # DateTimeOriginal is the true Date Taken. Fall back to DateTimeDigitized.
+                    # Never fall back to Tag 306 (DateTime) because Tag 306 is the file modification
+                    # timestamp updated whenever an editor or viewer saves/rotates the file.
                     dt_str = (
                         sub.get("DateTimeOriginal")
                         or readable.get("DateTimeOriginal")
                         or sub.get("DateTimeDigitized")
                         or readable.get("DateTimeDigitized")
-                        or readable.get("DateTime")
-                        or sub.get("DateTime")
                     )
                     if dt_str:
                         meta["date_taken"] = _parse_iso_or_exif_datetime(str(dt_str))
@@ -893,9 +909,17 @@ def extract_media_metadata(file_path: Path, is_video: bool) -> dict[str, Any]:
                             else:
                                 kw_str = str(xp_kw).rstrip("\x00")
                             for kw in kw_str.split(";"):
-                                kw_s = kw.strip()
-                                if kw_s and kw_s not in meta["hierarchical_tags"]:
-                                    meta["hierarchical_tags"].append(kw_s)
+                                kw_s = kw.strip().replace("|", "/")
+                                if not kw_s:
+                                    continue
+                                leaf = kw_s.split("/")[-1].strip().lower()
+                                if "/" in kw_s:
+                                    if kw_s not in meta["hierarchical_tags"]:
+                                        meta["hierarchical_tags"].append(kw_s)
+                                else:
+                                    existing_leaves = {t.split("/")[-1].strip().lower() for t in meta["hierarchical_tags"]}
+                                    if leaf not in existing_leaves and kw_s not in meta["hierarchical_tags"]:
+                                        meta["hierarchical_tags"].append(kw_s)
                         except Exception:
                             pass
 
@@ -1059,6 +1083,94 @@ def extract_media_metadata(file_path: Path, is_video: bool) -> dict[str, Any]:
     return meta
 
 
+def _resolve_person_name_from_tag(repo: Any, parts: list[str]) -> str | None:
+    """
+    Extracts a person name from a WLPG PeopleTag hierarchy (e.g. ['PeopleTags', 'Family', 'Robinson', 'Nansumay']).
+    Resolves against existing people in the catalog if possible.
+    """
+    if len(parts) < 2:
+        return None
+    leaf = parts[-1].strip()
+    if not leaf:
+        return None
+
+    categories = {"family", "friends", "colleagues", "contacts", "people", "group", "peopletags", "face"}
+    if len(parts) >= 4 and parts[1].lower() in categories:
+        first_last = f"{parts[-1].strip()} {parts[-2].strip()}"
+    elif len(parts) >= 3 and parts[1].lower() not in categories:
+        first_last = f"{parts[-1].strip()} {parts[-2].strip()}"
+    else:
+        first_last = leaf
+
+    # Check match against known people in DB
+    try:
+        all_people = repo.get_all_people()
+        # 1. Exact match on first_last (e.g. 'Nansumay Robinson')
+        for p in all_people:
+            p_name = str(p.get("name") or "").strip()
+            if p_name.lower() == first_last.lower():
+                return p_name
+        # 2. Match on leaf (e.g. 'Nansumay' matches 'Nansumay Robinson')
+        for p in all_people:
+            p_name = str(p.get("name") or "").strip()
+            if (
+                p_name.lower() == leaf.lower()
+                or p_name.lower().startswith(leaf.lower() + " ")
+                or p_name.lower().split()[0] == leaf.lower()
+            ):
+                return p_name
+    except Exception:
+        pass
+
+    return first_last
+
+
+def _assign_tags_and_people_for_media(
+    repo: Any,
+    mid: int,
+    h_tags: Sequence[str],
+    people_list: Sequence[dict[str, Any]],
+) -> None:
+    """
+    Safely assigns hierarchical tags and people extracted from file metadata.
+    Filters out PeopleTags/Face hierarchies and maps them to person tags.
+    Deduplicates leaf tags against full hierarchical paths.
+    """
+    assigned_people_names: set[str] = set()
+    for p_entry in people_list:
+        p_name = str(p_entry.get("name") or "").strip()
+        if p_name:
+            repo.assign_person(mid, p_name, rect=p_entry.get("rect", (0, 0, 0, 0)))
+            assigned_people_names.add(p_name.lower())
+
+    # Collect hierarchical and flat tags
+    valid_tag_paths: list[str] = []
+    for tag_path in h_tags:
+        norm_path = str(tag_path).replace("|", "/").strip().strip("/")
+        if not norm_path:
+            continue
+        if norm_path.lower().startswith(("face/", "peopletags/")):
+            parts = [p.strip() for p in norm_path.split("/") if p.strip()]
+            person_name = _resolve_person_name_from_tag(repo, parts)
+            if person_name and person_name.lower() not in assigned_people_names:
+                repo.assign_person(mid, person_name, rect=(0.0, 0.0, 0.0, 0.0))
+                assigned_people_names.add(person_name.lower())
+            continue
+        valid_tag_paths.append(norm_path)
+
+    # Deduplicate: if a flat tag is identical to the leaf of an already assigned hierarchical tag, skip it
+    hier_leaves = {
+        p.split("/")[-1].strip().lower()
+        for p in valid_tag_paths
+        if "/" in p
+    }
+    for norm_path in valid_tag_paths:
+        if "/" not in norm_path and norm_path.lower() in hier_leaves:
+            continue
+        tid = repo.create_tag(norm_path)
+        repo.assign_tag([mid], tid)
+
+
 
 class FolderSyncWorkerSignals(QObject):
     """Qt Signals emitted by FolderSyncWorker."""
@@ -1179,7 +1291,7 @@ class FolderSyncWorker(QRunnable):
                                             "ext": ext,
                                             "size": size_int,
                                             "mtime": mtime_int,
-                                            "date_taken": mtime_int,
+                                            "date_taken": _timestamp_from_filename(Path(entry.name).stem),
                                             "is_video": is_vid,
                                         }
                                     )
@@ -1264,7 +1376,7 @@ class FolderSyncWorker(QRunnable):
                         "ext": ext,
                         "size": size_int,
                         "mtime": mtime_int,
-                        "date_taken": meta["date_taken"] if meta["date_taken"] is not None else mtime_int,
+                        "date_taken": meta["date_taken"],
                         "rating": meta["rating"],
                         "width": meta["width"],
                         "height": meta["height"],
@@ -1339,14 +1451,7 @@ class FolderSyncWorker(QRunnable):
                 mid = key_to_id.get((folder_id, fname))
                 if mid is None:
                     continue
-                for tag_path in h_tags:
-                    norm_path = str(tag_path).replace("|", "/").strip("/")
-                    if norm_path.lower().startswith(("face/", "peopletags/")):
-                        continue
-                    tid = repo.create_tag(norm_path)
-                    repo.assign_tag([mid], tid)
-                for p_entry in people_list:
-                    repo.assign_person(mid, p_entry["name"], rect=p_entry.get("rect", (0, 0, 0, 0)))
+                _assign_tags_and_people_for_media(repo, mid, h_tags, people_list)
                 cleaned_ids.append(mid)
 
             # Tags/people read during initial scan came from the file itself, so mark metadata_dirty = 0

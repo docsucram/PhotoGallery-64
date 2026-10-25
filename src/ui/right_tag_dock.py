@@ -2256,7 +2256,28 @@ class TagAndCaptionDock(QDockWidget):
                 chip.hovered_changed.connect(self.person_hovered.emit)
                 self.people_chips_layout.addWidget(chip)
 
-            for t in summary.get("tags", []):
+            # Display-level tag deduplication: if both 'Subject/Occasions/Christmas' and 'Christmas' exist, keep only the hierarchical one
+            raw_tags = summary.get("tags", [])
+            seen_leaf_hier: set[str] = {
+                str(t.get("name") or "").lower()
+                for t in raw_tags
+                if "/" in str(t.get("full_path") or "")
+            }
+            deduped_display_tags: list[dict[str, Any]] = []
+            seen_display_names: set[str] = set()
+            for t in raw_tags:
+                t_name = str(t.get("name") or "").strip()
+                t_path = str(t.get("full_path") or t_name)
+                # If flat tag is already represented as leaf of a hierarchical tag, skip
+                if "/" not in t_path and t_name.lower() in seen_leaf_hier:
+                    continue
+                # Also prevent identical names if multiple tags somehow have identical names
+                if t_name.lower() in seen_display_names:
+                    continue
+                seen_display_names.add(t_name.lower())
+                deduped_display_tags.append(t)
+
+            for t in deduped_display_tags:
                 t_count = int(t.get("count", 1))
                 chip = _DescriptiveTagRowWidget(
                     int(t["id"]),

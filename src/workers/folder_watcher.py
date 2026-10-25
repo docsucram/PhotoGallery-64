@@ -33,6 +33,7 @@ from src.workers.scanner_thumb_worker import (
     IGNORED_DIR_NAMES,
     VIDEO_EXT_SET,
     extract_media_metadata,
+    _assign_tags_and_people_for_media,
 )
 from src.workers.xmp_sync_worker import is_recently_written
 
@@ -83,7 +84,7 @@ def _enrich_and_upsert_media(
                     "ext": ext,
                     "size": size_int,
                     "mtime": mtime_val,
-                    "date_taken": meta.get("date_taken") if meta.get("date_taken") is not None else mtime_val,
+                    "date_taken": meta.get("date_taken"),
                     "rating": meta.get("rating") or 0,
                     "width": meta.get("width"),
                     "height": meta.get("height"),
@@ -123,14 +124,7 @@ def _enrich_and_upsert_media(
                     mid = name_to_id.get(fname)
                     if mid is None:
                         continue
-                    for tag_path in h_tags:
-                        norm_path = str(tag_path).replace("|", "/").strip("/")
-                        if norm_path.lower().startswith(("face/", "peopletags/")):
-                            continue
-                        tid = repo.create_tag(norm_path)
-                        repo.assign_tag([mid], tid)
-                    for p_entry in people_list:
-                        repo.assign_person(mid, p_entry["name"], rect=p_entry.get("rect", (0, 0, 0, 0)))
+                    _assign_tags_and_people_for_media(repo, mid, h_tags, people_list)
                     cleaned_ids.append(mid)
                 if cleaned_ids:
                     repo.mark_media_clean(cleaned_ids)
