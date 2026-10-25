@@ -25,6 +25,8 @@ def qapp() -> QApplication:
     app = QApplication.instance()
     if app is None:
         app = QApplication([])
+    from PySide6.QtCore import QSettings
+    QSettings("PhotoGallery64", "PhotoGallery64").remove("filter_state")
     return app
 
 
@@ -44,6 +46,7 @@ def test_qat_navigation_history(qapp: QApplication, tmp_path: Path) -> None:
     )
 
     window = PhotoGalleryMainWindow(engine=engine, start_xmp_daemon=False)
+
     window.scan_folder(photos_dir, include_subfolders=True, blocking=True)
 
     # Initial state: no back or forward history
@@ -102,6 +105,7 @@ def test_qat_undo_redo_stack(qapp: QApplication, tmp_path: Path) -> None:
     )
 
     window = PhotoGalleryMainWindow(engine=engine, start_xmp_daemon=False)
+
     window.scan_folder(photos_dir, include_subfolders=True, blocking=True)
 
     all_ids = [r.id for r in window.catalog_model._records]
@@ -176,6 +180,7 @@ def test_ribbon_home_actions_and_quick_find(qapp: QApplication, tmp_path: Path) 
     )
 
     window = PhotoGalleryMainWindow(engine=engine, start_xmp_daemon=False)
+
     window.scan_folder(photos_dir, include_subfolders=True, blocking=True)
 
     # 1. Select All Action
@@ -203,8 +208,27 @@ def test_ribbon_home_actions_and_quick_find(qapp: QApplication, tmp_path: Path) 
 
     assert len(window.ribbon.home_face_carousel._buttons) == 1
     person_btn = list(window.ribbon.home_face_carousel._buttons.values())[0]
-    assert person_btn.width() == 46
-    assert person_btn.height() == 46
+    assert person_btn.width() == 54
+    assert person_btn.height() == 54
     assert "Tu May Robinson" in person_btn.toolTip()
+
+    # 5. Quick Find Expand Button & WLPG People Menu Options
+    assert hasattr(window.ribbon.home_face_carousel, "btn_expand")
+    from src.ui.ribbon_toolbar import _WLPGPeopleMenuWidget
+    from PySide6.QtWidgets import QMenu
+    dummy_menu = QMenu()
+    people_list = window.catalog_repo.get_people_list()
+    menu_widget = _WLPGPeopleMenuWidget(dummy_menu, people_list)
+    assert hasattr(menu_widget, "btn_and")
+    assert hasattr(menu_widget, "btn_or")
+    assert hasattr(menu_widget, "btn_all_tagged")
+    assert hasattr(menu_widget, "btn_detected")
+    assert hasattr(menu_widget, "btn_untagged")
+
+    # 6. Special People Filter Execution
+    window._on_people_special_filter("all_people")
+    assert window.ribbon.lbl_scope.text() == "All tagged or detected"
+    window._on_people_special_filter("untagged")
+    assert window.ribbon.lbl_scope.text() == "Not tagged or detected"
 
     window.shutdown()

@@ -40,6 +40,7 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import (
     QAbstractButton,
+    QApplication,
     QButtonGroup,
     QCheckBox,
     QComboBox,
@@ -252,7 +253,7 @@ def _render_aero_raw(kind: str, size: int = 20) -> QIcon:
         p.drawRoundedRect(QRectF(s * 0.42, s * 0.24, s * 0.46, s * 0.22), 1.5, 1.5)
         p.drawRoundedRect(QRectF(s * 0.42, s * 0.56, s * 0.46, s * 0.22), 1.5, 1.5)
 
-    elif kind in ("person", "people_tag", "batch_people"):
+    elif kind in ("person", "people_tag", "batch_people", "person_question", "person_none"):
         if kind == "batch_people":
             p.setPen(QPen(QColor("#2A5E8A"), 1.0))
             p.setBrush(QColor("#82B8E6"))
@@ -260,11 +261,18 @@ def _render_aero_raw(kind: str, size: int = 20) -> QIcon:
             p.drawRoundedRect(
                 QRectF(s * 0.44, s * 0.50, s * 0.44, s * 0.32), s * 0.14, s * 0.14
             )
-        grad = QLinearGradient(0, s * 0.15, 0, s * 0.88)
-        grad.setColorAt(0.0, QColor("#5CA4E2"))
-        grad.setColorAt(1.0, QColor("#2468A8"))
-        p.setPen(QPen(QColor("#1B4E80"), 1.1))
-        p.setBrush(grad)
+        if kind == "person_none":
+            grad = QLinearGradient(0, s * 0.15, 0, s * 0.88)
+            grad.setColorAt(0.0, QColor("#CFD8DC"))
+            grad.setColorAt(1.0, QColor("#90A4AE"))
+            p.setPen(QPen(QColor("#78909C"), 1.1))
+            p.setBrush(grad)
+        else:
+            grad = QLinearGradient(0, s * 0.15, 0, s * 0.88)
+            grad.setColorAt(0.0, QColor("#5CA4E2"))
+            grad.setColorAt(1.0, QColor("#2468A8"))
+            p.setPen(QPen(QColor("#1B4E80"), 1.1))
+            p.setBrush(grad)
         cx = s * 0.42 if kind == "batch_people" else s * 0.50
         p.drawEllipse(QPointF(cx, s * 0.32), s * 0.18, s * 0.18)
         body = QPainterPath()
@@ -273,6 +281,20 @@ def _render_aero_raw(kind: str, size: int = 20) -> QIcon:
         body.quadTo(cx + s * 0.28, s * 0.54, cx + s * 0.30, s * 0.86)
         body.closeSubpath()
         p.drawPath(body)
+
+        if kind == "person_question":
+            p.setPen(QPen(QColor("#C68400"), 1.0))
+            p.setBrush(QColor("#FFD54F"))
+            p.drawEllipse(QPointF(s * 0.78, s * 0.72), s * 0.18, s * 0.18)
+            p.setPen(QPen(QColor("#5D4037"), 1.2))
+            p.setFont(QFont("Segoe UI", int(s * 0.24), QFont.Bold))
+            p.drawText(QRectF(s * 0.60, s * 0.54, s * 0.36, s * 0.36), Qt.AlignCenter, "?")
+        elif kind == "person_none":
+            p.setPen(QPen(QColor("#C9302C"), 1.0))
+            p.setBrush(QColor("#FFEBEE"))
+            p.drawEllipse(QPointF(s * 0.78, s * 0.72), s * 0.18, s * 0.18)
+            p.setPen(QPen(QColor("#C9302C"), 1.8, Qt.SolidLine, Qt.RoundCap))
+            p.drawLine(QPointF(s * 0.68, s * 0.72), QPointF(s * 0.88, s * 0.72))
 
     elif kind == "caption":
         # Landscape photo card with note/callout matching WLPG
@@ -1871,11 +1893,15 @@ class _FaceCarouselWidget(QWidget):
     """Horizontal scrollable strip of face avatar cards matching WLPG Home Quick find."""
 
     person_clicked = Signal(int)
+    boolean_mode_selected = Signal(str)
+    special_filter_selected = Signal(str)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._buttons: dict[int, QToolButton] = {}
         self._button_list: list[QToolButton] = []
+        self._all_people_list: list[dict[str, Any]] = []
+        self._top_people: list[dict[str, Any]] = []
         self._visible_faces: int = 5
         self._scroll_index: int = 0
 
@@ -1883,9 +1909,10 @@ class _FaceCarouselWidget(QWidget):
         hbox.setContentsMargins(0, 0, 0, 0)
         hbox.setSpacing(1)
 
-        # Bordered container frame matching WLPG
+        # Bordered container frame matching WLPG (62px tall)
         self.container = QFrame(self)
         self.container.setObjectName("FaceCarouselContainer")
+        self.container.setFixedHeight(62)
         self.container.setStyleSheet(
             """
             QFrame#FaceCarouselContainer {
@@ -1904,7 +1931,7 @@ class _FaceCarouselWidget(QWidget):
         self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.scroll.setFrameShape(QFrame.NoFrame)
-        self.scroll.setFixedHeight(48)
+        self.scroll.setFixedHeight(58)
         self.scroll.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
 
         self.strip = QWidget()
@@ -1916,68 +1943,92 @@ class _FaceCarouselWidget(QWidget):
         self.scroll.setWidget(self.strip)
         c_layout.addWidget(self.scroll)
 
-        # Small vertical scroll chevrons on the right edge (▲ and ▼)
+        # Vertical 3-button stack on the right edge matching WLPG: ▲, ▼, and ▾ (More)
         btn_vbox = QVBoxLayout()
         btn_vbox.setContentsMargins(0, 0, 0, 0)
         btn_vbox.setSpacing(1)
 
         self.btn_scroll_left = QPushButton("▲", self.container)
+        self.btn_scroll_left.setToolTip("Scroll left")
         self.btn_scroll_right = QPushButton("▼", self.container)
-        for b in (self.btn_scroll_left, self.btn_scroll_right):
-            b.setFixedSize(14, 23)
+        self.btn_scroll_right.setToolTip("Scroll right")
+        self.btn_expand = QPushButton(self.container)
+        self.btn_expand.setToolTip("Show all people and search options")
+
+        # Draw classic ribbon gallery "More" icon (top line + down arrow)
+        more_pix = QPixmap(10, 10)
+        more_pix.fill(Qt.transparent)
+        mp = QPainter(more_pix)
+        mp.setRenderHint(QPainter.Antialiasing)
+        mp.setPen(QPen(QColor("#55687C"), 1.2))
+        mp.drawLine(1, 2, 9, 2)
+        mp.setBrush(QColor("#55687C"))
+        tri = QPolygonF([QPointF(2, 4.5), QPointF(8, 4.5), QPointF(5, 7.5)])
+        mp.drawPolygon(tri)
+        mp.end()
+        self.btn_expand.setIcon(QIcon(more_pix))
+        self.btn_expand.setIconSize(QSize(10, 10))
+
+        btn_style = """
+            QPushButton {
+                border: 1px solid #D2DFEE;
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #F6F9FD, stop:1 #E2ECF7);
+                color: #55687C;
+                font-size: 7pt;
+                padding: 0;
+            }
+            QPushButton:hover {
+                background: #CCE4F7;
+                border-color: #7BAEDB;
+            }
+            QPushButton:disabled {
+                color: #B0C4DE;
+                background: #F4F6F9;
+                border-color: #DCE6F2;
+            }
+        """
+        for b in (self.btn_scroll_left, self.btn_scroll_right, self.btn_expand):
+            b.setFixedSize(14, 19)
             b.setFlat(True)
             b.setCursor(Qt.PointingHandCursor)
-            b.setStyleSheet(
-                """
-                QPushButton {
-                    border: 1px solid #D2DFEE;
-                    background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #F6F9FD, stop:1 #E2ECF7);
-                    color: #55687C;
-                    font-size: 7pt;
-                    padding: 0;
-                }
-                QPushButton:hover {
-                    background: #CCE4F7;
-                    border-color: #7BAEDB;
-                }
-                QPushButton:disabled {
-                    color: #B0C4DE;
-                    background: #F4F6F9;
-                    border-color: #DCE6F2;
-                }
-                """
-            )
+            b.setStyleSheet(btn_style)
+
         self.btn_scroll_left.clicked.connect(self._scroll_left)
         self.btn_scroll_right.clicked.connect(self._scroll_right)
+        self.btn_expand.clicked.connect(self._show_people_dropdown)
         btn_vbox.addWidget(self.btn_scroll_left)
         btn_vbox.addWidget(self.btn_scroll_right)
+        btn_vbox.addWidget(self.btn_expand)
         c_layout.addLayout(btn_vbox)
 
         hbox.addWidget(self.container)
+        self.setFixedHeight(62)
         self.set_visible_faces(5)
 
     def set_visible_faces(self, count: int) -> None:
         self._visible_faces = max(1, min(6, count))
-        scroll_w = self._visible_faces * 48
+        scroll_w = self._visible_faces * 56
         total_w = scroll_w + 19
         self.scroll.setFixedWidth(scroll_w)
         self.container.setFixedWidth(total_w)
         self.setFixedWidth(total_w)
         self.setMinimumWidth(total_w)
         if count >= 5:
-            self.setMaximumWidth(340)
+            self.setMaximumWidth(360)
         else:
             self.setMaximumWidth(total_w)
-        self.setFixedHeight(50)
+        self.setFixedHeight(62)
+        self.container.setFixedHeight(62)
+        self.scroll.setFixedHeight(58)
         self._update_visible_faces()
 
     def sizeHint(self) -> QSize:
-        w = getattr(self, "_visible_faces", 5) * 48 + 19
-        return QSize(w, 50)
+        w = getattr(self, "_visible_faces", 5) * 56 + 19
+        return QSize(w, 62)
 
     def minimumSizeHint(self) -> QSize:
-        w = getattr(self, "_visible_faces", 1) * 48 + 19
-        return QSize(w, 50)
+        w = getattr(self, "_visible_faces", 1) * 56 + 19
+        return QSize(w, 62)
 
     def _update_visible_faces(self) -> None:
         n = len(self._button_list)
@@ -2008,21 +2059,29 @@ class _FaceCarouselWidget(QWidget):
         self._buttons.clear()
         self._button_list.clear()
         self._scroll_index = 0
+        self._all_people_list = list(people)
 
-        for p in people:
+        # Sort by Top people (highest media count & confirmed count descending)
+        self._top_people = sorted(
+            self._all_people_list,
+            key=lambda p: (int(p.get("media_count", 0)), int(p.get("confirmed_count", 0))),
+            reverse=True,
+        )
+
+        for p in self._top_people:
             pid = int(p["id"])
             name = str(p["name"])
             cnt = int(p.get("media_count", 0))
             blob = p.get("thumbnail_blob")
 
             btn = QToolButton(self.strip)
-            btn.setFixedSize(46, 46)
+            btn.setFixedSize(54, 54)
             btn.setCursor(Qt.PointingHandCursor)
             btn.setToolTip(f"{name} ({cnt} items)")
 
-            pix = make_person_avatar_pixmap(name, blob, size=44)
+            pix = make_person_avatar_pixmap(name, blob, size=50)
             btn.setIcon(QIcon(pix))
-            btn.setIconSize(QSize(44, 44))
+            btn.setIconSize(QSize(50, 50))
             btn.setStyleSheet(
                 """
                 QToolButton {
@@ -2059,6 +2118,279 @@ class _FaceCarouselWidget(QWidget):
             self._buttons[person_id].click()
         else:
             self.person_clicked.emit(person_id)
+
+    def _show_people_dropdown(self) -> None:
+        menu = QMenu(self)
+        menu.setObjectName("WLPGPeopleDropdownMenu")
+        menu.setStyleSheet(
+            """
+            QMenu#WLPGPeopleDropdownMenu {
+                background: #FFFFFF;
+                border: 1px solid #7DA2CE;
+                padding: 0px;
+            }
+            """
+        )
+        widget = _WLPGPeopleMenuWidget(menu, self._all_people_list)
+        widget.person_selected.connect(self.person_clicked.emit)
+        widget.boolean_mode_selected.connect(self.boolean_mode_selected.emit)
+        widget.special_filter_selected.connect(self.special_filter_selected.emit)
+
+        wa = QWidgetAction(menu)
+        wa.setDefaultWidget(widget)
+        menu.addAction(wa)
+
+        pos = self.container.mapToGlobal(QPoint(0, self.container.height()))
+        screen = self.screen() or (QApplication.primaryScreen() if QApplication.instance() else None)
+        if screen:
+            avail_w = screen.availableGeometry().right()
+            if pos.x() + 480 > avail_w:
+                pos.setX(max(10, avail_w - 490))
+        menu.exec(pos)
+
+
+class _WLPGPeopleMenuWidget(QWidget):
+    """
+    Authentic Windows Live Photo Gallery People dropdown widget matching media_1792919727459_8c5fe8cf.png:
+    - Top people (1 row of top 10 people by photo count)
+    - Other people A - Z (10-column scrollable grid of all other people sorted alphabetically)
+    - Search options: and, or, All tagged or detected, All detected but not tagged, Not tagged or detected
+    """
+
+    person_selected = Signal(int)
+    boolean_mode_selected = Signal(str)
+    special_filter_selected = Signal(str)
+
+    def __init__(
+        self,
+        menu: QMenu,
+        people: Sequence[dict[str, Any]],
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent or menu)
+        self.menu = menu
+        self.setFixedWidth(476)
+        self.setObjectName("WLPGPeopleMenuWidget")
+        self.setStyleSheet(
+            """
+            QWidget#WLPGPeopleMenuWidget {
+                background: #FFFFFF;
+                border: 1px solid #7DA2CE;
+            }
+            """
+        )
+
+        vbox = QVBoxLayout(self)
+        vbox.setContentsMargins(0, 0, 0, 0)
+        vbox.setSpacing(0)
+
+        # Sort people into Top 10 and Other People A-Z
+        all_people = list(people)
+        top_people = sorted(
+            all_people,
+            key=lambda p: (int(p.get("media_count", 0)), int(p.get("confirmed_count", 0))),
+            reverse=True,
+        )
+        top_10 = top_people[:10]
+        top_ids = {int(p["id"]) for p in top_10}
+        other_people = sorted(
+            [p for p in all_people if int(p["id"]) not in top_ids],
+            key=lambda p: str(p.get("name", "")).lower(),
+        )
+
+        # Scroll Area hosting Top people and Other people A-Z
+        scroll = QScrollArea(self)
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        scroll.setFrameShape(QFrame.NoFrame)
+        est_height = 80 + (len(other_people) + 9) // 10 * 46
+        scroll.setFixedHeight(min(380, max(140, est_height)))
+        scroll.setStyleSheet("background: #FFFFFF; border: none;")
+
+        scroll_content = QWidget()
+        scroll_content.setStyleSheet("background: #FFFFFF;")
+        content_layout = QVBoxLayout(scroll_content)
+        content_layout.setContentsMargins(4, 4, 4, 4)
+        content_layout.setSpacing(4)
+
+        # 1. Section Header: Top people
+        lbl_top = QLabel("Top people", scroll_content)
+        lbl_top.setStyleSheet(
+            "background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #F9FBFE, stop:1 #EBF2F8);"
+            "border-bottom: 1px solid #D5E0EA; color: #35506E; font-weight: bold; font-size: 8.5pt;"
+            "font-family: 'Segoe UI'; padding: 3px 6px;"
+        )
+        content_layout.addWidget(lbl_top)
+
+        top_grid_widget = QWidget(scroll_content)
+        top_grid_widget.setStyleSheet("background: transparent;")
+        top_grid = QGridLayout(top_grid_widget)
+        top_grid.setContentsMargins(0, 2, 0, 4)
+        top_grid.setSpacing(2)
+        top_grid.setAlignment(Qt.AlignLeft)
+
+        btn_style = """
+            QToolButton {
+                border: 1px solid #C8D7E6;
+                border-radius: 2px;
+                background: #FFFFFF;
+                padding: 0px;
+            }
+            QToolButton:hover {
+                border: 1px solid #E2B034;
+                background: #FFF8E6;
+            }
+        """
+
+        for col, p in enumerate(top_10):
+            pid = int(p["id"])
+            name = str(p.get("name", ""))
+            cnt = int(p.get("media_count", 0))
+            blob = p.get("thumbnail_blob")
+            btn = QToolButton(top_grid_widget)
+            btn.setFixedSize(42, 42)
+            btn.setCursor(Qt.PointingHandCursor)
+            btn.setToolTip(f"{name} ({cnt} items)")
+            pix = make_person_avatar_pixmap(name, blob, size=40)
+            btn.setIcon(QIcon(pix))
+            btn.setIconSize(QSize(40, 40))
+            btn.setStyleSheet(btn_style)
+            btn.clicked.connect(lambda _c=False, person_id=pid: self._on_person_clicked(person_id))
+            top_grid.addWidget(btn, 0, col)
+
+        content_layout.addWidget(top_grid_widget)
+
+        # 2. Section Header: Other people A - Z
+        if other_people:
+            lbl_other = QLabel("Other people A - Z", scroll_content)
+            lbl_other.setStyleSheet(
+                "background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #F9FBFE, stop:1 #EBF2F8);"
+                "border-top: 1px solid #D5E0EA; border-bottom: 1px solid #D5E0EA; color: #35506E; font-weight: bold; font-size: 8.5pt;"
+                "font-family: 'Segoe UI'; padding: 3px 6px;"
+            )
+            content_layout.addWidget(lbl_other)
+
+            other_grid_widget = QWidget(scroll_content)
+            other_grid_widget.setStyleSheet("background: transparent;")
+            other_grid = QGridLayout(other_grid_widget)
+            other_grid.setContentsMargins(0, 2, 0, 4)
+            other_grid.setSpacing(2)
+            other_grid.setAlignment(Qt.AlignLeft)
+
+            for i, p in enumerate(other_people):
+                r = i // 10
+                c = i % 10
+                pid = int(p["id"])
+                name = str(p.get("name", ""))
+                cnt = int(p.get("media_count", 0))
+                blob = p.get("thumbnail_blob")
+                btn = QToolButton(other_grid_widget)
+                btn.setFixedSize(42, 42)
+                btn.setCursor(Qt.PointingHandCursor)
+                btn.setToolTip(f"{name} ({cnt} items)")
+                pix = make_person_avatar_pixmap(name, blob, size=40)
+                btn.setIcon(QIcon(pix))
+                btn.setIconSize(QSize(40, 40))
+                btn.setStyleSheet(btn_style)
+                btn.clicked.connect(lambda _c=False, person_id=pid: self._on_person_clicked(person_id))
+                other_grid.addWidget(btn, r, c)
+
+            content_layout.addWidget(other_grid_widget)
+
+        content_layout.addStretch(1)
+        scroll.setWidget(scroll_content)
+        vbox.addWidget(scroll)
+
+        # 3. Pinned Bottom Actions
+        bottom_frame = QFrame(self)
+        bottom_frame.setStyleSheet(
+            "background: #F6F9FD; border-top: 1px solid #D5E0EA;"
+        )
+        b_vbox = QVBoxLayout(bottom_frame)
+        b_vbox.setContentsMargins(6, 4, 6, 4)
+        b_vbox.setSpacing(2)
+
+        opt_style = """
+            QToolButton {
+                border: 1px solid transparent;
+                border-radius: 2px;
+                background: transparent;
+                color: #1E395B;
+                font-family: 'Segoe UI';
+                font-size: 8.5pt;
+                text-align: left;
+                padding: 2px 6px;
+            }
+            QToolButton:hover {
+                background: #E5F1FB;
+                border: 1px solid #A0C5E8;
+            }
+        """
+
+        self.btn_and = QToolButton(bottom_frame)
+        self.btn_and.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        self.btn_and.setText("&and")
+        self.btn_and.setIcon(make_wlpg_icon("boolean_and", 14))
+        self.btn_and.setIconSize(QSize(14, 14))
+        self.btn_and.setStyleSheet(opt_style)
+        self.btn_and.setFixedHeight(22)
+        self.btn_and.clicked.connect(lambda: self._on_boolean_mode("AND"))
+        b_vbox.addWidget(self.btn_and)
+
+        self.btn_or = QToolButton(bottom_frame)
+        self.btn_or.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        self.btn_or.setText("&or")
+        self.btn_or.setIcon(make_wlpg_icon("boolean_or", 14))
+        self.btn_or.setIconSize(QSize(14, 14))
+        self.btn_or.setStyleSheet(opt_style)
+        self.btn_or.setFixedHeight(22)
+        self.btn_or.clicked.connect(lambda: self._on_boolean_mode("OR"))
+        b_vbox.addWidget(self.btn_or)
+
+        self.btn_all_tagged = QToolButton(bottom_frame)
+        self.btn_all_tagged.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        self.btn_all_tagged.setText("All &tagged or detected")
+        self.btn_all_tagged.setIcon(make_wlpg_icon("person", 14))
+        self.btn_all_tagged.setIconSize(QSize(14, 14))
+        self.btn_all_tagged.setStyleSheet(opt_style)
+        self.btn_all_tagged.setFixedHeight(22)
+        self.btn_all_tagged.clicked.connect(lambda: self._on_special_filter("all_people"))
+        b_vbox.addWidget(self.btn_all_tagged)
+
+        self.btn_detected = QToolButton(bottom_frame)
+        self.btn_detected.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        self.btn_detected.setText("All &detected but not tagged")
+        self.btn_detected.setIcon(make_wlpg_icon("person_question", 14))
+        self.btn_detected.setIconSize(QSize(14, 14))
+        self.btn_detected.setStyleSheet(opt_style)
+        self.btn_detected.setFixedHeight(22)
+        self.btn_detected.clicked.connect(lambda: self._on_special_filter("detected_untagged"))
+        b_vbox.addWidget(self.btn_detected)
+
+        self.btn_untagged = QToolButton(bottom_frame)
+        self.btn_untagged.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        self.btn_untagged.setText("&Not tagged or detected")
+        self.btn_untagged.setIcon(make_wlpg_icon("person_none", 14))
+        self.btn_untagged.setIconSize(QSize(14, 14))
+        self.btn_untagged.setStyleSheet(opt_style)
+        self.btn_untagged.setFixedHeight(22)
+        self.btn_untagged.clicked.connect(lambda: self._on_special_filter("untagged"))
+        b_vbox.addWidget(self.btn_untagged)
+
+        vbox.addWidget(bottom_frame)
+
+    def _on_person_clicked(self, pid: int) -> None:
+        self.menu.close()
+        self.person_selected.emit(pid)
+
+    def _on_boolean_mode(self, mode: str) -> None:
+        self.menu.close()
+        self.boolean_mode_selected.emit(mode)
+
+    def _on_special_filter(self, kind: str) -> None:
+        self.menu.close()
+        self.special_filter_selected.emit(kind)
 
 
 class WLPGTagsMenuWidget(QWidget):
@@ -2394,6 +2726,7 @@ class RibbonToolbar(QWidget):
     edited_filter_selected = Signal(bool)
     media_type_filter_selected = Signal(str)                # "all" | "image" | "video"
     person_boolean_mode_changed = Signal(str)               # "AND" | "OR"
+    people_special_filter_selected = Signal(str)            # "all_people" | "detected_untagged" | "untagged"
     text_search_toggle_requested = Signal()
 
     # Quick Access Toolbar & Navigation Signals
@@ -3279,6 +3612,8 @@ class RibbonToolbar(QWidget):
         self.home_face_carousel = _FaceCarouselWidget(grp_qfind)
         self.home_face_carousel.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         self.home_face_carousel.person_clicked.connect(self.person_quick_find_selected.emit)
+        self.home_face_carousel.boolean_mode_selected.connect(self._on_carousel_boolean_mode)
+        self.home_face_carousel.special_filter_selected.connect(self.people_special_filter_selected.emit)
 
         # 2. Dropdown Filter Buttons: Months, Rated, Flagged (3 stacked rows)
         qf_filters_col = QVBoxLayout()
@@ -3795,6 +4130,12 @@ class RibbonToolbar(QWidget):
         self.find_face_carousel.person_clicked.connect(
             self.person_quick_find_selected.emit
         )
+        self.find_face_carousel.boolean_mode_selected.connect(
+            self._on_carousel_boolean_mode
+        )
+        self.find_face_carousel.special_filter_selected.connect(
+            self.people_special_filter_selected.emit
+        )
         p_hbox.addWidget(self.find_face_carousel)
 
         p_mode_col = QVBoxLayout()
@@ -4057,6 +4398,14 @@ class RibbonToolbar(QWidget):
 
     def is_people_and_mode(self) -> bool:
         return bool(hasattr(self, "btn_people_and") and self.btn_people_and.isChecked())
+
+    def _on_carousel_boolean_mode(self, mode: str) -> None:
+        if hasattr(self, "btn_people_and") and hasattr(self, "btn_people_or"):
+            if mode == "AND":
+                self.btn_people_and.setChecked(True)
+            else:
+                self.btn_people_or.setChecked(True)
+        self.person_boolean_mode_changed.emit(mode)
 
     def _build_create_tab(self) -> QWidget:
         page = _RibbonPage()

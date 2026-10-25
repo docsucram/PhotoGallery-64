@@ -908,6 +908,9 @@ class PhotoGalleryMainWindow(QMainWindow):
         self.ribbon.person_boolean_mode_changed.connect(
             self.left_nav_dock.set_person_boolean_mode
         )
+        self.ribbon.people_special_filter_selected.connect(
+            self._on_people_special_filter
+        )
         self.ribbon.text_search_toggle_requested.connect(
             lambda: self.toggle_search_scope_bar(force_visible=True)
         )
@@ -1735,6 +1738,25 @@ class PhotoGalleryMainWindow(QMainWindow):
                 mid = state.get("media_id")
                 if mid is not None:
                     self.open_single_viewer(mid)
+            elif view == "grid_special_people":
+                if hasattr(self, "media_viewer") and self.central_stack.currentWidget() == self.media_viewer:
+                    self.show_grid_view()
+                self._active_map_media_ids = set(state.get("media_ids", []))
+                if self.central_stack.currentWidget() != self.grid_view:
+                    self.central_stack.setCurrentWidget(self.grid_view)
+                    self.ribbon.set_active_mode("grid")
+                self.grid_view.set_person_header(None)
+                self.card_delegate.set_face_crop_person_id(None)
+                kind = state.get("special_filter", "")
+                lbl = {
+                    "all_people": "All tagged or detected",
+                    "detected_untagged": "All detected but not tagged",
+                    "untagged": "Not tagged or detected",
+                }.get(kind, "People")
+                self.scope_bar.set_scope_label(lbl)
+                self.ribbon.set_scope_label(lbl)
+                self._update_scope_bar_visibility()
+                self.rebuild_and_run_query()
             else:
                 # Standard grid view (view == "grid" or legacy filter dict)
                 if hasattr(self, "media_viewer") and self.central_stack.currentWidget() == self.media_viewer:
@@ -1853,6 +1875,44 @@ class PhotoGalleryMainWindow(QMainWindow):
         else:
             self.card_delegate.set_face_crop_person_id(None)
         self.grid_view.viewport().update()
+
+    def _on_people_special_filter(self, filter_kind: str) -> None:
+        """Filters catalog media by WLPG special people criteria: all_people, detected_untagged, untagged."""
+        conn = self.engine.catalog_conn()
+        if filter_kind == "all_people":
+            rows = conn.execute(
+                "SELECT DISTINCT media_id FROM media_people WHERE state IN (0, 1);"
+            ).fetchall()
+            label = "All tagged or detected"
+        elif filter_kind == "detected_untagged":
+            rows = conn.execute(
+                "SELECT DISTINCT media_id FROM media_people WHERE state = 0;"
+            ).fetchall()
+            label = "All detected but not tagged"
+        elif filter_kind == "untagged":
+            rows = conn.execute(
+                "SELECT id FROM media WHERE id NOT IN (SELECT DISTINCT media_id FROM media_people WHERE state IN (0, 1));"
+            ).fetchall()
+            label = "Not tagged or detected"
+        else:
+            return
+
+        mids = {int(r[0]) for r in rows}
+        self._active_map_media_ids = mids
+        if self.central_stack.currentWidget() != self.grid_view:
+            self.central_stack.setCurrentWidget(self.grid_view)
+            self.ribbon.set_active_mode("grid")
+        self.grid_view.set_person_header(None)
+        self.card_delegate.set_face_crop_person_id(None)
+        self.scope_bar.set_scope_label(label)
+        self.ribbon.set_scope_label(label)
+        self._update_scope_bar_visibility()
+        self._push_nav_state({
+            "view": "grid_special_people",
+            "special_filter": filter_kind,
+            "media_ids": list(mids),
+        })
+        self.rebuild_and_run_query()
 
     def on_arrange_changed(self, mode: str, reverse: bool) -> None:
         self._arrange_by = mode  # type: ignore[assignment]
