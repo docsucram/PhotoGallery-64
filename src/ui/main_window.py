@@ -2830,7 +2830,7 @@ class PhotoGalleryMainWindow(QMainWindow):
                 )
 
             if hasattr(self.ribbon, "effects_gallery"):
-                pixmaps = self.media_viewer.get_effect_preview_pixmaps(42, 28)
+                pixmaps = self.media_viewer.get_effect_preview_pixmaps(96, 64)
                 if pixmaps:
                     self.ribbon.effects_gallery.update_live_thumbnails(pixmaps)
             self._update_revert_button_state()

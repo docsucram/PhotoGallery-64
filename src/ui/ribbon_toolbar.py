@@ -1279,7 +1279,7 @@ def make_default_variation_base_image(w: int = 54, h: int = 38) -> np.ndarray:
 @lru_cache(maxsize=16)
 def make_effect_preview_icon(effect_name: str) -> QIcon:
     """Generates an authentic photographic thumbnail preview matching WLPG Effects gallery."""
-    img = make_default_variation_base_image(46, 34)
+    img = make_default_variation_base_image(84, 54)
     h, w = img.shape[:2]
     rec = PhotoAdjustmentRecipe(effect=effect_name)
     rendered = render_adjusted_image(img, rec)
@@ -1543,9 +1543,9 @@ class _RibbonEffectsGallery(QFrame):
     effect_hovered = Signal(str)
     effect_unhovered = Signal()
 
-    CARD_WIDTH = 48
+    CARD_WIDTH = 54
     CARD_HEIGHT = 56
-    CARD_STRIDE = 50
+    CARD_STRIDE = 55
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -1563,8 +1563,9 @@ class _RibbonEffectsGallery(QFrame):
                 background: transparent;
                 color: #1E395B;
                 font-family: 'Segoe UI';
-                font-size: 7pt;
-                padding: 1px;
+                font-size: 7.5pt;
+                padding: 1px 0px 0px 0px;
+                margin: 0px;
             }
             QToolButton.EffectCard:hover {
                 background: #EBF3FD;
@@ -1590,7 +1591,7 @@ class _RibbonEffectsGallery(QFrame):
         self.cards_holder.setStyleSheet("background: transparent;")
         self.cards_layout = QHBoxLayout(self.cards_holder)
         self.cards_layout.setContentsMargins(0, 0, 0, 0)
-        self.cards_layout.setSpacing(2)
+        self.cards_layout.setSpacing(1)
 
         self.btn_group = QButtonGroup(self)
         self.btn_group.setExclusive(True)
@@ -1616,7 +1617,7 @@ class _RibbonEffectsGallery(QFrame):
                 btn.setChecked(True)
             btn.setText(label)
             btn.setIcon(make_effect_preview_icon(eff_id))
-            btn.setIconSize(QSize(42, 28))
+            btn.setIconSize(QSize(50, 32))
             btn.setToolButtonStyle(Qt.ToolButtonTextUnderIcon)
             btn.setFixedSize(self.CARD_WIDTH, self.CARD_HEIGHT)
             btn.setToolTip(tip)
@@ -1697,18 +1698,20 @@ class _RibbonEffectsGallery(QFrame):
     def set_visible_tiles(self, count: int) -> None:
         self._visible_tiles = max(1, min(len(self._effects_data), count))
         vw = self._visible_tiles * self.CARD_STRIDE
-        total_w = vw + 20
+        total_w = vw + 18
         self.viewport_widget.setFixedSize(vw, 58)
         self.setFixedSize(total_w, 62)
+        total_holder_w = len(self._effects_data) * self.CARD_STRIDE
+        self.cards_holder.setGeometry(0, 0, total_holder_w, 58)
         self._update_scroll_buttons()
 
     def sizeHint(self) -> QSize:
         count = getattr(self, "_visible_tiles", len(self._effects_data))
-        total_w = count * self.CARD_STRIDE + 20
+        total_w = count * self.CARD_STRIDE + 18
         return QSize(total_w, 62)
 
     def minimumSizeHint(self) -> QSize:
-        return QSize(self.CARD_STRIDE + 20, 62)
+        return QSize(self.CARD_STRIDE + 18, 62)
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
@@ -1739,6 +1742,7 @@ class _RibbonEffectsGallery(QFrame):
 
     def _show_all_effects_menu(self) -> None:
         menu = QMenu(self)
+        menu.setMinimumWidth(320)
         menu.setStyleSheet(
             """
             QMenu {
@@ -1762,31 +1766,39 @@ class _RibbonEffectsGallery(QFrame):
             action = QWidgetAction(menu)
             w = QWidget(menu)
             w.setCursor(Qt.PointingHandCursor)
-            w.setFixedHeight(36)
+            w.setFixedHeight(62)
             w_layout = QHBoxLayout(w)
-            w_layout.setContentsMargins(6, 2, 8, 2)
-            w_layout.setSpacing(10)
+            w_layout.setContentsMargins(8, 3, 10, 3)
+            w_layout.setSpacing(12)
 
-            # Left: preview image
+            # Left: preview image (2x size: 84x54)
             lbl_icon = QLabel(w)
-            lbl_icon.setFixedSize(44, 28)
-            lbl_icon.setPixmap(btn.icon().pixmap(44, 28))
+            lbl_icon.setFixedSize(84, 54)
             lbl_icon.setStyleSheet("border: 1px solid #CBD5E1; border-radius: 2px;")
+            live_pix = getattr(self, "_live_thumbnails", {}).get(eff_id)
+            if live_pix and not live_pix.isNull():
+                scaled_pix = live_pix.scaled(
+                    84, 54, Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation
+                )
+            else:
+                scaled_pix = btn.icon().pixmap(84, 54)
+            lbl_icon.setPixmap(scaled_pix)
+            lbl_icon.setScaledContents(True)
             w_layout.addWidget(lbl_icon)
 
             # Right: Effect Name and Description
             v_text = QVBoxLayout()
             v_text.setContentsMargins(0, 0, 0, 0)
-            v_text.setSpacing(0)
+            v_text.setSpacing(2)
 
             lbl_name = QLabel(label, w)
-            lbl_name.setFont(QFont("Segoe UI", 9, QFont.Weight.Bold))
+            lbl_name.setFont(QFont("Segoe UI", 9.5, QFont.Weight.Bold))
             lbl_name.setStyleSheet("color: #0F172A;")
             v_text.addWidget(lbl_name)
 
             lbl_desc = QLabel(tip, w)
-            lbl_desc.setFont(QFont("Segoe UI", 8))
-            lbl_desc.setStyleSheet("color: #64748B;")
+            lbl_desc.setFont(QFont("Segoe UI", 8.5))
+            lbl_desc.setStyleSheet("color: #556B82;")
             v_text.addWidget(lbl_desc)
 
             w_layout.addLayout(v_text, 1)
@@ -1797,7 +1809,7 @@ class _RibbonEffectsGallery(QFrame):
 
             if eff_id == active_eff:
                 lbl_check = QLabel("✓", w)
-                lbl_check.setStyleSheet("color: #2563EB; font-weight: bold; font-size: 11pt;")
+                lbl_check.setStyleSheet("color: #2563EB; font-weight: bold; font-size: 13pt;")
                 lbl_check.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
                 w_layout.addWidget(lbl_check)
 
@@ -1822,7 +1834,8 @@ class _RibbonEffectsGallery(QFrame):
             menu.addAction(action)
 
         menu.aboutToHide.connect(self.effect_unhovered.emit)
-        menu.exec(self.btn_more.mapToGlobal(QPoint(0, self.btn_more.height())))
+        if not getattr(self, "_suppress_menu_exec", False):
+            menu.exec(self.btn_more.mapToGlobal(QPoint(0, self.btn_more.height())))
 
     def _select_from_menu(self, eff_id: str) -> None:
         self.set_active_effect(eff_id)
@@ -1836,6 +1849,7 @@ class _RibbonEffectsGallery(QFrame):
 
     def update_live_thumbnails(self, pixmap_dict: dict[str, QPixmap]) -> None:
         """Updates the effect buttons with live thumbnail previews of the active image."""
+        self._live_thumbnails = dict(pixmap_dict)
         for eff_id, pix in pixmap_dict.items():
             btn = self.buttons.get(eff_id)
             if btn and not pix.isNull():

@@ -1875,12 +1875,30 @@ class SingleMediaViewer(QWidget):
             else:
                 self._render_current_recipe()
 
-    def get_effect_preview_pixmaps(self, width: int = 42, height: int = 28) -> dict[str, QPixmap]:
+    def get_effect_preview_pixmaps(self, width: int = 96, height: int = 64) -> dict[str, QPixmap]:
         """Generates live mini-thumbnails of the current photo for each of the ribbon effect buttons."""
         if self.master_np_rgb is None or self.current_is_video:
             return {}
         target_np = self.display_proxy_rgb if self.display_proxy_rgb is not None else self.master_np_rgb
-        thumb = cv2.resize(target_np, (width, height), interpolation=cv2.INTER_AREA)
+        th, tw = target_np.shape[:2]
+        if th <= 0 or tw <= 0 or width <= 0 or height <= 0:
+            return {}
+
+        # Center-crop source to match the target thumbnail aspect ratio (prevents squishing portrait photos)
+        target_aspect = width / float(height)
+        src_aspect = tw / float(th)
+        if src_aspect > target_aspect:
+            # Source is wider than target: center crop horizontally
+            crop_w = max(1, int(round(th * target_aspect)))
+            x0 = max(0, (tw - crop_w) // 2)
+            cropped = target_np[:, x0 : x0 + crop_w]
+        else:
+            # Source is taller than target (portrait): center crop vertically
+            crop_h = max(1, int(round(tw / target_aspect)))
+            y0 = max(0, (th - crop_h) // 2)
+            cropped = target_np[y0 : y0 + crop_h, :]
+
+        thumb = cv2.resize(cropped, (width, height), interpolation=cv2.INTER_AREA)
         effect_keys = [
             "none",
             "classic_chrome",
@@ -1889,6 +1907,7 @@ class SingleMediaViewer(QWidget):
             "matte_vintage",
             "fine_art_bw",
             "cool_cinema",
+            "sepia",
         ]
         result = {}
         for eff in effect_keys:
