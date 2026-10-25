@@ -314,6 +314,7 @@ class _MoveFilesUndoCommand(QUndoCommand):
     @staticmethod
     def _safe_move(src: str, dst: str) -> None:
         import gc
+        import time
         os.makedirs(os.path.dirname(dst), exist_ok=True)
         for attempt in range(6):
             try:
@@ -339,6 +340,11 @@ class _MoveFilesUndoCommand(QUndoCommand):
             )
             detail = self.main_win.catalog_repo.get_media_detail(m["media_id"])
             backup_path = detail.get("original_backup_path")
+            if not backup_path or not os.path.exists(backup_path):
+                disk_b = Path(src).parent / ".OriginalFiles" / Path(src).name
+                if disk_b.exists():
+                    backup_path = str(disk_b)
+
             if backup_path and os.path.exists(backup_path):
                 dst_backup_dir = Path(os.path.dirname(dst)) / ".OriginalFiles"
                 dst_backup = dst_backup_dir / Path(backup_path).name
@@ -352,6 +358,20 @@ class _MoveFilesUndoCommand(QUndoCommand):
                         conn.commit()
                 except OSError:
                     pass
+
+            # Move .xmp sidecar if present
+            src_p = Path(src)
+            for xmp_cand in (src_p.with_name(src_p.name + ".xmp"), src_p.with_suffix(".xmp")):
+                if xmp_cand.exists() and xmp_cand != src_p:
+                    dst_xmp = Path(os.path.dirname(dst)) / (Path(dst).name + (xmp_cand.suffix if xmp_cand.suffix == ".xmp" else ".xmp"))
+                    try:
+                        self._safe_move(str(xmp_cand), str(dst_xmp))
+                        m["prev_xmp_path"] = str(xmp_cand)
+                        m["curr_xmp_path"] = str(dst_xmp)
+                    except OSError:
+                        pass
+                    break
+
             self.main_win._media_meta_lookup.pop(m["media_id"], None)
             self.main_win.catalog_model.update_items_metadata(
                 [m["media_id"]], filename=m["dst_filename"]
@@ -380,6 +400,14 @@ class _MoveFilesUndoCommand(QUndoCommand):
                         conn = self.main_win.engine.catalog_conn()
                         conn.execute("UPDATE media SET original_backup_path = ? WHERE id = ?;", (prev_b, m["media_id"]))
                         conn.commit()
+                except OSError:
+                    pass
+
+            curr_xmp = m.get("curr_xmp_path")
+            prev_xmp = m.get("prev_xmp_path")
+            if curr_xmp and prev_xmp and os.path.exists(curr_xmp):
+                try:
+                    self._safe_move(curr_xmp, prev_xmp)
                 except OSError:
                     pass
             self.main_win._media_meta_lookup.pop(m["media_id"], None)
@@ -512,7 +540,11 @@ class PhotoGalleryMainWindow(QMainWindow):
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
-        self.setWindowTitle("Photo Gallery")
+        self.setWindowTitle("Photo Gallery Live")
+        ico_path = Path(__file__).resolve().parent.parent.parent / "resources" / "icons" / "photogallery_live.ico"
+        if ico_path.exists():
+            from PySide6.QtGui import QIcon
+            self.setWindowIcon(QIcon(str(ico_path)))
         self.resize(1360, 840)
         self.setMinimumSize(500, 400)
 
@@ -3052,9 +3084,9 @@ class PhotoGalleryMainWindow(QMainWindow):
             self._update_status_zoom_toggle_button()
 
             fname = str(detail["filename"])
-            self.setWindowTitle(f"{fname} - Photo Gallery")
+            self.setWindowTitle(f"{fname} - Photo Gallery Live")
             if hasattr(self.ribbon, "lbl_app_title"):
-                self.ribbon.lbl_app_title.setText(f"{fname} - Photo Gallery")
+                self.ribbon.lbl_app_title.setText(f"{fname} - Photo Gallery Live")
 
             self._selected_ids = [media_id]
             self._lead_selected_id = media_id
@@ -3110,9 +3142,9 @@ class PhotoGalleryMainWindow(QMainWindow):
             self.btn_status_next.setVisible(False)
             self.btn_status_fit.setVisible(False)
             self.btn_status_actual.setVisible(False)
-            self.setWindowTitle("Batch People Tagging - Photo Gallery")
+            self.setWindowTitle("Batch People Tagging - Photo Gallery Live")
             if hasattr(self.ribbon, "lbl_app_title"):
-                self.ribbon.lbl_app_title.setText("Photo Gallery")
+                self.ribbon.lbl_app_title.setText("Photo Gallery Live")
             self.lbl_sync_status.setText("Batch people tag view")
             if not self._is_navigating_history:
                 pid = getattr(self.batch_people_view, "_filter_person_id", None)
@@ -3137,9 +3169,9 @@ class PhotoGalleryMainWindow(QMainWindow):
         self.btn_status_fit.setVisible(False)
         self.btn_status_actual.setVisible(False)
 
-        self.setWindowTitle("Photo Gallery")
+        self.setWindowTitle("Photo Gallery Live")
         if hasattr(self.ribbon, "lbl_app_title"):
-            self.ribbon.lbl_app_title.setText("Photo Gallery")
+            self.ribbon.lbl_app_title.setText("Photo Gallery Live")
 
         if self.right_tag_dock.current_mode() == "fine_tune":
             self.right_tag_dock.set_mode("info")
@@ -3678,20 +3710,39 @@ class PhotoGalleryMainWindow(QMainWindow):
             try:
                 detail = self.catalog_repo.get_media_detail(mid)
                 fpath = Path(detail["folder_path"]) / str(detail["filename"])
+                # 1. Delete original file
                 if fpath.exists():
                     if send2trash is not None:
                         send2trash(str(fpath))
                     else:
                         fpath.unlink()
+
+                # 2. Delete .OriginalFiles backup if present
                 backup_path = detail.get("original_backup_path")
-                if backup_path and os.path.exists(backup_path):
-                    try:
-                        if send2trash is not None:
-                            send2trash(str(backup_path))
-                        else:
-                            os.unlink(backup_path)
-                    except OSError:
-                        pass
+                b_cands = []
+                if backup_path:
+                    b_cands.append(Path(backup_path))
+                b_cands.append(fpath.parent / ".OriginalFiles" / fpath.name)
+                for b_cand in b_cands:
+                    if b_cand.exists():
+                        try:
+                            if send2trash is not None:
+                                send2trash(str(b_cand))
+                            else:
+                                b_cand.unlink()
+                        except OSError:
+                            pass
+
+                # 3. Delete .xmp sidecar if present
+                for xmp_cand in (fpath.with_name(fpath.name + ".xmp"), fpath.with_suffix(".xmp")):
+                    if xmp_cand.exists() and xmp_cand != fpath:
+                        try:
+                            if send2trash is not None:
+                                send2trash(str(xmp_cand))
+                            else:
+                                xmp_cand.unlink()
+                        except OSError:
+                            pass
                 with self.engine.write_lock:
                     conn.execute("DELETE FROM media WHERE id = ?;", (mid,))
                     conn.commit()
@@ -4112,8 +4163,8 @@ class PhotoGalleryMainWindow(QMainWindow):
         elif action_id == "help":
             QMessageBox.information(
                 self,
-                "About Photo Gallery",
-                "Windows Live Photo Gallery 64-Bit Clone\n"
+                "About Photo Gallery Live",
+                "Photo Gallery Live — Windows Live Photo Gallery 64-Bit Clone\n"
                 "Google Antigravity Edition\n\n"
                 "A modern, high-performance 64-bit recreation of Windows Live Photo Gallery.\n"
                 "Supports lossless JPEG rotation, non-destructive editing, face tagging, and sub-10ms queries.",
@@ -5662,7 +5713,7 @@ class PhotoGalleryMainWindow(QMainWindow):
         self.scanner_pool.waitForDone(3000)
         self.thumbnail_pool.waitForDone(3000)
         self.stop_face_detection()
-        self.face_pool.waitForDone(2000)
+        self.face_pool.waitForDone(3000)
         self.xmp_daemon.stop()
         if hasattr(self, "_monitor_timer") and self._monitor_timer.isActive():
             self._monitor_timer.stop()

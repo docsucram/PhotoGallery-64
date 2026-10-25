@@ -238,6 +238,9 @@ class FaceDetectionWorker(QRunnable):
                     )
                 except Exception as exc:
                     logger.warning("Stage 1: face detection failed for %s: %s", fpath, exc)
+                    from src.utils.scan_logger import log_scan_error
+                    log_scan_error("FaceDetectionWorker (Stage 1)", fpath, exc)
+                    self.repo.mark_face_scan_failed([mid])
                     detected_faces = []
 
                 self._verify_and_heal_image_faces(mid, fpath, orient, detected_faces)
@@ -487,6 +490,8 @@ class FaceDetectionWorker(QRunnable):
                     )
                 except Exception as exc:
                     logger.warning("Failed to detect faces in poison-pill image %s: %s", fpath, exc)
+                    from src.utils.scan_logger import log_scan_error
+                    log_scan_error("FaceDetectionWorker (Stage 2)", fpath, exc)
                     self.repo.mark_face_scan_failed([mid])
                     processed += 1
                     continue

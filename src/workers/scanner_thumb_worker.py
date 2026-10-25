@@ -73,7 +73,16 @@ HEIF_EXT_SET = {"heic", "heif"}
 IMAGE_EXT_SET = {"png", "jpg", "jpeg", "gif", "bmp", "ico", "tiff", "tif", "webp"} | RAW_EXT_SET | HEIF_EXT_SET
 VIDEO_EXT_SET = {"mp4", "avi", "mkv", "mov", "wmv", "flv"}
 ALL_MEDIA_EXT_SET = IMAGE_EXT_SET | VIDEO_EXT_SET
-IGNORED_DIR_NAMES = {".originalfiles", ".git", "__pycache__", "$recycle.bin", "system volume information"}
+IGNORED_DIR_NAMES = {
+    ".originalfiles",
+    "originalfiles",
+    ".original_files",
+    "original_files",
+    ".git",
+    "__pycache__",
+    "$recycle.bin",
+    "system volume information",
+}
 
 THUMB_MAX_DIM = 256
 
@@ -1210,7 +1219,43 @@ class FolderSyncWorker(QRunnable):
                 except OSError:
                     continue
 
-                meta = extract_media_metadata(fpath, is_vid)
+                try:
+                    meta = extract_media_metadata(fpath, is_vid)
+                except Exception as exc:
+                    from src.utils.scan_logger import log_scan_error
+                    log_scan_error("FolderSyncWorker", fpath, exc)
+                    meta = {
+                        "date_taken": mtime_int,
+                        "rating": 0,
+                        "width": None,
+                        "height": None,
+                        "orientation": 1,
+                        "lat": None,
+                        "lon": None,
+                        "caption": "",
+                        "camera_make": None,
+                        "camera_model": None,
+                        "author": None,
+                        "exposure_time": None,
+                        "f_number": None,
+                        "focal_length": None,
+                        "iso": None,
+                        "duration_ms": 0,
+                        "video_codec": None,
+                        "video_fps": None,
+                        "hierarchical_tags": [],
+                        "people": [],
+                    }
+                    try:
+                        with self.engine.write_lock:
+                            conn = self.engine.catalog_conn()
+                            conn.execute(
+                                "UPDATE media SET face_scan_version = -1 WHERE folder_id = ? AND filename = ?;",
+                                (folder_id, fpath.name),
+                            )
+                            conn.commit()
+                    except Exception:
+                        pass
                 ext = fpath.suffix.lower().lstrip(".")
                 enrichment_rows.append(
                     {
@@ -1367,6 +1412,15 @@ class ThumbnailDecodeWorker(QRunnable):
                 else self._decode_image_thumbnail()
             )
             if qimg is None or qimg.isNull():
+                from src.utils.scan_logger import log_scan_error
+                log_scan_error("ThumbnailDecodeWorker", self.file_path, "Null image decoded (corrupted file)")
+                try:
+                    with self.engine.write_lock:
+                        conn = self.engine.catalog_conn()
+                        conn.execute("UPDATE media SET face_scan_version = -1 WHERE id = ?;", (self.media_id,))
+                        conn.commit()
+                except Exception:
+                    pass
                 if not self.cancel_flag.is_set:
                     self.signals.error.emit(
                         self.media_id, f"Failed to decode thumbnail for {self.file_path}"
@@ -1397,6 +1451,15 @@ class ThumbnailDecodeWorker(QRunnable):
                 self.signals.thumbnail_ready.emit(self.media_id, qimg)
 
         except Exception as exc:
+            from src.utils.scan_logger import log_scan_error
+            log_scan_error("ThumbnailDecodeWorker", self.file_path, exc)
+            try:
+                with self.engine.write_lock:
+                    conn = self.engine.catalog_conn()
+                    conn.execute("UPDATE media SET face_scan_version = -1 WHERE id = ?;", (self.media_id,))
+                    conn.commit()
+            except Exception:
+                pass
             if not self.cancel_flag.is_set:
                 self.signals.error.emit(self.media_id, str(exc))
         finally:

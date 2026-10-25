@@ -3159,7 +3159,7 @@ class RibbonToolbar(QWidget):
         self.header_div = QFrame(self.top_header)
         self.header_div.setVisible(False)
 
-        self.lbl_app_title = QLabel("Photo Gallery", self.top_header)
+        self.lbl_app_title = QLabel("Photo Gallery Live", self.top_header)
         self.lbl_app_title.setVisible(False)
 
         self.top_hbox.addStretch(1)

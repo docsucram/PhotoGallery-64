@@ -1029,11 +1029,13 @@ class _AsyncFlushWorker(QRunnable):
         engine: DualDatabaseEngine,
         batch_limit: int,
         signals: _AsyncFlushSignals,
+        stop_requested: threading.Event | None = None,
     ) -> None:
         super().__init__()
         self.engine = engine
         self.batch_limit = batch_limit
         self.signals = signals
+        self.stop_requested = stop_requested
 
     def run(self) -> None:
         try:
@@ -1046,6 +1048,8 @@ class _AsyncFlushWorker(QRunnable):
             updated_mtimes: dict[int, int] = {}
 
             for item in dirty_items:
+                if self.stop_requested and self.stop_requested.is_set():
+                    break
                 mid = int(item["id"])
                 try:
                     new_mtime = write_metadata_lossless(item)
@@ -1087,6 +1091,7 @@ class MetadataSyncDaemon(QObject):
         self.poll_interval_ms = poll_interval_ms
         self._running = False
         self._paused = False
+        self.stop_requested = threading.Event()
         self._lock = threading.Lock()
         self._is_flushing = False
         self._timer: QTimer | None = None
@@ -1103,6 +1108,7 @@ class MetadataSyncDaemon(QObject):
 
     def start(self) -> None:
         self._running = True
+        self.stop_requested.clear()
         if self._timer is None:
             self._timer = QTimer(self)
             self._timer.setInterval(self.poll_interval_ms)
@@ -1111,19 +1117,20 @@ class MetadataSyncDaemon(QObject):
 
     def stop(self) -> None:
         self._running = False
+        self.stop_requested.set()
         if self._timer is not None and self._timer.isActive():
             self._timer.stop()
-        self._thread_pool.waitForDone(2000)
+        self._thread_pool.waitForDone(3000)
 
     def _on_timer_tick(self) -> None:
-        if not self._running or self._is_flushing or self._paused:
+        if not self._running or self._is_flushing or self._paused or self.stop_requested.is_set():
             return
         self._is_flushing = True
         signals = _AsyncFlushSignals()
         signals.batch_synced.connect(self.batch_synced.emit)
         signals.sync_error.connect(self.sync_error.emit)
         signals.finished.connect(self._on_flush_finished)
-        worker = _AsyncFlushWorker(self.engine, batch_limit=25, signals=signals)
+        worker = _AsyncFlushWorker(self.engine, batch_limit=25, signals=signals, stop_requested=self.stop_requested)
         self._thread_pool.start(worker)
 
     def _on_flush_finished(self) -> None:

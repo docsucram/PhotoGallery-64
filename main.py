@@ -30,8 +30,12 @@ def create_app(argv: list[str] | None = None) -> QApplication:
         Qt.HighDpiScaleFactorRoundingPolicy.PassThrough
     )
     app = QApplication(argv if argv is not None else sys.argv)
-    app.setApplicationName("PhotoGallery64")
-    app.setOrganizationName("PhotoGallery64")
+    app.setApplicationName("Photo Gallery Live")
+    app.setOrganizationName("Photo Gallery Live")
+    ico_path = Path(__file__).resolve().parent / "resources" / "icons" / "photogallery_live.ico"
+    if ico_path.exists():
+        from PySide6.QtGui import QIcon
+        app.setWindowIcon(QIcon(str(ico_path)))
     palette = app.palette()
     palette.setColor(QPalette.ColorRole.ToolTipBase, QColor("#FFFFFF"))
     palette.setColor(QPalette.ColorRole.ToolTipText, QColor("#1E395B"))
@@ -53,7 +57,7 @@ def create_app(argv: list[str] | None = None) -> QApplication:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="PhotoGallery64 — Windows Live Photo Gallery 64-Bit Clone"
+        description="Photo Gallery Live — Windows Live Photo Gallery 64-Bit Clone"
     )
     parser.add_argument(
         "--db-dir",
