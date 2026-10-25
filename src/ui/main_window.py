@@ -4105,13 +4105,17 @@ class PhotoGalleryMainWindow(QMainWindow):
             )
             if curr_id is not None:
                 start_idx = self.catalog_model.record_index_for_id(curr_id) or 0
+            theme = getattr(self.ribbon, "current_slideshow_theme", "pan_and_zoom")
             dlg = FullscreenSlideshowDialog(
                 records=records,
                 start_index=start_idx,
                 catalog_repo=self.catalog_repo,
+                theme=theme,
                 parent=self,
             )
             dlg.exec()
+            if hasattr(dlg, "current_theme") and hasattr(self.ribbon, "set_slideshow_theme"):
+                self.ribbon.set_slideshow_theme(dlg.current_theme)
             last_id = dlg.current_media_id()
             if last_id is not None:
                 self._selected_ids = [last_id]

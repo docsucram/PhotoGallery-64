@@ -26,6 +26,7 @@ import numpy as np
 from PySide6.QtCore import QPoint, QPointF, QRectF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import (
     QAction,
+    QActionGroup,
     QColor,
     QFont,
     QFontMetrics,
@@ -2892,6 +2893,8 @@ class RibbonToolbar(QWidget):
         self._responsive_large_buttons: list[QToolButton] = []
         self._responsive_secondary_buttons: list[QToolButton] = []
         self._all_themed_buttons: list[QToolButton] = []
+        self.current_slideshow_theme: str = "pan_and_zoom"
+        self._slideshow_theme_actions: list[QAction] = []
         icon_provider.signals.theme_changed.connect(self.refresh_icons)
 
         # Search input debounce timer (180ms)
@@ -3639,6 +3642,78 @@ class RibbonToolbar(QWidget):
         if hasattr(self, "act_pause_write_back"):
             self.act_pause_write_back.setChecked(bool(paused))
 
+    def set_slideshow_theme(self, theme_id: str) -> None:
+        """Sets the active slideshow theme and syncs action checkmarks."""
+        self.current_slideshow_theme = str(theme_id)
+        if hasattr(self, "_slideshow_theme_actions"):
+            for act in self._slideshow_theme_actions:
+                if act.data() == self.current_slideshow_theme:
+                    act.setChecked(True)
+
+    def _build_slideshow_theme_menu(self) -> QMenu:
+        """Builds the authentic WLPG 'Slide show themes' menu with 48x36 preview icons."""
+        menu = QMenu(self)
+        menu.setObjectName("SlideshowThemesMenu")
+        menu.setStyleSheet(
+            """
+            QMenu#SlideshowThemesMenu {
+                background-color: #FFFFFF;
+                border: 1px solid #70A6E8;
+                padding: 4px;
+                icon-size: 48px 36px;
+            }
+            QMenu#SlideshowThemesMenu::item {
+                padding: 5px 24px 5px 8px;
+                font-family: 'Segoe UI';
+                font-size: 9pt;
+                color: #1E395B;
+            }
+            QMenu#SlideshowThemesMenu::item:selected {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #FDFEFE, stop:1 #E4EFFB);
+                border: 1px solid #7DA2CE;
+                border-radius: 2px;
+            }
+            """
+        )
+
+        header = menu.addAction("Slide show themes")
+        header.setEnabled(False)
+        font_bold = QFont("Segoe UI", 9, QFont.Bold)
+        header.setFont(font_bold)
+        menu.addSeparator()
+
+        themes = [
+            ("pan_and_zoom", "Pan and Zoom"),
+            ("contemporary", "Contemporary"),
+            ("cinematic", "Cinematic"),
+            ("fade", "Fade"),
+            ("black_and_white", "Black and White"),
+            ("sepia", "Sepia"),
+        ]
+
+        grp = QActionGroup(menu)
+        grp.setExclusive(True)
+
+        from src.ui.slideshow_view import make_slideshow_theme_icon
+
+        for tid, label in themes:
+            icon = make_slideshow_theme_icon(tid)
+            act = menu.addAction(icon, label)
+            act.setCheckable(True)
+            act.setData(tid)
+            grp.addAction(act)
+            if hasattr(self, "_slideshow_theme_actions"):
+                self._slideshow_theme_actions.append(act)
+            if tid == self.current_slideshow_theme:
+                act.setChecked(True)
+            act.triggered.connect(lambda checked, t=tid: self._on_slideshow_menu_theme_selected(t))
+
+        return menu
+
+    def _on_slideshow_menu_theme_selected(self, theme_id: str) -> None:
+        self.set_slideshow_theme(theme_id)
+        self.action_triggered.emit("slide_show")
+
     def minimumSizeHint(self) -> QSize:
         return QSize(350, 88)
 
@@ -3937,8 +4012,12 @@ class RibbonToolbar(QWidget):
         # Group 5: Share / Presentation (Slide show)
         # ---------------------------------------------------------------------
         grp_share = _RibbonGroupBox("Share", page)
-        btn_ss = self._make_btn("Slide\nshow", "slideshow", grp_share, large=True)
+        btn_ss = self._make_tool_btn(
+            "Slide\nshow", "slideshow", grp_share, large=True, popup_mode=QToolButton.MenuButtonPopup
+        )
+        btn_ss.setMenu(self._build_slideshow_theme_menu())
         btn_ss.clicked.connect(lambda: self.action_triggered.emit("slide_show"))
+        self.btn_home_slideshow = btn_ss
         grp_share.content_layout.addWidget(btn_ss)
         hbox.addWidget(grp_share)
 
@@ -4884,7 +4963,10 @@ class RibbonToolbar(QWidget):
         # ---------------------------------------------------------------------
         grp_slideshow = _RibbonGroupBox("Views", page)
         self.grp_slideshow = grp_slideshow
-        self.btn_view_slideshow = self._make_btn("Slide\nshow ▾", "slideshow", grp_slideshow, large=True)
+        self.btn_view_slideshow = self._make_tool_btn(
+            "Slide\nshow", "slideshow", grp_slideshow, large=True, popup_mode=QToolButton.MenuButtonPopup
+        )
+        self.btn_view_slideshow.setMenu(self._build_slideshow_theme_menu())
         self.btn_view_slideshow.clicked.connect(lambda: self.action_triggered.emit("slide_show"))
         grp_slideshow.content_layout.addWidget(self.btn_view_slideshow)
 
