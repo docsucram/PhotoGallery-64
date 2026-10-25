@@ -15,7 +15,7 @@ from PySide6.QtCore import QPoint, QRect, Qt
 from PySide6.QtGui import QColor, QFont, QImage, QPainter, QPixmap
 from PySide6.QtWidgets import QApplication, QStyleOptionViewItem
 
-from src.core.cache import LruCache
+from legacy_reference.imgBrowserv13 import LruCache
 from src.db.connection import DualDatabaseEngine
 from src.db.repository import CatalogRepository, ThumbnailRepository
 from src.ui.batch_people_view import (
@@ -75,7 +75,7 @@ def test_ribbon_effects_gallery_spacing_and_tooltip(qapp: QApplication) -> None:
 def test_face_card_distinct_styling_confirmed_vs_suggestion(qapp: QApplication) -> None:
     mock_thumb_repo = MagicMock(spec=ThumbnailRepository)
     mock_thumb_repo.get_face_thumbnail.return_value = None
-    cache = LruCache(max_items=10)
+    cache = LruCache(10)
 
     delegate = _FaceCardDelegate(mock_thumb_repo, cache)
 
@@ -136,7 +136,7 @@ def test_face_card_distinct_styling_confirmed_vs_suggestion(qapp: QApplication) 
 
 def test_right_dock_context_menu_handlers(qapp: QApplication, test_engine: DualDatabaseEngine) -> None:
     repo = CatalogRepository(test_engine)
-    p_id = repo.add_person("Bob Smith")
+    p_id = repo.upsert_person("Bob Smith")
 
     mw = PhotoGalleryMainWindow(test_engine, start_xmp_daemon=False)
     try:
@@ -163,12 +163,14 @@ def test_batch_people_nav_and_esc_back_to_view(qapp: QApplication, test_engine: 
     im.save(photo_file)
 
     conn = test_engine.catalog_conn()
+    cur = conn.execute("INSERT INTO folders (path, name) VALUES (?, ?)", (str(tmp_path), tmp_path.name))
+    folder_id = cur.lastrowid
     conn.execute(
         """
-        INSERT INTO media_files (id, filename, folder_path, file_size, width, height, is_video, rating)
-        VALUES (1, 'test.jpg', ?, 1024, 200, 200, 0, 0);
+        INSERT INTO media (id, folder_id, filename, ext, size, width, height, is_video, rating)
+        VALUES (1, ?, 'test.jpg', '.jpg', 1024, 200, 200, 0, 0);
         """,
-        (str(tmp_path),),
+        (folder_id,),
     )
     conn.commit()
 

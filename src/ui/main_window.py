@@ -71,6 +71,7 @@ from PySide6.QtWidgets import (
     QSlider,
     QStackedWidget,
     QTextEdit,
+    QToolTip,
     QVBoxLayout,
     QWidget,
 )
@@ -2050,13 +2051,15 @@ class PhotoGalleryMainWindow(QMainWindow):
         is_search = bool(self._search_text and self._search_text.strip())
         is_scoped = bool(
             spec.folder_id
-            or spec.folder_ids
             or (hasattr(self, "left_nav_dock") and self.left_nav_dock.selected_folder_name() is not None)
-            or spec.tag_ids
+            or spec.include_tag_ids
             or spec.person_ids
-            or spec.date_range
-            or spec.rating_min
-            or spec.flagged is not None
+            or spec.date_year
+            or spec.ratings
+            or spec.flagged_only
+            or (spec.flag_filter is not None)
+            or (spec.media_type != "all")
+            or spec.bbox
         )
         self.grid_view.set_empty_state(is_empty=is_empty, is_search=is_search, is_scoped=is_scoped)
 
@@ -2952,6 +2955,9 @@ class PhotoGalleryMainWindow(QMainWindow):
             if hasattr(self.ribbon, "lbl_app_title"):
                 self.ribbon.lbl_app_title.setText("Photo Gallery")
             self.lbl_sync_status.setText("Batch people tag view")
+            if not self._is_navigating_history:
+                pid = getattr(self.batch_people_view, "_filter_person_id", None)
+                self._push_nav_state({"view": "batch_people", "person_id": pid})
             return
 
         self.central_stack.setCurrentWidget(self.grid_view)
@@ -5162,6 +5168,7 @@ class PhotoGalleryMainWindow(QMainWindow):
                 pal.setColor(QPalette.ColorRole.ToolTipBase, QColor("#FFFFFF"))
                 pal.setColor(QPalette.ColorRole.ToolTipText, QColor("#1E395B"))
                 app.setPalette(pal)
+                QToolTip.setPalette(pal)
                 app.setStyleSheet(qss)
 
     def keyPressEvent(self, event: QKeyEvent) -> None:

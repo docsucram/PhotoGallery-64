@@ -38,6 +38,7 @@ from PySide6.QtGui import (
     QPen,
     QPixmap,
     QPolygonF,
+    QRadialGradient,
     QResizeEvent,
 )
 from PySide6.QtWidgets import (
@@ -87,7 +88,7 @@ def _render_aero_raw(kind: str, size: int = 20) -> QIcon:
     p.setRenderHint(QPainter.Antialiasing, True)
     s = float(size)
 
-    if kind in ("folder", "folder_add", "import"):
+    if kind in ("folder", "folder_add"):
         grad = QLinearGradient(0, s * 0.2, 0, s * 0.88)
         grad.setColorAt(0.0, QColor("#FFE88C"))
         grad.setColorAt(1.0, QColor("#E2B034"))
@@ -96,7 +97,7 @@ def _render_aero_raw(kind: str, size: int = 20) -> QIcon:
         p.drawRoundedRect(QRectF(s * 0.10, s * 0.20, s * 0.36, s * 0.22), 2.0, 2.0)
         p.drawRoundedRect(QRectF(s * 0.08, s * 0.30, s * 0.84, s * 0.56), 2.2, 2.2)
 
-        if kind in ("folder_add", "import"):
+        if kind == "folder_add":
             cx, cy, r = s * 0.74, s * 0.72, s * 0.22
             p.setPen(QPen(QColor("#1F7A1F"), 1.0))
             p.setBrush(QColor("#4CC94C"))
@@ -104,6 +105,97 @@ def _render_aero_raw(kind: str, size: int = 20) -> QIcon:
             p.setPen(QPen(QColor("#FFFFFF"), 1.8, Qt.SolidLine, Qt.RoundCap))
             p.drawLine(QPointF(cx - r * 0.5, cy), QPointF(cx + r * 0.5, cy))
             p.drawLine(QPointF(cx, cy - r * 0.5), QPointF(cx, cy + r * 0.5))
+
+    elif kind in ("import", "import_media", "camera_import"):
+        # Digital Camera Body + Optical Glass Lens + Blue Incoming Download Badge
+        # 1. Shutter button top-left
+        shutter_grad = QLinearGradient(s * 0.18, s * 0.16, s * 0.18, s * 0.26)
+        shutter_grad.setColorAt(0.0, QColor("#E2E8F0"))
+        shutter_grad.setColorAt(1.0, QColor("#64748B"))
+        p.setPen(QPen(QColor("#334155"), 0.8))
+        p.setBrush(shutter_grad)
+        p.drawRoundedRect(QRectF(s * 0.18, s * 0.18, s * 0.16, s * 0.10), 1.5, 1.5)
+
+        # 2. Viewfinder bump top-right
+        p.setPen(QPen(QColor("#475569"), 0.8))
+        p.setBrush(QColor("#94A3B8"))
+        p.drawRoundedRect(QRectF(s * 0.44, s * 0.20, s * 0.26, s * 0.08), 1.5, 1.5)
+
+        # 3. Main Camera Body
+        body_rect = QRectF(s * 0.08, s * 0.25, s * 0.84, s * 0.58)
+        body_grad = QLinearGradient(0, s * 0.25, 0, s * 0.83)
+        body_grad.setColorAt(0.0, QColor("#FFFFFF"))
+        body_grad.setColorAt(0.2, QColor("#EDF2F7"))
+        body_grad.setColorAt(0.8, QColor("#CBD5E1"))
+        body_grad.setColorAt(1.0, QColor("#94A3B8"))
+        p.setPen(QPen(QColor("#475569"), 1.0))
+        p.setBrush(body_grad)
+        p.drawRoundedRect(body_rect, 3.5, 3.5)
+
+        # Subtle grip accent line
+        p.setPen(QPen(QColor("#E2E8F0"), 1.0))
+        p.drawLine(QPointF(s * 0.12, s * 0.40), QPointF(s * 0.88, s * 0.40))
+        p.setPen(QPen(QColor("#94A3B8"), 1.0))
+        p.drawLine(QPointF(s * 0.12, s * 0.42), QPointF(s * 0.88, s * 0.42))
+
+        # 4. Flash window top-right
+        flash_rect = QRectF(s * 0.68, s * 0.31, s * 0.18, s * 0.11)
+        p.setPen(QPen(QColor("#64748B"), 0.8))
+        flash_grad = QLinearGradient(0, s * 0.31, 0, s * 0.42)
+        flash_grad.setColorAt(0.0, QColor("#F8FAFC"))
+        flash_grad.setColorAt(1.0, QColor("#CBD5E1"))
+        p.setBrush(flash_grad)
+        p.drawRoundedRect(flash_rect, 1.5, 1.5)
+
+        # 5. Prominent circular optical lens
+        lens_cx, lens_cy, lens_r = s * 0.42, s * 0.56, s * 0.23
+        p.setPen(QPen(QColor("#334155"), 1.0))
+        bezel_grad = QLinearGradient(0, lens_cy - lens_r, 0, lens_cy + lens_r)
+        bezel_grad.setColorAt(0.0, QColor("#F1F5F9"))
+        bezel_grad.setColorAt(0.5, QColor("#64748B"))
+        bezel_grad.setColorAt(1.0, QColor("#1E293B"))
+        p.setBrush(bezel_grad)
+        p.drawEllipse(QPointF(lens_cx, lens_cy), lens_r, lens_r)
+
+        # Inner deep optical glass
+        glass_r = lens_r * 0.78
+        glass_grad = QRadialGradient(lens_cx - glass_r * 0.3, lens_cy - glass_r * 0.3, glass_r * 1.2)
+        glass_grad.setColorAt(0.0, QColor("#38BDF8"))
+        glass_grad.setColorAt(0.4, QColor("#0284C7"))
+        glass_grad.setColorAt(0.8, QColor("#0F172A"))
+        glass_grad.setColorAt(1.0, QColor("#020617"))
+        p.setPen(Qt.NoPen)
+        p.setBrush(glass_grad)
+        p.drawEllipse(QPointF(lens_cx, lens_cy), glass_r, glass_r)
+
+        # Specular reflection arc on lens
+        p.setPen(QPen(QColor(255, 255, 255, 200), 1.2, Qt.SolidLine, Qt.RoundCap))
+        p.drawArc(QRectF(lens_cx - glass_r * 0.7, lens_cy - glass_r * 0.7, glass_r * 1.4, glass_r * 1.4), 45 * 16, 90 * 16)
+
+        # 6. Incoming Blue Download Arrow badge (bottom right)
+        acx, acy = s * 0.76, s * 0.74
+        badge_r = s * 0.20
+        badge_grad = QLinearGradient(0, acy - badge_r, 0, acy + badge_r)
+        badge_grad.setColorAt(0.0, QColor("#60A5FA"))
+        badge_grad.setColorAt(1.0, QColor("#1D4ED8"))
+        p.setPen(QPen(QColor("#FFFFFF"), 1.2))
+        p.setBrush(badge_grad)
+        p.drawEllipse(QPointF(acx, acy), badge_r, badge_r)
+
+        arrow_path = QPainterPath()
+        aw = badge_r * 0.55
+        ah = badge_r * 0.65
+        arrow_path.moveTo(acx, acy + ah * 0.7)
+        arrow_path.lineTo(acx - aw, acy)
+        arrow_path.lineTo(acx - aw * 0.4, acy)
+        arrow_path.lineTo(acx - aw * 0.4, acy - ah * 0.7)
+        arrow_path.lineTo(acx + aw * 0.4, acy - ah * 0.7)
+        arrow_path.lineTo(acx + aw * 0.4, acy)
+        arrow_path.lineTo(acx + aw, acy)
+        arrow_path.closeSubpath()
+        p.setPen(QPen(QColor("#1E3A8A"), 0.5))
+        p.setBrush(QColor("#FFFFFF"))
+        p.drawPath(arrow_path)
 
     elif kind in ("calendar", "dates", "dates_grid"):
         p.setPen(QPen(QColor("#6E87A2"), 1.0))
@@ -1612,7 +1704,7 @@ class _RibbonEffectsGallery(QFrame):
     effect_unhovered = Signal()
 
     CARD_WIDTH = 48
-    CARD_HEIGHT = 56
+    CARD_HEIGHT = 54
     CARD_STRIDE = 49
 
     def __init__(self, parent: QWidget | None = None) -> None:
@@ -1625,31 +1717,13 @@ class _RibbonEffectsGallery(QFrame):
                 border: 1px solid #C4D5E8;
                 border-radius: 3px;
             }
-            QToolButton.EffectCard {
-                border: 1px solid transparent;
-                border-radius: 1px;
-                background: transparent;
-                color: #1E395B;
-                font-family: 'Segoe UI';
-                font-size: 7.5pt;
-                padding: 0px;
-                margin: 0px;
-            }
-            QToolButton.EffectCard:hover {
-                background: #EBF3FD;
-                border: 1px solid #70A6E8;
-            }
-            QToolButton.EffectCard:checked {
-                background: #CCE4F7;
-                border: 1px solid #3399FF;
-            }
             QToolTip {
                 background-color: #FFFFFF;
                 color: #1E395B;
                 border: 1px solid #7DA2CE;
                 border-radius: 2px;
                 padding: 3px 6px;
-                font-family: 'Segoe UI';
+                font-family: 'Segoe UI', sans-serif;
                 font-size: 8.5pt;
             }
             """
@@ -1674,17 +1748,45 @@ class _RibbonEffectsGallery(QFrame):
         self.btn_group.setExclusive(True)
 
         self._effects_data = [
-            ("none", "None", "No effect (Original)"),
-            ("classic_chrome", "Chrome", "Classic Chrome (Fujifilm style)"),
-            ("warm_portrait", "Portrait", "Warm Portrait (Portra golden glow)"),
-            ("vivid_landscape", "Vivid", "Vivid Landscape (Punchy Velvia look)"),
-            ("matte_vintage", "Matte", "Matte Vintage (Lifted film blacks)"),
-            ("fine_art_bw", "B&W Art", "Fine Art B&W (Deep Acros tonal scale)"),
-            ("cool_cinema", "Cinema", "Cool Cinema (Teal and Orange)"),
-            ("sepia", "Sepia", "Warm sepia tone"),
+            ("none", "None", "None — Original photo with no effect"),
+            ("classic_chrome", "Chrome", "Classic Chrome — Fujifilm documentary style"),
+            ("warm_portrait", "Portrait", "Warm Portrait — Portra warm golden skin tones"),
+            ("vivid_landscape", "Vivid", "Vivid Landscape — Punchy Velvia saturated colors"),
+            ("matte_vintage", "Matte", "Matte Vintage — Lifted film blacks & retro fade"),
+            ("fine_art_bw", "B&W Art", "Fine Art B&W — Deep Acros monochrome tonal scale"),
+            ("cool_cinema", "Cinema", "Cool Cinema — Teal & orange cinematic grade"),
+            ("sepia", "Sepia", "Sepia — Warm antique photographic tone"),
         ]
 
         self.buttons: dict[str, _HoverableToolButton] = {}
+
+        card_btn_style = """
+            QToolButton {
+                border: 1px solid transparent;
+                border-radius: 2px;
+                background: transparent;
+                color: #1E395B;
+                padding: 0px;
+                margin: 0px;
+            }
+            QToolButton:hover {
+                background: #EBF3FD;
+                border: 1px solid #70A6E8;
+            }
+            QToolButton:checked {
+                background: #CCE4F7;
+                border: 1.5px solid #3399FF;
+            }
+            QToolTip {
+                background-color: #FFFFFF;
+                color: #1E395B;
+                border: 1px solid #7DA2CE;
+                border-radius: 2px;
+                padding: 3px 6px;
+                font-family: 'Segoe UI', sans-serif;
+                font-size: 8.5pt;
+            }
+        """
 
         for eff_id, label, tip in self._effects_data:
             btn = _HoverableToolButton(self.cards_holder)
@@ -1694,10 +1796,11 @@ class _RibbonEffectsGallery(QFrame):
                 btn.setChecked(True)
             btn.setText(label)
             btn.setIcon(make_effect_preview_icon(eff_id))
-            btn.setIconSize(QSize(46, 32))
-            btn.setToolButtonStyle(Qt.ToolButtonTextUnderIcon)
+            btn.setIconSize(QSize(44, 48))
+            btn.setToolButtonStyle(Qt.ToolButtonIconOnly)
             btn.setFixedSize(self.CARD_WIDTH, self.CARD_HEIGHT)
             btn.setToolTip(tip)
+            btn.setStyleSheet(card_btn_style)
             btn.hovered.connect(lambda eff=eff_id: self.effect_hovered.emit(eff))
             btn.unhovered.connect(self.effect_unhovered.emit)
             btn.clicked.connect(lambda _, eff=eff_id: self.effect_selected.emit(eff))
@@ -1748,6 +1851,15 @@ class _RibbonEffectsGallery(QFrame):
                     color: #B0C4DE;
                     background: #F4F6F9;
                     border-color: #DCE6F2;
+                }
+                QToolTip {
+                    background-color: #FFFFFF;
+                    color: #1E395B;
+                    border: 1px solid #7DA2CE;
+                    border-radius: 2px;
+                    padding: 3px 6px;
+                    font-family: 'Segoe UI', sans-serif;
+                    font-size: 8.5pt;
                 }
                 """
             )
