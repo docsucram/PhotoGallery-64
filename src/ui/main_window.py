@@ -447,6 +447,8 @@ class PhotoGalleryMainWindow(QMainWindow):
         self._active_bbox: tuple[float, float, float, float] | None = None
         self._active_map_media_ids: list[int] | None = None
         self._active_map_location_label: str | None = None
+        self._active_special_people_filter: str | None = None
+        self._active_special_people_label: str | None = None
         self._search_scope_bar_explicitly_opened: bool = False
         self._selected_ids: list[int] = []
         self._lead_selected_id: int | None = None
@@ -882,13 +884,9 @@ class PhotoGalleryMainWindow(QMainWindow):
         self.ribbon.layout_mode_changed.connect(self.grid_view.set_layout_mode)
         self.ribbon.zoom_size_changed.connect(self._on_ribbon_zoom_changed)
 
-        # Authentic WLPG Find Tab Filter Signal Connections
-        self.ribbon.date_filter_selected.connect(
-            lambda y, m, d: self.left_nav_dock.select_date(y, m, d)
-        )
-        self.ribbon.rating_filter_selected.connect(
-            lambda ratings: self.left_nav_dock.select_ratings(ratings)
-        )
+        # Authentic WLPG Find & Home Tab Filter Signal Connections
+        self.ribbon.date_filter_selected.connect(self._on_date_filter_selected)
+        self.ribbon.rating_filter_selected.connect(self._on_rating_filter_selected)
         self.ribbon.tag_filter_selected.connect(self._on_ribbon_tag_filter)
         self.ribbon.untagged_filter_selected.connect(
             self.left_nav_dock.set_untagged_only
@@ -922,6 +920,7 @@ class PhotoGalleryMainWindow(QMainWindow):
         self.scope_bar.pin_toggled.connect(self._on_scope_bar_pin_toggled)
         self.scope_bar.close_requested.connect(self.hide_search_scope_bar)
         self.scope_bar.person_remove_requested.connect(self.left_nav_dock.unselect_person)
+        self.scope_bar.special_people_clear_requested.connect(self._on_clear_special_people_filter)
         self.scope_bar.tag_remove_requested.connect(
             lambda tid: self.left_nav_dock.set_tag_filter_state(tid, "none")
         )
@@ -938,7 +937,9 @@ class PhotoGalleryMainWindow(QMainWindow):
         self.ribbon.forward_requested.connect(self.navigate_history_forward)
         self.ribbon.undo_requested.connect(self._on_undo)
         self.ribbon.redo_requested.connect(self._on_redo)
-        self.ribbon.filter_month_selected.connect(self.left_nav_dock.select_month)
+        self.ribbon.filter_month_selected.connect(
+            lambda m: self._on_date_filter_selected(None, m if m > 0 else None, None)
+        )
 
         # Unified Undo / Redo stack listeners
         self.undo_stack.canUndoChanged.connect(lambda _: self._update_undo_redo_enabled())
@@ -1574,13 +1575,23 @@ class PhotoGalleryMainWindow(QMainWindow):
             or self._active_bbox is not None
             or self._active_map_media_ids is not None
             or self._active_map_location_label is not None
+            or getattr(self, "_active_special_people_filter", None) is not None
             or self._search_scope_bar_explicitly_opened
         )
 
     def _update_scope_bar_visibility(self) -> None:
         state = self.left_nav_dock.current_filter_state()
+        folder_name = self.left_nav_dock.selected_folder_name()
+        if folder_name:
+            self.scope_bar.set_scope_label(f"Folder: {folder_name}")
+        else:
+            self.scope_bar.set_scope_label(None)
+
         self.scope_bar.update_active_filter_chips(
-            state, self.catalog_repo, location_label=self._active_map_location_label
+            state,
+            self.catalog_repo,
+            location_label=self._active_map_location_label,
+            special_people_label=getattr(self, "_active_special_people_label", None),
         )
         if self.scope_bar.is_pinned() or self._has_active_filter_facets():
             self.scope_bar.show()
@@ -1757,7 +1768,10 @@ class PhotoGalleryMainWindow(QMainWindow):
                     "detected_untagged": "All detected but not tagged",
                     "untagged": "Not tagged or detected",
                 }.get(kind, "People")
-                self.scope_bar.set_scope_label(lbl)
+                self._active_special_people_filter = kind
+                self._active_special_people_label = lbl
+                folder_name = self.left_nav_dock.selected_folder_name()
+                self.scope_bar.set_scope_label(f"Folder: {folder_name}" if folder_name else None)
                 self.ribbon.set_scope_label(lbl)
                 self._update_scope_bar_visibility()
                 self.rebuild_and_run_query()
@@ -1766,6 +1780,8 @@ class PhotoGalleryMainWindow(QMainWindow):
                 if hasattr(self, "media_viewer") and self.central_stack.currentWidget() == self.media_viewer:
                     self.show_grid_view()
                 self._active_map_media_ids = None
+                self._active_special_people_filter = None
+                self._active_special_people_label = None
                 filt = state.get("filter", state)
                 self.left_nav_dock.restore_filter_state(filt)
                 if self.central_stack.currentWidget() != self.grid_view:
@@ -1902,13 +1918,16 @@ class PhotoGalleryMainWindow(QMainWindow):
             return
 
         mids = {int(r[0]) for r in rows}
+        self._active_special_people_filter = filter_kind
+        self._active_special_people_label = label
         self._active_map_media_ids = mids
         if self.central_stack.currentWidget() != self.grid_view:
             self.central_stack.setCurrentWidget(self.grid_view)
             self.ribbon.set_active_mode("grid")
         self.grid_view.set_person_header(None)
         self.card_delegate.set_face_crop_person_id(None)
-        self.scope_bar.set_scope_label(label)
+        folder_name = self.left_nav_dock.selected_folder_name()
+        self.scope_bar.set_scope_label(f"Folder: {folder_name}" if folder_name else None)
         self.ribbon.set_scope_label(label)
         self._update_scope_bar_visibility()
         self._push_nav_state({
@@ -1917,6 +1936,35 @@ class PhotoGalleryMainWindow(QMainWindow):
             "media_ids": list(mids),
         })
         self.rebuild_and_run_query()
+
+    def _on_clear_special_people_filter(self) -> None:
+        """Removes the special people filter chip and restores the normal folder/global view."""
+        self._active_special_people_filter = None
+        self._active_special_people_label = None
+        self._active_map_media_ids = None
+        folder_name = self.left_nav_dock.selected_folder_name()
+        self.scope_bar.set_scope_label(f"Folder: {folder_name}" if folder_name else None)
+        self.ribbon.set_scope_label(folder_name or "All photos and videos")
+        self._update_scope_bar_visibility()
+        self.rebuild_and_run_query()
+
+    def _on_date_filter_selected(self, y: int | None, m: int | None, d: int | None) -> None:
+        """Filters media by date taken, ensuring grid view is shown and clearing special filters."""
+        if self.central_stack.currentWidget() != self.grid_view:
+            self.show_grid_view()
+        self._active_special_people_filter = None
+        self._active_special_people_label = None
+        self._active_map_media_ids = None
+        self.left_nav_dock.select_date(y, m, d)
+
+    def _on_rating_filter_selected(self, ratings: Sequence[int]) -> None:
+        """Filters media by star rating, ensuring grid view is shown and clearing special filters."""
+        if self.central_stack.currentWidget() != self.grid_view:
+            self.show_grid_view()
+        self._active_special_people_filter = None
+        self._active_special_people_label = None
+        self._active_map_media_ids = None
+        self.left_nav_dock.select_ratings(ratings)
 
     def on_arrange_changed(self, mode: str, reverse: bool) -> None:
         self._arrange_by = mode  # type: ignore[assignment]

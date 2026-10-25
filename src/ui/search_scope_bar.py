@@ -180,6 +180,7 @@ class SearchScopeBar(QFrame):
     flagged_clear_requested = Signal()
     date_clear_requested = Signal()
     location_clear_requested = Signal()
+    special_people_clear_requested = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -432,14 +433,17 @@ class SearchScopeBar(QFrame):
         filter_state: dict[str, Any],
         catalog_repo: CatalogRepository,
         location_label: str | None = None,
+        special_people_label: str | None = None,
     ) -> None:
         """Re-renders active People, Tag, Rating, Flag, Date, and Location facet chips matching WLPG."""
         while self.chips_layout.count():
             item = self.chips_layout.takeAt(0)
             if item.widget() is not None:
-                item.widget().deleteLater()
+                w = item.widget()
+                w.setParent(None)
+                w.deleteLater()
 
-        # 1. Active People Chips: "People: Alice + Bob" (AND) or "People: Alice / Bob" (OR)
+        # 1. Active People Chips: "People: Alice + Bob" or Special: "People: All tagged or detected"
         person_ids = filter_state.get("person_ids", ())
         if person_ids:
             lbl_p = QLabel("People:", self.chips_widget)
@@ -461,6 +465,14 @@ class SearchScopeBar(QFrame):
                 chip = FilterChip(p_name, self.chips_widget)
                 chip.remove_clicked.connect(lambda p_id=int(pid): self.person_remove_requested.emit(p_id))
                 self.chips_layout.addWidget(chip)
+        elif special_people_label:
+            lbl_p = QLabel("People:", self.chips_widget)
+            lbl_p.setStyleSheet("color: #55687C; font-family: 'Segoe UI'; font-size: 8.5pt;")
+            self.chips_layout.addWidget(lbl_p)
+
+            chip = FilterChip(special_people_label, self.chips_widget)
+            chip.remove_clicked.connect(self.special_people_clear_requested.emit)
+            self.chips_layout.addWidget(chip)
 
         # 2. Active Descriptive Tag Chips: "Tagged: Burma + Nansumay" or "Tagged: Burma / Nansumay"
         include_tag_ids = filter_state.get("include_tag_ids", ())

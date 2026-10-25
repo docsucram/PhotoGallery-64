@@ -2086,17 +2086,14 @@ class _FaceCarouselWidget(QWidget):
         self.set_visible_faces(5)
 
     def set_visible_faces(self, count: int) -> None:
-        self._visible_faces = max(1, min(6, count))
+        self._visible_faces = max(1, min(10, count))
         scroll_w = self._visible_faces * 56
         total_w = scroll_w + 19
         self.scroll.setFixedWidth(scroll_w)
         self.container.setFixedWidth(total_w)
         self.setFixedWidth(total_w)
         self.setMinimumWidth(total_w)
-        if count >= 5:
-            self.setMaximumWidth(360)
-        else:
-            self.setMaximumWidth(total_w)
+        self.setMaximumWidth(total_w)
         self.setFixedHeight(62)
         self.container.setFixedHeight(62)
         self.scroll.setFixedHeight(58)
@@ -3422,9 +3419,23 @@ class RibbonToolbar(QWidget):
 
         # --- 2. Home Tab Priority Collapse ---
         if hasattr(self, "home_face_carousel"):
-            if width >= 1220:
+            if width >= 1550:
+                self.home_face_carousel.set_visible_faces(10)
+            elif width >= 1450:
+                self.home_face_carousel.set_visible_faces(9)
+            elif width >= 1370:
+                self.home_face_carousel.set_visible_faces(8)
+            elif width >= 1290:
+                self.home_face_carousel.set_visible_faces(7)
+            elif width >= 1220:
+                self.home_face_carousel.set_visible_faces(6)
+            elif width >= 1150:
                 self.home_face_carousel.set_visible_faces(5)
-            elif width >= 1050:
+            elif width >= 1070:
+                self.home_face_carousel.set_visible_faces(4)
+            elif width >= 990:
+                self.home_face_carousel.set_visible_faces(3)
+            elif width >= 900:
                 self.home_face_carousel.set_visible_faces(2)
             else:
                 self.home_face_carousel.set_visible_faces(1)
@@ -3484,10 +3495,24 @@ class RibbonToolbar(QWidget):
 
         # --- 4. Find Tab Priority Collapse ---
         if hasattr(self, "find_face_carousel"):
-            if width >= 1220:
+            if width >= 1550:
+                self.find_face_carousel.set_visible_faces(10)
+            elif width >= 1450:
+                self.find_face_carousel.set_visible_faces(9)
+            elif width >= 1370:
+                self.find_face_carousel.set_visible_faces(8)
+            elif width >= 1290:
+                self.find_face_carousel.set_visible_faces(7)
+            elif width >= 1220:
+                self.find_face_carousel.set_visible_faces(6)
+            elif width >= 1150:
                 self.find_face_carousel.set_visible_faces(5)
-            elif width >= 1050:
+            elif width >= 1070:
+                self.find_face_carousel.set_visible_faces(4)
+            elif width >= 990:
                 self.find_face_carousel.set_visible_faces(3)
+            elif width >= 900:
+                self.find_face_carousel.set_visible_faces(2)
             else:
                 self.find_face_carousel.set_visible_faces(1)
 
@@ -3757,27 +3782,45 @@ class RibbonToolbar(QWidget):
 
         self.btn_qf_months = self._make_btn("Months", "months", grp_qfind)
         self.btn_qf_months.setFixedHeight(19)
+        self.btn_qf_months.setPopupMode(QToolButton.InstantPopup)
         self.btn_qf_months.setStyleSheet("font-size: 8pt; padding: 0 10px 0 3px;")
         months_menu = QMenu(self.btn_qf_months)
-        months_menu.addAction("All dates", lambda: self.filter_month_selected.emit(0))
-        months_menu.addSeparator()
         for m_num in range(1, 13):
             m_name = calendar.month_name[m_num]
-            months_menu.addAction(m_name, lambda mn=m_num: self.filter_month_selected.emit(mn))
+            months_menu.addAction(
+                m_name,
+                lambda _c=False, mn=m_num: (
+                    self.filter_month_selected.emit(mn),
+                    self.date_filter_selected.emit(None, mn, None),
+                ),
+            )
+        months_menu.addSeparator()
+        months_menu.addAction(
+            "All dates",
+            lambda: (
+                self.filter_month_selected.emit(0),
+                self.date_filter_selected.emit(None, None, None),
+            ),
+        )
         self.btn_qf_months.setMenu(months_menu)
 
         self.btn_qf_rated = self._make_btn("Rated", "rate", grp_qfind)
         self.btn_qf_rated.setFixedHeight(19)
+        self.btn_qf_rated.setPopupMode(QToolButton.InstantPopup)
         self.btn_qf_rated.setStyleSheet("font-size: 8pt; padding: 0 10px 0 3px;")
         rated_menu = QMenu(self.btn_qf_rated)
-        rated_menu.addAction("All ratings", lambda: self.rating_filter_selected.emit(()))
+        star_items = [
+            ("★★★★★ (5 stars)", (5,)),
+            ("★★★★☆ or higher", (4, 5)),
+            ("★★★☆☆ or higher", (3, 4, 5)),
+            ("★★☆☆☆ or higher", (2, 3, 4, 5)),
+            ("★☆☆☆☆ or higher", (1, 2, 3, 4, 5)),
+            ("⊘ Unrated", (0,)),
+        ]
+        for label, val in star_items:
+            rated_menu.addAction(label, lambda _c=False, v=val: self.rating_filter_selected.emit(v))
         rated_menu.addSeparator()
-        rated_menu.addAction("★★★★★ (5 stars)", lambda: self.rating_filter_selected.emit((5,)))
-        rated_menu.addAction("★★★★☆ or higher", lambda: self.rating_filter_selected.emit((4, 5)))
-        rated_menu.addAction("★★★☆☆ or higher", lambda: self.rating_filter_selected.emit((3, 4, 5)))
-        rated_menu.addAction("★★☆☆☆ or higher", lambda: self.rating_filter_selected.emit((2, 3, 4, 5)))
-        rated_menu.addAction("★☆☆☆☆ or higher", lambda: self.rating_filter_selected.emit((1, 2, 3, 4, 5)))
-        rated_menu.addAction("Unrated", lambda: self.rating_filter_selected.emit((0,)))
+        rated_menu.addAction("All ratings", lambda: self.rating_filter_selected.emit(()))
         self.btn_qf_rated.setMenu(rated_menu)
 
         # Split Flagged Button: Left part toggles red flag filter, right arrow opens choice menu
@@ -5244,17 +5287,19 @@ class RibbonToolbar(QWidget):
                 background: #E5F1FB;
                 image: url({icon_check});
             }
-            QToolButton#LargeRibbonToolBtn {
+            QToolButton#LargeRibbonToolBtn,
+            QToolButton#LargeRibbonBtn {
                 background: transparent;
                 border: 1px solid transparent;
                 border-radius: 3px;
-                padding: 1px 2px;
+                padding: 1px 2px 7px 2px;
                 color: #1E395B;
                 font-family: 'Segoe UI';
                 font-size: 8pt;
                 text-align: center;
             }
-            QToolButton#CompactRibbonToolBtn {
+            QToolButton#CompactRibbonToolBtn,
+            QToolButton#CompactRibbonBtn {
                 background: transparent;
                 border: 1px solid transparent;
                 border-radius: 2px;
@@ -5265,16 +5310,16 @@ class RibbonToolbar(QWidget):
                 text-align: left;
             }
             QToolButton#LargeRibbonToolBtn:hover,
-            QToolButton#CompactRibbonToolBtn:hover {
+            QToolButton#LargeRibbonBtn:hover,
+            QToolButton#CompactRibbonToolBtn:hover,
+            QToolButton#CompactRibbonBtn:hover {
                 background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
                     stop:0 #FFFDF5, stop:1 #FCE7A2);
                 border: 1px solid #D9B152;
             }
             QToolButton::menu-indicator,
             QToolButton#CompactRibbonBtn::menu-indicator,
-            QToolButton#CompactRibbonToolBtn::menu-indicator,
-            QToolButton#LargeRibbonBtn::menu-indicator,
-            QToolButton#LargeRibbonToolBtn::menu-indicator {
+            QToolButton#CompactRibbonToolBtn::menu-indicator {
                 image: url({arrow_drop_down});
                 width: 5px;
                 height: 3px;
@@ -5282,6 +5327,15 @@ class RibbonToolbar(QWidget):
                 subcontrol-origin: padding;
                 right: 2px;
                 top: 1px;
+            }
+            QToolButton#LargeRibbonBtn::menu-indicator,
+            QToolButton#LargeRibbonToolBtn::menu-indicator {
+                image: url({arrow_drop_down});
+                width: 5px;
+                height: 3px;
+                subcontrol-position: bottom center;
+                subcontrol-origin: padding;
+                bottom: 2px;
             }
             QToolButton::menu-button {
                 border: none;
