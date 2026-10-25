@@ -229,3 +229,76 @@ def test_single_media_viewer_markup_mode_and_dialogs(qapp, tmp_path: Path):
     dlg_cinematic = CinematicMotionDialog(test_img, p)
     assert dlg_cinematic.windowTitle().startswith("3D Cinematic")
     dlg_cinematic.close()
+
+
+def test_color_pop_interactive_tools_and_undo_redo(qapp, tmp_path: Path):
+    """Verifies ColorPopDialog canvas interaction, painting, undo/redo, invert, and save without crash."""
+    from PySide6.QtCore import QPoint
+    from PySide6.QtGui import QMouseEvent
+    from PySide6.QtCore import QEvent
+
+    test_img = np.full((300, 400, 3), 120, dtype=np.uint8)
+    test_img[100:200, 150:250] = [220, 50, 50]
+    p = tmp_path / "interactive_pop.jpg"
+    cv2.imwrite(str(p), test_img)
+
+    dlg = ColorPopDialog(test_img, p)
+    dlg.show()
+    qapp.processEvents()
+
+    assert dlg.view is not None
+    assert len(dlg.undo_stack) >= 1
+    initial_undo_count = len(dlg.undo_stack)
+
+    # 1. Simulate mouse painting on canvas (Press -> Move -> Release)
+    canvas = dlg.view
+    press_event = QMouseEvent(QEvent.MouseButtonPress, QPoint(100, 100), Qt.LeftButton, Qt.LeftButton, Qt.NoModifier)
+    canvas.mousePressEvent(press_event)
+    move_event = QMouseEvent(QEvent.MouseMove, QPoint(150, 120), Qt.LeftButton, Qt.LeftButton, Qt.NoModifier)
+    canvas.mouseMoveEvent(move_event)
+    release_event = QMouseEvent(QEvent.MouseButtonRelease, QPoint(150, 120), Qt.LeftButton, Qt.NoButton, Qt.NoModifier)
+    canvas.mouseReleaseEvent(release_event)
+
+    # Stroke should be pushed to undo stack
+    assert len(dlg.undo_stack) > initial_undo_count
+    assert dlg.btn_undo.isEnabled()
+
+    # 2. Test Undo & Redo
+    dlg._undo_mask()
+    qapp.processEvents()
+    assert dlg.btn_redo.isEnabled()
+    dlg._redo_mask()
+    qapp.processEvents()
+
+    # 3. Test changing tools (B&W brush vs Color brush)
+    dlg._set_brush_mode("make_bw")
+    assert dlg.brush_mode == "make_bw"
+    dlg._set_brush_mode("keep_color")
+    assert dlg.brush_mode == "keep_color"
+
+    # 4. Test slider adjustments
+    dlg.sld_radius.setValue(45)
+    assert dlg.brush_radius == 45
+    dlg.sld_contrast.setValue(125)
+    assert abs(dlg.bg_contrast - 1.25) < 1e-4
+
+    # 5. Test Invert Mask and Auto Detect
+    dlg._invert_mask()
+    qapp.processEvents()
+    dlg._auto_detect_mask()
+    qapp.processEvents()
+
+    # 6. Test Hold to Compare
+    dlg._show_original()
+    qapp.processEvents()
+    dlg._restore_color_pop()
+    qapp.processEvents()
+
+    # 7. Test Save / Apply
+    dlg._save_photo()
+    saved_files = list(tmp_path.glob("ColorPop_*.jpg"))
+    assert len(saved_files) >= 1
+    assert saved_files[0].exists()
+
+    dlg.close()
+
