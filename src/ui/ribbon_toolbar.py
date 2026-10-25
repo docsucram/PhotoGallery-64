@@ -1207,6 +1207,51 @@ def _render_aero_raw(kind: str, size: int = 20) -> QIcon:
         p.setBrush(QColor("#3399FF"))
         p.drawEllipse(QRectF(s * 0.72, s * 0.44, s * 0.08, s * 0.08))
 
+    elif kind in ("panoramic", "panorama"):
+        # Panoramic Wide-Angle 3-Panel Ribbon Icon
+        p.setPen(QPen(QColor("#24568C"), 1.0))
+        p.setBrush(QColor("#CCE5FF"))
+        p.drawRoundedRect(QRectF(s * 0.06, s * 0.25, s * 0.88, s * 0.50), 2.0, 2.0)
+        p.setPen(QPen(QColor("#3A7CBD"), 1.0, Qt.DashLine))
+        p.drawLine(QPointF(s * 0.35, s * 0.25), QPointF(s * 0.35, s * 0.75))
+        p.drawLine(QPointF(s * 0.65, s * 0.25), QPointF(s * 0.65, s * 0.75))
+        # Sun & mountains
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor("#FFAE19"))
+        p.drawEllipse(QRectF(s * 0.72, s * 0.32, s * 0.14, s * 0.14))
+        p.setBrush(QColor("#2A8F4A"))
+        poly = [QPointF(s * 0.12, s * 0.75), QPointF(s * 0.38, s * 0.45), QPointF(s * 0.62, s * 0.75)]
+        p.drawPolygon(poly)
+
+    elif kind in ("collage", "auto_collage"):
+        # Multi-frame collage icon
+        p.setPen(QPen(QColor("#3C648F"), 1.0))
+        p.setBrush(QColor("#D6E8FC"))
+        p.drawRoundedRect(QRectF(s * 0.10, s * 0.14, s * 0.36, s * 0.34), 1.5, 1.5)
+        p.setBrush(QColor("#EAF4FE"))
+        p.drawRoundedRect(QRectF(s * 0.52, s * 0.14, s * 0.38, s * 0.42), 1.5, 1.5)
+        p.setBrush(QColor("#BEDBFA"))
+        p.drawRoundedRect(QRectF(s * 0.10, s * 0.54, s * 0.38, s * 0.34), 1.5, 1.5)
+        p.setBrush(QColor("#D6E8FC"))
+        p.drawRoundedRect(QRectF(s * 0.54, s * 0.62, s * 0.36, s * 0.26), 1.5, 1.5)
+
+    elif kind in ("photo_fuse", "fuse"):
+        # Dual-frame face fuse icon with sparkle / swap arrow
+        p.setPen(QPen(QColor("#35618C"), 1.0))
+        p.setBrush(QColor("#E2EEFC"))
+        p.drawRoundedRect(QRectF(s * 0.10, s * 0.18, s * 0.45, s * 0.58), 2.0, 2.0)
+        p.setBrush(QColor("#FFFFFF"))
+        p.drawRoundedRect(QRectF(s * 0.42, s * 0.26, s * 0.48, s * 0.60), 2.0, 2.0)
+        # Face silhouette inside front card
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor("#2572C4"))
+        p.drawEllipse(QRectF(s * 0.58, s * 0.38, s * 0.16, s * 0.18))
+        p.drawChord(QRectF(s * 0.50, s * 0.60, s * 0.32, s * 0.22), 0, 180 * 16)
+        # Magic sparkle star
+        p.setPen(QPen(QColor("#FF9900"), 1.5))
+        p.drawLine(QPointF(s * 0.28, s * 0.10), QPointF(s * 0.28, s * 0.26))
+        p.drawLine(QPointF(s * 0.20, s * 0.18), QPointF(s * 0.36, s * 0.18))
+
     else:
         p.setPen(QPen(QColor("#3E6B99"), 1.1))
         p.setBrush(QColor("#D8EAF9"))
@@ -4505,12 +4550,44 @@ class RibbonToolbar(QWidget):
         hbox.setContentsMargins(4, 2, 4, 2)
         hbox.setSpacing(4)
 
+        # ---------------------------------------------------------------------
+        # Group 1: Tools (Panoramic, Photo Fuse, Auto Collage)
+        # ---------------------------------------------------------------------
+        grp_tools = _RibbonGroupBox("Tools", page)
+        self.grp_create_tools = grp_tools
+
+        btn_pano = self._make_btn("Panoramic", "panoramic", grp_tools, large=True)
+        btn_pano.setToolTip("Stitch 2 or more overlapping photos into a wide-angle panorama (Microsoft ICE engine).")
+        btn_pano.clicked.connect(lambda: self.action_triggered.emit("panorama"))
+        self.btn_panorama = btn_pano
+        grp_tools.content_layout.addWidget(btn_pano)
+
+        btn_fuse = self._make_btn("Photo Fuse", "photo_fuse", grp_tools, large=True)
+        btn_fuse.setToolTip("Combine the best expressions and faces from 2–6 burst group shots into a single perfect photo.")
+        btn_fuse.clicked.connect(lambda: self.action_triggered.emit("photo_fuse"))
+        self.btn_photo_fuse = btn_fuse
+        grp_tools.content_layout.addWidget(btn_fuse)
+
+        btn_collage = self._make_btn("Auto Collage", "collage", grp_tools, large=True)
+        btn_collage.setToolTip("Generate an interactive grid, vintage Polaroid scatter, or 'Then & Now' comparison card from selected photos.")
+        btn_collage.clicked.connect(lambda: self.action_triggered.emit("collage"))
+        self.btn_collage = btn_collage
+        grp_tools.content_layout.addWidget(btn_collage)
+
+        hbox.addWidget(grp_tools)
+
+        # ---------------------------------------------------------------------
+        # Group 2: Share (Slide show)
+        # ---------------------------------------------------------------------
         grp_share = _RibbonGroupBox("Share", page)
         btn_slide = self._make_btn("Slide show (F11)", "slideshow", grp_share, large=True)
         btn_slide.clicked.connect(lambda: self.action_triggered.emit("slide_show"))
         grp_share.content_layout.addWidget(btn_slide)
         hbox.addWidget(grp_share)
 
+        # ---------------------------------------------------------------------
+        # Group 3: Settings
+        # ---------------------------------------------------------------------
         grp_opt = _RibbonGroupBox("Settings", page)
         btn_opt = self._make_btn("Options...", "options", grp_opt, large=True)
         btn_opt.clicked.connect(lambda: self.action_triggered.emit("open_settings"))

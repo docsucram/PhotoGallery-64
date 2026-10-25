@@ -4072,6 +4072,12 @@ class PhotoGalleryMainWindow(QMainWindow):
             self.toggle_pause_write_back()
         elif action_id == "print":
             self.open_print_dialog()
+        elif action_id in ("panorama", "panoramic"):
+            self.open_panorama_dialog()
+        elif action_id in ("collage", "auto_collage"):
+            self.open_collage_dialog()
+        elif action_id in ("photo_fuse", "fuse"):
+            self.open_photo_fuse_dialog()
         elif action_id == "backup_catalog":
             self.backup_catalog_dialog()
         elif action_id == "open_settings":
@@ -4131,6 +4137,144 @@ class PhotoGalleryMainWindow(QMainWindow):
 
         dlg = PrintPicturesDialog(items_to_print, self)
         dlg.exec()
+
+    def _get_selected_photo_paths_and_details(self) -> tuple[list[Path], list[dict[str, Any]]]:
+        """Retrieves file paths and catalog metadata records for the active or selected photos."""
+        paths: list[Path] = []
+        details: list[dict[str, Any]] = []
+
+        if self.central_stack.currentWidget() == self.media_viewer:
+            if getattr(self.media_viewer, "current_is_video", False):
+                return [], []
+            if self.media_viewer.current_file_path and self.media_viewer.current_file_path.is_file():
+                p = self.media_viewer.current_file_path
+                paths.append(p)
+                d: dict[str, Any] = {
+                    "file_path": str(p),
+                    "filename": p.name,
+                    "folder_path": str(p.parent),
+                }
+                if self.media_viewer.master_np_rgb is not None:
+                    import cv2
+                    d["image_bgr"] = cv2.cvtColor(self.media_viewer.master_np_rgb, cv2.COLOR_RGB2BGR)
+                details.append(d)
+        else:
+            target_ids = list(self._selected_ids)
+            if not target_ids:
+                cur_id = getattr(self.grid_view, "_last_selected_id", None)
+                if cur_id:
+                    target_ids = [cur_id]
+
+            for mid in target_ids:
+                try:
+                    det = self.catalog_repo.get_media_detail(mid)
+                    if det.get("is_video"):
+                        continue
+                    folder_p = det.get("folder_path")
+                    fname = det.get("filename")
+                    full_p = Path(det.get("file_path") or (Path(folder_p) / str(fname)))
+                    if full_p.is_file():
+                        paths.append(full_p)
+                        det["file_path"] = str(full_p)
+                        details.append(det)
+                except Exception:
+                    continue
+
+        return paths, details
+
+    def open_panorama_dialog(self) -> None:
+        """Launches the Microsoft ICE-Style Panorama Stitcher."""
+        from src.ui.create_studio_dialogs import PanoramaDialog
+
+        paths, _ = self._get_selected_photo_paths_and_details()
+        if len(paths) < 2:
+            QMessageBox.information(
+                self,
+                "Panorama",
+                "Please select 2 or more overlapping photos to stitch a panorama.",
+            )
+            return
+
+        dlg = PanoramaDialog(paths, self)
+        if dlg.exec() == QDialog.Accepted and dlg.saved_file_path:
+            out_file = dlg.saved_file_path
+            self.scan_folder(out_file.parent, include_subfolders=False)
+            self.rebuild_and_run_query()
+
+            # Select the newly created panorama in the grid
+            try:
+                conn = self.catalog_repo.engine.catalog_conn()
+                row = conn.execute(
+                    "SELECT m.id FROM media m JOIN folders f ON f.id = m.folder_id WHERE f.path = ? AND m.filename = ?",
+                    (str(out_file.parent), out_file.name),
+                ).fetchone()
+                if row:
+                    self.grid_view.select_media_id(row[0])
+            except Exception:
+                pass
+            self.lbl_sync_status.setText(f"✓ Created panorama: {out_file.name}")
+
+    def open_collage_dialog(self) -> None:
+        """Launches the Interactive Collage & 'Then & Now' Studio."""
+        from src.ui.create_studio_dialogs import CollageDialog
+
+        _, details = self._get_selected_photo_paths_and_details()
+        if not details:
+            QMessageBox.information(
+                self,
+                "Collage",
+                "Please select 1 to 20 photos to generate a collage.",
+            )
+            return
+
+        dlg = CollageDialog(details, self)
+        if dlg.exec() == QDialog.Accepted and dlg.saved_file_path:
+            out_file = dlg.saved_file_path
+            self.scan_folder(out_file.parent, include_subfolders=False)
+            self.rebuild_and_run_query()
+
+            try:
+                conn = self.catalog_repo.engine.catalog_conn()
+                row = conn.execute(
+                    "SELECT m.id FROM media m JOIN folders f ON f.id = m.folder_id WHERE f.path = ? AND m.filename = ?",
+                    (str(out_file.parent), out_file.name),
+                ).fetchone()
+                if row:
+                    self.grid_view.select_media_id(row[0])
+            except Exception:
+                pass
+            self.lbl_sync_status.setText(f"✓ Created collage: {out_file.name}")
+
+    def open_photo_fuse_dialog(self) -> None:
+        """Launches the Photo Fuse Best-Face Group Shot Combiner."""
+        from src.ui.create_studio_dialogs import PhotoFuseDialog
+
+        paths, _ = self._get_selected_photo_paths_and_details()
+        if len(paths) < 2:
+            QMessageBox.information(
+                self,
+                "Photo Fuse",
+                "Please select 2 to 6 burst group photos to fuse faces.",
+            )
+            return
+
+        dlg = PhotoFuseDialog(paths, self)
+        if dlg.exec() == QDialog.Accepted and dlg.saved_file_path:
+            out_file = dlg.saved_file_path
+            self.scan_folder(out_file.parent, include_subfolders=False)
+            self.rebuild_and_run_query()
+
+            try:
+                conn = self.catalog_repo.engine.catalog_conn()
+                row = conn.execute(
+                    "SELECT m.id FROM media m JOIN folders f ON f.id = m.folder_id WHERE f.path = ? AND m.filename = ?",
+                    (str(out_file.parent), out_file.name),
+                ).fetchone()
+                if row:
+                    self.grid_view.select_media_id(row[0])
+            except Exception:
+                pass
+            self.lbl_sync_status.setText(f"✓ Created fused photo: {out_file.name}")
 
 
     def _open_settings_dialog(self, initial_tab: str | None = None) -> None:

@@ -1650,6 +1650,16 @@ class ThumbnailGridView(QListView):
             if is_mw:
                 act_print.triggered.connect(main_win.open_print_dialog)
 
+            # Create Studio Submenu
+            create_menu = menu.addMenu("Create")
+            act_pano = create_menu.addAction("Panoramic photo...")
+            act_fuse = create_menu.addAction("Photo Fuse...")
+            act_col = create_menu.addAction("Auto Collage...")
+            if is_mw:
+                act_pano.triggered.connect(main_win.open_panorama_dialog)
+                act_fuse.triggered.connect(main_win.open_photo_fuse_dialog)
+                act_col.triggered.connect(main_win.open_collage_dialog)
+
             # 5. Rotate right
             act_rr = menu.addAction("Rotate right")
             if is_mw:

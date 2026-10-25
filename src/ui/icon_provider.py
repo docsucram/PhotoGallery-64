@@ -44,6 +44,11 @@ _FLUENT_MAP: dict[str, tuple[str, str]] = {
     "rotate_cw": ("ri.clockwise-2-line", "#0078D4"),
     # Find / Dates / Media
     "print": ("ri.printer-line", "#0078D4"),
+    "panoramic": ("ri.panorama-line", "#0078D4"),
+    "panorama": ("ri.panorama-line", "#0078D4"),
+    "collage": ("ri.layout-masonry-line", "#0078D4"),
+    "photo_fuse": ("ri.camera-lens-line", "#0078D4"),
+    "fuse": ("ri.camera-lens-line", "#0078D4"),
     "calendar": ("msc.calendar", "#0078D4"),
     "dates": ("msc.calendar", "#0078D4"),
     "dates_grid": ("msc.calendar", "#0078D4"),
