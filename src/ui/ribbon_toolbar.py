@@ -2206,7 +2206,51 @@ class _WLPGPeopleMenuWidget(QWidget):
         scroll.setFrameShape(QFrame.NoFrame)
         est_height = 80 + (len(other_people) + 9) // 10 * 46
         scroll.setFixedHeight(min(380, max(140, est_height)))
-        scroll.setStyleSheet("background: #FFFFFF; border: none;")
+        scroll.setStyleSheet(
+            """
+            QScrollArea {
+                background: #FFFFFF;
+                border: none;
+            }
+            QScrollBar:vertical {
+                border: none;
+                background: transparent;
+                width: 8px;
+                margin: 0px;
+            }
+            QScrollBar::handle:vertical {
+                background: #CBD5E1;
+                min-height: 24px;
+                border-radius: 4px;
+            }
+            QScrollBar::handle:vertical:hover {
+                background: #94A3B8;
+            }
+            QScrollBar::handle:vertical:pressed {
+                background: #64748B;
+            }
+            QScrollBar::sub-line:vertical, QScrollBar::add-line:vertical {
+                border: none;
+                background: transparent;
+                height: 0px;
+                width: 0px;
+            }
+            QScrollBar::sub-page:vertical, QScrollBar::add-page:vertical {
+                border: none;
+                background: transparent;
+            }
+            QScrollBar:horizontal {
+                border: none;
+                background: transparent;
+                height: 0px;
+                width: 0px;
+            }
+            QAbstractScrollArea::corner {
+                background: transparent;
+                border: none;
+            }
+            """
+        )
 
         scroll_content = QWidget()
         scroll_content.setStyleSheet("background: #FFFFFF;")

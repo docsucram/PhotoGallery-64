@@ -141,6 +141,12 @@ def test_people_directory_view_population_and_search(qapp, db_engine):
     view.txt_search.setText("")
     assert view.grid_named.count() == 2
 
+    # Scrollbar policy & button aesthetics verification
+    assert view.scroll_area.horizontalScrollBarPolicy() == Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+    assert not view.btn_review_suggestions.icon().isNull()
+    assert "👥" not in view.btn_review_suggestions.text()
+    assert "↻" not in view.btn_refresh.text()
+
 
 def test_inline_naming_unnamed_cluster(qapp, db_engine):
     """Verifies that naming an unnamed cluster creates a person, confirms faces, and updates centroids."""

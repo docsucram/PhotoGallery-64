@@ -927,7 +927,54 @@ class BatchPeopleView(QWidget):
         # ---------------------------------------------------------------------
         self.scroll_area = QScrollArea(self)
         self.scroll_area.setWidgetResizable(True)
-        self.scroll_area.setStyleSheet("QScrollArea { border: none; background-color: #FFFFFF; }")
+        self.scroll_area.setFrameShape(QFrame.Shape.NoFrame)
+        self.scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.scroll_area.setStyleSheet(
+            """
+            QScrollArea {
+                border: none;
+                background-color: #FFFFFF;
+            }
+            QScrollBar:vertical {
+                border: none;
+                background: transparent;
+                width: 8px;
+                margin: 0px;
+            }
+            QScrollBar::handle:vertical {
+                background: #CBD5E1;
+                min-height: 28px;
+                border-radius: 4px;
+            }
+            QScrollBar::handle:vertical:hover {
+                background: #94A3B8;
+            }
+            QScrollBar::handle:vertical:pressed {
+                background: #64748B;
+            }
+            QScrollBar::sub-line:vertical, QScrollBar::add-line:vertical {
+                border: none;
+                background: transparent;
+                height: 0px;
+                width: 0px;
+            }
+            QScrollBar::sub-page:vertical, QScrollBar::add-page:vertical {
+                border: none;
+                background: transparent;
+            }
+            QScrollBar:horizontal {
+                border: none;
+                background: transparent;
+                height: 0px;
+                width: 0px;
+            }
+            QAbstractScrollArea::corner {
+                background: transparent;
+                border: none;
+            }
+            """
+        )
 
         self.scroll_content = QWidget()
         self.scroll_layout = QVBoxLayout(self.scroll_content)

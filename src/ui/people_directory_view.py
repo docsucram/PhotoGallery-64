@@ -53,6 +53,7 @@ from src.core.face_matcher import (
 from src.db.connection import DualDatabaseEngine
 from src.db.repository import CatalogRepository, ThumbnailRepository
 from src.ui.person_header_bar import make_circular_avatar
+from src.ui.ribbon_toolbar import make_wlpg_icon
 
 logger = logging.getLogger(__name__)
 
@@ -596,19 +597,58 @@ class PeopleDirectoryView(QWidget):
         h_layout.addStretch(1)
 
         # Batch Review Suggestions Button
-        self.btn_review_suggestions = QPushButton("👥 Review Face Suggestions", header_bar)
+        self.btn_review_suggestions = QPushButton("Review Face Suggestions", header_bar)
+        self.btn_review_suggestions.setObjectName("btnReviewSuggestions")
+        self.btn_review_suggestions.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_review_suggestions.setIcon(make_wlpg_icon("batch_people", 16))
+        self.btn_review_suggestions.setIconSize(QSize(16, 16))
         self.btn_review_suggestions.setStyleSheet(
-            "QPushButton { background-color: #2563EB; color: #FFFFFF; font-weight: bold; padding: 6px 14px; border-radius: 6px; border: none; font-size: 11px; }"
-            "QPushButton:hover { background-color: #1D4ED8; }"
+            """
+            QPushButton#btnReviewSuggestions {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #2E79BA, stop:1 #1E5C94);
+                border: 1px solid #184E80;
+                border-radius: 4px;
+                color: #FFFFFF;
+                font-family: 'Segoe UI';
+                font-size: 9pt;
+                font-weight: 600;
+                padding: 5px 14px;
+            }
+            QPushButton#btnReviewSuggestions:hover {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #3D8CCD, stop:1 #256BA6);
+                border-color: #1F5F9E;
+            }
+            QPushButton#btnReviewSuggestions:pressed {
+                background: #184E80;
+            }
+            """
         )
         self.btn_review_suggestions.clicked.connect(self.review_suggestions_requested.emit)
         h_layout.addWidget(self.btn_review_suggestions)
 
         # Refresh Button
-        self.btn_refresh = QPushButton("↻ Refresh", header_bar)
+        self.btn_refresh = QPushButton("Refresh", header_bar)
+        self.btn_refresh.setObjectName("btnRefreshDirectory")
+        self.btn_refresh.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_refresh.setIcon(make_wlpg_icon("rotate_right", 14))
+        self.btn_refresh.setIconSize(QSize(14, 14))
         self.btn_refresh.setStyleSheet(
-            "QPushButton { background-color: #FFFFFF; border: 1px solid #CBD5E1; color: #334155; padding: 6px 12px; border-radius: 6px; font-size: 11px; }"
-            "QPushButton:hover { background-color: #F1F5F9; }"
+            """
+            QPushButton#btnRefreshDirectory {
+                background-color: #FFFFFF;
+                border: 1px solid #CBD5E1;
+                border-radius: 4px;
+                color: #334155;
+                font-family: 'Segoe UI';
+                font-size: 9pt;
+                padding: 5px 12px;
+            }
+            QPushButton#btnRefreshDirectory:hover {
+                background-color: #F8FAFC;
+                border-color: #94A3B8;
+                color: #1E293B;
+            }
+            """
         )
         self.btn_refresh.clicked.connect(self.refresh_directory)
         h_layout.addWidget(self.btn_refresh)
@@ -616,12 +656,68 @@ class PeopleDirectoryView(QWidget):
         main_layout.addWidget(header_bar)
 
         # ---------------------------------------------------------------------
-        # 2. Scrollable Directory Area
+        # 2. Scrollable Directory Area (with minimalist vertical scrollbar)
         # ---------------------------------------------------------------------
         self.scroll_area = QScrollArea(self)
         self.scroll_area.setWidgetResizable(True)
         self.scroll_area.setFrameShape(QFrame.Shape.NoFrame)
-        self.scroll_area.setStyleSheet("background-color: transparent;")
+        self.scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.scroll_area.setStyleSheet(
+            """
+            QScrollArea {
+                background-color: transparent;
+                border: none;
+            }
+            QScrollBar:vertical {
+                border: none;
+                background: transparent;
+                width: 8px;
+                margin: 0px;
+            }
+            QScrollBar::handle:vertical {
+                background: #CBD5E1;
+                min-height: 28px;
+                border-radius: 4px;
+            }
+            QScrollBar::handle:vertical:hover {
+                background: #94A3B8;
+            }
+            QScrollBar::handle:vertical:pressed {
+                background: #64748B;
+            }
+            QScrollBar::sub-line:vertical, QScrollBar::add-line:vertical {
+                border: none;
+                background: transparent;
+                height: 0px;
+                width: 0px;
+            }
+            QScrollBar::sub-page:vertical, QScrollBar::add-page:vertical {
+                border: none;
+                background: transparent;
+            }
+            QScrollBar:horizontal {
+                border: none;
+                background: transparent;
+                height: 0px;
+                width: 0px;
+            }
+            QScrollBar::handle:horizontal, QScrollBar::sub-line:horizontal, QScrollBar::add-line:horizontal {
+                border: none;
+                background: transparent;
+                width: 0px;
+                height: 0px;
+            }
+            QScrollBar::sub-page:horizontal, QScrollBar::add-page:horizontal {
+                border: none;
+                background: transparent;
+            }
+            QAbstractScrollArea::corner {
+                background: transparent;
+                border: none;
+            }
+            """
+        )
 
         self.scroll_content = QWidget()
         self.scroll_content.setStyleSheet("background-color: transparent;")
@@ -688,19 +784,53 @@ class PeopleDirectoryView(QWidget):
         total_cnt = len(self._all_named_people)
         self.lbl_total_count.setText(f"({total_cnt:,})")
 
-        # Update Review suggestions button badge
+        # Update Review suggestions button badge & styling
         total_suggestions = sum(p.get("suggestion_count", 0) for p in self._all_named_people)
         if total_suggestions > 0:
-            self.btn_review_suggestions.setText(f"👥 Review Suggestions (+{total_suggestions})")
+            self.btn_review_suggestions.setText(f"Review Suggestions ({total_suggestions})")
+            self.btn_review_suggestions.setIcon(make_wlpg_icon("batch_people", 16))
             self.btn_review_suggestions.setStyleSheet(
-                "QPushButton { background-color: #F59E0B; color: #FFFFFF; font-weight: bold; padding: 6px 14px; border-radius: 6px; border: none; font-size: 11px; }"
-                "QPushButton:hover { background-color: #D97706; }"
+                """
+                QPushButton#btnReviewSuggestions {
+                    background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #2E79BA, stop:1 #1E5C94);
+                    border: 1px solid #184E80;
+                    border-radius: 4px;
+                    color: #FFFFFF;
+                    font-family: 'Segoe UI';
+                    font-size: 9pt;
+                    font-weight: 600;
+                    padding: 5px 14px;
+                }
+                QPushButton#btnReviewSuggestions:hover {
+                    background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #3D8CCD, stop:1 #256BA6);
+                    border-color: #1F5F9E;
+                }
+                QPushButton#btnReviewSuggestions:pressed {
+                    background: #184E80;
+                }
+                """
             )
         else:
-            self.btn_review_suggestions.setText("👥 Review Face Suggestions")
+            self.btn_review_suggestions.setText("Review Face Suggestions")
+            self.btn_review_suggestions.setIcon(make_wlpg_icon("batch_people", 16))
             self.btn_review_suggestions.setStyleSheet(
-                "QPushButton { background-color: #2563EB; color: #FFFFFF; font-weight: bold; padding: 6px 14px; border-radius: 6px; border: none; font-size: 11px; }"
-                "QPushButton:hover { background-color: #1D4ED8; }"
+                """
+                QPushButton#btnReviewSuggestions {
+                    background-color: #FFFFFF;
+                    border: 1px solid #CBD5E1;
+                    border-radius: 4px;
+                    color: #475569;
+                    font-family: 'Segoe UI';
+                    font-size: 9pt;
+                    font-weight: normal;
+                    padding: 5px 14px;
+                }
+                QPushButton#btnReviewSuggestions:hover {
+                    background-color: #F8FAFC;
+                    border-color: #94A3B8;
+                    color: #1E293B;
+                }
+                """
             )
 
         self._render_grids()
@@ -725,7 +855,9 @@ class PeopleDirectoryView(QWidget):
         self.sec1_container.setVisible(bool(filtered_named))
 
         # Dynamic column calculation (card width 162 + spacing 12 = 174)
-        avail_w = self.scroll_area.viewport().width() if self.scroll_area.viewport().width() > 100 else self.width()
+        # Always subtract 10px to account for vertical scrollbar and prevent horizontal scrollbar triggering
+        vw = self.scroll_area.viewport().width() if self.scroll_area.viewport().width() > 100 else self.width()
+        avail_w = max(200, vw - 10)
         cols = max(2, (avail_w - 40) // 174)
 
         for idx, p in enumerate(filtered_named):
