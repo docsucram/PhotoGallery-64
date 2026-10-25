@@ -63,9 +63,9 @@ def test_ribbon_effects_gallery_dimensions_and_dropdown(qapp):
     gallery = _RibbonEffectsGallery()
     gallery._suppress_menu_exec = True
 
-    # 1. Dimensions check: cards are 54px wide, stride is 55px (tight ~1px gap)
-    assert gallery.CARD_WIDTH == 54
-    assert gallery.CARD_STRIDE == 55
+    # 1. Dimensions check: cards are 48px wide, stride is 49px (snug edge-to-edge layout)
+    assert gallery.CARD_WIDTH == 48
+    assert gallery.CARD_STRIDE == 49
 
     # 2. All buttons must be properly initialized
     assert "sepia" in gallery.buttons
@@ -89,3 +89,48 @@ def test_ribbon_effects_gallery_dimensions_and_dropdown(qapp):
 
     # 4. Trigger dropdown menu and inspect preview icon size (2x size: 84x54)
     gallery._show_all_effects_menu()
+
+
+def test_ribbon_tab_seamless_connection_and_dropdown_arrows(qapp):
+    """Verifies that the selected tab seamlessly merges with the ribbon pane without a dividing border,
+    and dropdown indicators are tiny 5x3 icons."""
+    from src.ui.ribbon_toolbar import RibbonToolbar
+    from PySide6.QtGui import QImage, QColor
+
+    ribbon = RibbonToolbar()
+    ribbon.resize(900, 150)
+    ribbon.show()
+
+    # Verify tab styles include border-bottom: 1px solid #F4F8FD, margin-bottom: -1px, and tiny dropdown arrow
+    qss = ribbon.styleSheet()
+    assert "top: -1px;" in qss
+    assert "margin-bottom: -1px;" in qss
+    assert "arrow_dropdown_mini.svg" in qss
+
+    tw = ribbon.tab_widget
+    img = QImage(tw.size(), QImage.Format.Format_ARGB32)
+    tw.render(img)
+
+    tb = tw.tabBar()
+    t0 = tb.tabRect(0)
+    pt0 = tb.mapTo(tw, t0.center())
+    y_boundary = tb.mapTo(tw, t0.bottomLeft()).y()
+
+    # In selected tab 0 (Home), the bottom boundary matches pane top (#F4F8FD), masking the line
+    c0 = QColor(img.pixel(pt0.x(), y_boundary))
+    assert c0.red() > 230 and c0.green() > 235 and c0.blue() > 240
+
+    # In unselected tab 1 (Edit), the dividing border #9EB6CE is visible
+    t1 = tb.tabRect(1)
+    pt1 = tb.mapTo(tw, t1.center())
+    c1 = QColor(img.pixel(pt1.x(), y_boundary))
+    assert c1.red() < 200 and c1.green() < 210
+
+    # Switch to tab 1 (Edit) dynamically and verify the seamless mask moves to tab 1
+    tw.setCurrentIndex(1)
+    tw.render(img)
+
+    c1_after = QColor(img.pixel(pt1.x(), y_boundary))
+    c0_after = QColor(img.pixel(pt0.x(), y_boundary))
+    assert c1_after.red() > 230 and c1_after.green() > 235 and c1_after.blue() > 240
+    assert c0_after.red() < 200 and c0_after.green() < 210

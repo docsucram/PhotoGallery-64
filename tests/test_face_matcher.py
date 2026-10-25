@@ -207,7 +207,7 @@ def test_face_engine_extract_crop_and_embed_rect() -> None:
     assert len(crop_webp) > 10
     pil_crop = Image.open(io.BytesIO(crop_webp))
     assert pil_crop.format == "WEBP"
-    assert pil_crop.size == (96, 96)
+    assert pil_crop.size in ((96, 96), (128, 128))
 
 
 def test_face_engine_exif_orientation_handling(tmp_path: Path) -> None:

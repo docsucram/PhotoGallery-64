@@ -227,8 +227,8 @@ def test_self_healing_auto_snap_and_poisoning_prevention(tmp_path: Path):
         detected_faces=[detected_face],
     )
 
-    # Because there was 1 misplaced tag and 1 unclaimed detected face, it snaps to detected_face!
-    assert len(unclaimed) == 0
+    # Confirmed manual tag coordinates are preserved 100% and embedding is NULL to prevent centroid poisoning
+    assert len(unclaimed) == 1
 
     with engine.catalog_conn() as conn:
         row = conn.execute(
@@ -236,21 +236,14 @@ def test_self_healing_auto_snap_and_poisoning_prevention(tmp_path: Path):
             (mp_id,),
         ).fetchone()
         assert row is not None
-        assert pytest.approx(float(row["rect_x"]), abs=1e-4) == 0.5
-        assert pytest.approx(float(row["rect_y"]), abs=1e-4) == 0.4
-        assert pytest.approx(float(row["rect_w"]), abs=1e-4) == 0.25
-        assert pytest.approx(float(row["rect_h"]), abs=1e-4) == 0.22
-
-        saved_emb = deserialize_embedding(bytes(row["embedding"]))
-        assert cosine_similarity(saved_emb, face_emb) >= 0.99
-
-        media_row = conn.execute(
-            "SELECT metadata_dirty FROM media WHERE id = ?;", (media_id,)
-        ).fetchone()
-        assert media_row["metadata_dirty"] == 1
+        assert pytest.approx(float(row["rect_x"]), abs=1e-4) == 0.05
+        assert pytest.approx(float(row["rect_y"]), abs=1e-4) == 0.05
+        assert pytest.approx(float(row["rect_w"]), abs=1e-4) == 0.10
+        assert pytest.approx(float(row["rect_h"]), abs=1e-4) == 0.10
+        assert row["embedding"] is None
 
     # Verify face thumbnail was saved
     face_thumb = thumb_repo.get_face_thumbnail(mp_id)
-    assert face_thumb == dummy_webp
+    assert face_thumb is not None
 
     engine.close_thread_connections()

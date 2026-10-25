@@ -68,6 +68,8 @@ from src.imaging.opencv_engine import PhotoAdjustmentRecipe, render_adjusted_ima
 
 import src.ui.icon_provider as icon_provider
 
+ARROW_DROPDOWN_PATH = (Path(__file__).resolve().parents[2] / "assets" / "icons" / "arrow_dropdown_mini.svg").as_posix()
+
 _ICON_CACHE: dict[tuple[str, int], QIcon] = {}
 
 
@@ -1543,9 +1545,9 @@ class _RibbonEffectsGallery(QFrame):
     effect_hovered = Signal(str)
     effect_unhovered = Signal()
 
-    CARD_WIDTH = 54
+    CARD_WIDTH = 48
     CARD_HEIGHT = 56
-    CARD_STRIDE = 55
+    CARD_STRIDE = 49
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -1559,12 +1561,12 @@ class _RibbonEffectsGallery(QFrame):
             }
             QToolButton.EffectCard {
                 border: 1px solid transparent;
-                border-radius: 2px;
+                border-radius: 1px;
                 background: transparent;
                 color: #1E395B;
                 font-family: 'Segoe UI';
                 font-size: 7.5pt;
-                padding: 1px 0px 0px 0px;
+                padding: 0px;
                 margin: 0px;
             }
             QToolButton.EffectCard:hover {
@@ -1617,7 +1619,7 @@ class _RibbonEffectsGallery(QFrame):
                 btn.setChecked(True)
             btn.setText(label)
             btn.setIcon(make_effect_preview_icon(eff_id))
-            btn.setIconSize(QSize(50, 32))
+            btn.setIconSize(QSize(46, 32))
             btn.setToolButtonStyle(Qt.ToolButtonTextUnderIcon)
             btn.setFixedSize(self.CARD_WIDTH, self.CARD_HEIGHT)
             btn.setToolTip(tip)
@@ -1873,15 +1875,15 @@ class _RibbonGroupBox(QFrame):
             """
         )
         vbox = QVBoxLayout(self)
-        vbox.setContentsMargins(2, 0, 2, 2)
+        vbox.setContentsMargins(1, 0, 1, 1)
         vbox.setSpacing(1)
 
         self.content_widget = QWidget(self)
         self.content_widget.setFixedHeight(70)
         self.content_layout = QHBoxLayout(self.content_widget)
         self.content_layout.setContentsMargins(0, 0, 0, 0)
-        self.content_layout.setSpacing(2)
-        self.content_layout.setAlignment(Qt.AlignVCenter)
+        self.content_layout.setSpacing(1)
+        self.content_layout.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         vbox.addWidget(self.content_widget)
 
         self.lbl_title = QLabel(title, self)
@@ -3201,8 +3203,8 @@ class RibbonToolbar(QWidget):
             btn.setText(text)
             fm = btn.fontMetrics()
             lines = text.split("\n")
-            max_w = max((fm.horizontalAdvance(line) for line in lines), default=40)
-            btn._orig_min_w = max(52, max_w + 14)
+            max_w = max((fm.horizontalAdvance(line) for line in lines), default=36)
+            btn._orig_min_w = max(42, max_w + 6)
             btn.setMinimumWidth(btn._orig_min_w)
             btn.setFixedHeight(70)
             btn.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
@@ -3266,8 +3268,8 @@ class RibbonToolbar(QWidget):
             btn.setText(text)
             fm = btn.fontMetrics()
             lines = text.split("\n")
-            max_w = max((fm.horizontalAdvance(line) for line in lines), default=40)
-            btn._orig_min_w = max(52, max_w + 14)
+            max_w = max((fm.horizontalAdvance(line) for line in lines), default=36)
+            btn._orig_min_w = max(42, max_w + 6)
             btn.setMinimumWidth(btn._orig_min_w)
             btn.setFixedHeight(70)
             btn.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
@@ -3570,8 +3572,8 @@ class RibbonToolbar(QWidget):
 
         m_grid = QGridLayout()
         m_grid.setContentsMargins(0, 0, 0, 0)
-        m_grid.setHorizontalSpacing(6)
-        m_grid.setVerticalSpacing(2)
+        m_grid.setHorizontalSpacing(2)
+        m_grid.setVerticalSpacing(1)
 
         self.btn_select_all = self._make_btn("Select all", "select_all", grp_manage)
         self.btn_select_all.clicked.connect(lambda: self.action_triggered.emit("select_all"))
@@ -3677,10 +3679,11 @@ class RibbonToolbar(QWidget):
         qf_filters_col = QVBoxLayout()
         qf_filters_col.setContentsMargins(0, 0, 0, 0)
         qf_filters_col.setSpacing(1)
+        qf_filters_col.setAlignment(Qt.AlignLeft)
 
         self.btn_qf_months = self._make_btn("Months", "months", grp_qfind)
         self.btn_qf_months.setFixedHeight(19)
-        self.btn_qf_months.setStyleSheet("font-size: 8pt; padding: 0 4px;")
+        self.btn_qf_months.setStyleSheet("font-size: 8pt; padding: 0 10px 0 3px;")
         months_menu = QMenu(self.btn_qf_months)
         months_menu.addAction("All dates", lambda: self.filter_month_selected.emit(0))
         months_menu.addSeparator()
@@ -3691,7 +3694,7 @@ class RibbonToolbar(QWidget):
 
         self.btn_qf_rated = self._make_btn("Rated", "rate", grp_qfind)
         self.btn_qf_rated.setFixedHeight(19)
-        self.btn_qf_rated.setStyleSheet("font-size: 8pt; padding: 0 4px;")
+        self.btn_qf_rated.setStyleSheet("font-size: 8pt; padding: 0 10px 0 3px;")
         rated_menu = QMenu(self.btn_qf_rated)
         rated_menu.addAction("All ratings", lambda: self.rating_filter_selected.emit(()))
         rated_menu.addSeparator()
@@ -3717,34 +3720,36 @@ class RibbonToolbar(QWidget):
         self.btn_qf_flagged.setCheckable(True)
         self.btn_qf_flagged.setCursor(Qt.PointingHandCursor)
         self.btn_qf_flagged.setStyleSheet(
-            """
-            QToolButton {
+            f"""
+            QToolButton {{
                 font-family: 'Segoe UI';
                 font-size: 8pt;
-                padding: 0 16px 0 4px;
+                padding: 0 10px 0 3px;
                 border: 1px solid transparent;
                 border-radius: 2px;
                 color: #1E395B;
                 background: transparent;
-            }
-            QToolButton:hover {
+            }}
+            QToolButton:hover {{
                 background: #E8F1FC;
                 border-color: #B8D6FB;
-            }
-            QToolButton:checked {
+            }}
+            QToolButton:checked {{
                 background: #CCE4F7;
                 border-color: #7BAEDB;
                 color: #C00000;
                 font-weight: bold;
-            }
-            QToolButton::menu-button {
+            }}
+            QToolButton::menu-button {{
                 border: none;
                 background: transparent;
-                width: 14px;
-            }
-            QToolButton::menu-button:hover {
-                background: rgba(0, 0, 0, 0.05);
-            }
+                width: 10px;
+            }}
+            QToolButton::menu-arrow {{
+                image: url("{ARROW_DROPDOWN_PATH}");
+                width: 5px;
+                height: 3px;
+            }}
             """
         )
         flagged_menu = QMenu(self.btn_qf_flagged)
@@ -3796,9 +3801,9 @@ class RibbonToolbar(QWidget):
         grp_qfind.content_layout.setContentsMargins(0, 0, 0, 0)
         grp_qfind.content_layout.setSpacing(0)
         grp_qfind.content_layout.addWidget(self.home_face_carousel)
-        grp_qfind.content_layout.addSpacing(6)
+        grp_qfind.content_layout.addSpacing(2)
         grp_qfind.content_layout.addLayout(qf_filters_col)
-        grp_qfind.content_layout.addSpacing(4)
+        grp_qfind.content_layout.addSpacing(2)
         grp_qfind.content_layout.addWidget(btn_text_search)
 
         hbox.addWidget(grp_qfind)
@@ -3848,7 +3853,7 @@ class RibbonToolbar(QWidget):
         self.col_grid_manage = QWidget(self.grp_edit_manage)
         cgm_vbox = QVBoxLayout(self.col_grid_manage)
         cgm_vbox.setContentsMargins(0, 0, 0, 0)
-        cgm_vbox.setSpacing(2)
+        cgm_vbox.setSpacing(1)
 
         self.btn_edit_select_all = self._make_btn("Select all", "select_all", self.col_grid_manage)
         self.btn_edit_select_all.setToolTip("Select all (Ctrl+A)")
@@ -3871,7 +3876,7 @@ class RibbonToolbar(QWidget):
         self.col_common_manage = QWidget(self.grp_edit_manage)
         ccm_vbox = QVBoxLayout(self.col_common_manage)
         ccm_vbox.setContentsMargins(0, 0, 0, 0)
-        ccm_vbox.setSpacing(2)
+        ccm_vbox.setSpacing(1)
 
         self.btn_edit_rot_l = self._make_btn("Rotate left", "rotate_ccw", self.col_common_manage)
         self.btn_edit_rot_l.setToolTip("Rotate left (Ctrl+,)")
@@ -3982,7 +3987,7 @@ class RibbonToolbar(QWidget):
         # 3-row stack of canvas repair tools: Red eye, Retouch, Straighten (WLPG style)
         self.stack_canvas_tools = QVBoxLayout()
         self.stack_canvas_tools.setContentsMargins(0, 0, 0, 0)
-        self.stack_canvas_tools.setSpacing(2)
+        self.stack_canvas_tools.setSpacing(1)
 
         self.btn_edit_red_eye = self._make_btn("Red eye", "red_eye", self.grp_edit_adjust, large=False)
         self.btn_edit_red_eye.setToolTip("Fix red eye")
@@ -4004,7 +4009,7 @@ class RibbonToolbar(QWidget):
         # Stack of 3 small buttons: Noise reduction, Color, Exposure
         stack_adj = QVBoxLayout()
         stack_adj.setContentsMargins(0, 0, 0, 0)
-        stack_adj.setSpacing(2)
+        stack_adj.setSpacing(1)
 
         self.btn_edit_noise = self._make_btn("Noise reduction", "noise_reduction", self.grp_edit_adjust)
         self.btn_edit_noise.setToolTip("Reduce digital sensor noise")
@@ -4980,6 +4985,7 @@ class RibbonToolbar(QWidget):
 
     def _apply_aero_stylesheet(self) -> None:
         icon_check = (Path(__file__).resolve().parents[2] / "assets" / "icons" / "check_dark.svg").as_posix()
+        arrow_drop_down = (Path(__file__).resolve().parents[2] / "assets" / "icons" / "arrow_dropdown_mini.svg").as_posix()
         self.setStyleSheet(
             """
             QTabWidget#RibbonTabs::pane {
@@ -4987,6 +4993,7 @@ class RibbonToolbar(QWidget):
                     stop:0 #F4F8FD, stop:0.55 #EBF2FA, stop:1 #DDE8F5);
                 border-top: 1px solid #9EB6CE;
                 border-bottom: 1px solid #A8BDD4;
+                top: -1px;
             }
             QTabWidget#RibbonTabs > QTabBar::tab {
                 background: transparent;
@@ -5006,7 +5013,9 @@ class RibbonToolbar(QWidget):
             }
             QTabWidget#RibbonTabs > QTabBar::tab:selected {
                 background: #F4F8FD;
-                border-color: #9EB6CE;
+                border: 1px solid #9EB6CE;
+                border-bottom: 1px solid #F4F8FD;
+                margin-bottom: -1px;
                 font-weight: 600;
             }
             QPushButton#CornerOptionsBtn {
@@ -5032,7 +5041,7 @@ class RibbonToolbar(QWidget):
                 background: transparent;
                 border: 1px solid transparent;
                 border-radius: 3px;
-                padding: 0px 2px 2px 2px;
+                padding: 0px 1px 1px 1px;
                 margin: 0px;
                 color: #1E395B;
                 font-family: 'Segoe UI';
@@ -5044,7 +5053,7 @@ class RibbonToolbar(QWidget):
                 background: transparent;
                 border: 1px solid transparent;
                 border-radius: 2px;
-                padding: 1px 6px;
+                padding: 1px 4px;
                 color: #1E395B;
                 font-family: 'Segoe UI';
                 font-size: 8.5pt;
@@ -5132,10 +5141,28 @@ class RibbonToolbar(QWidget):
                     stop:0 #FFFDF5, stop:1 #FCE7A2);
                 border: 1px solid #D9B152;
             }
-            QToolButton#LargeRibbonToolBtn::menu-indicator,
-            QToolButton#CompactRibbonToolBtn::menu-indicator {
-                image: none;
-                width: 0px;
+            QToolButton::menu-indicator,
+            QToolButton#CompactRibbonBtn::menu-indicator,
+            QToolButton#CompactRibbonToolBtn::menu-indicator,
+            QToolButton#LargeRibbonBtn::menu-indicator,
+            QToolButton#LargeRibbonToolBtn::menu-indicator {
+                image: url({arrow_drop_down});
+                width: 5px;
+                height: 3px;
+                subcontrol-position: center right;
+                subcontrol-origin: padding;
+                right: 2px;
+                top: 1px;
+            }
+            QToolButton::menu-button {
+                border: none;
+                background: transparent;
+                width: 10px;
+            }
+            QToolButton::menu-arrow {
+                image: url({arrow_drop_down});
+                width: 5px;
+                height: 3px;
             }
             QPushButton#RibbonModeToggleBtn {
                 background: transparent;
@@ -5238,5 +5265,5 @@ class RibbonToolbar(QWidget):
                 font-family: 'Segoe UI';
                 font-size: 8.5pt;
             }
-            """.replace("{icon_check}", icon_check)
+            """.replace("{icon_check}", icon_check).replace("{arrow_drop_down}", arrow_drop_down)
         )

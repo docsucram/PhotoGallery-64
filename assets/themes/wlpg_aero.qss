@@ -33,6 +33,7 @@ QTabBar::tab:selected {
     background-color: #F8FBFF;
     border: 1px solid #99BCE3;
     border-bottom: 1px solid #F8FBFF;
+    margin-bottom: -1px;
     border-top-left-radius: 3px;
     border-top-right-radius: 3px;
     font-weight: bold;
