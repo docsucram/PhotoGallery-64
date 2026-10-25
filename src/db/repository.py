@@ -2642,6 +2642,93 @@ class CatalogRepository:
             )
             conn.commit()
 
+    confirm_face_suggestion = confirm_faces
+
+    def update_face_rect(
+        self,
+        media_people_id: int,
+        rect: tuple[float, float, float, float],
+        thumb_repo: Any | None = None,
+    ) -> bool:
+        """
+        Updates the normalized bounding box (rect_x, rect_y, rect_w, rect_h) for a face,
+        regenerates the face thumbnail cache, and marks media dirty for metadata sync.
+        """
+        rx, ry, rw, rh = rect
+        with self.engine.write_lock:
+            conn = self.engine.catalog_conn()
+            row = conn.execute(
+                """
+                SELECT mp.media_id, mp.person_id, m.filename, f.path AS folder_path
+                FROM media_people mp
+                JOIN media m ON m.id = mp.media_id
+                JOIN folders f ON f.id = m.folder_id
+                WHERE mp.id = ?;
+                """,
+                (int(media_people_id),),
+            ).fetchone()
+            if not row:
+                return False
+            conn.execute(
+                """
+                UPDATE media_people
+                SET rect_x = ?, rect_y = ?, rect_w = ?, rect_h = ?, is_manual = 1
+                WHERE id = ?;
+                """,
+                (rx, ry, rw, rh, int(media_people_id)),
+            )
+            media_id = int(row["media_id"])
+            conn.execute("UPDATE media SET metadata_dirty = 1 WHERE id = ?;", (media_id,))
+            conn.commit()
+
+        # Regenerate face crop outside write lock
+        try:
+            full_path = os.path.join(str(row["folder_path"]), str(row["filename"]))
+            blob = self.extract_face_crop_blob(full_path, rect)
+            if blob and thumb_repo is not None:
+                thumb_repo.put_face_thumbnail(int(media_people_id), blob)
+        except Exception:
+            pass
+        return True
+
+    def set_person_display_picture_from_face(self, person_id: int, face_id: int) -> bool:
+        """Sets people.thumbnail_blob for person_id from a specific media_people face record."""
+        conn_read = self.engine.catalog_conn()
+        row = conn_read.execute(
+            """
+            SELECT m.id AS media_id, m.filename, f.path AS folder_path,
+                   mp.rect_x, mp.rect_y, mp.rect_w, mp.rect_h
+            FROM media_people mp
+            JOIN media m ON m.id = mp.media_id
+            JOIN folders f ON f.id = m.folder_id
+            WHERE mp.id = ?
+            LIMIT 1;
+            """,
+            (int(face_id),),
+        ).fetchone()
+        if not row:
+            return False
+        full_path = os.path.join(str(row["folder_path"]), str(row["filename"]))
+        rect = (
+            float(row["rect_x"] or 0.0),
+            float(row["rect_y"] or 0.0),
+            float(row["rect_w"] or 0.0),
+            float(row["rect_h"] or 0.0),
+        )
+        blob = self.extract_face_crop_blob(full_path, rect)
+        if not blob:
+            blob = self.get_face_thumbnail(int(face_id))
+        if not blob:
+            return False
+        with self.engine.write_lock:
+            conn = self.engine.catalog_conn()
+            conn.execute(
+                "UPDATE people SET thumbnail_blob = ? WHERE id = ?;",
+                (blob, int(person_id)),
+            )
+            conn.commit()
+        return True
+
     def reject_face_suggestion(
         self, media_people_id: int, rejected_person_id: int | None = None
     ) -> None:

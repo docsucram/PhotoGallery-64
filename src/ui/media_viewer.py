@@ -166,12 +166,15 @@ class _FaceHoverRegionItem(QGraphicsRectItem):
         viewer: "SingleMediaViewer",
         related_items: list[QGraphicsItem],
         person_id: int | None,
+        region_data: dict | None = None,
     ) -> None:
         super().__init__(rect)
         self.viewer = viewer
         self.related_items = related_items
         self.person_id = person_id
+        self.region_data = region_data or {}
         self.setAcceptHoverEvents(True)
+        self.setAcceptedMouseButtons(Qt.LeftButton | Qt.RightButton)
         self.setPen(QPen(Qt.NoPen))
         self.setBrush(QBrush(QColor(0, 0, 0, 1)))
         self.setZValue(3)
@@ -188,6 +191,93 @@ class _FaceHoverRegionItem(QGraphicsRectItem):
             for it in self.related_items:
                 it.setVisible(False)
         super().hoverLeaveEvent(event)
+
+    def contextMenuEvent(self, event) -> None:
+        if hasattr(self.viewer, "is_in_edit_mode") and self.viewer.is_in_edit_mode():
+            event.ignore()
+            return
+        event.accept()
+        self.viewer.show_face_region_context_menu(
+            event.screenPos(), self.region_data, self.person_id
+        )
+
+
+class _FaceAdjustToolbar(QFrame):
+    """Floating Aero action pill shown when interactively adjusting a face bounding box."""
+
+    saved = Signal()
+    cancelled = Signal()
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("FaceAdjustToolbar")
+        self.setStyleSheet(
+            """
+            QFrame#FaceAdjustToolbar {
+                background: rgba(255, 255, 255, 0.95);
+                border: 1px solid #84ACDD;
+                border-radius: 4px;
+            }
+            QLabel {
+                font-family: 'Segoe UI';
+                font-size: 8.5pt;
+                color: #1E395B;
+                font-weight: 600;
+            }
+            QPushButton#AdjustSaveBtn {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #2A79D6, stop:1 #1B58B0);
+                color: #FFFFFF;
+                border: 1px solid #14448C;
+                border-radius: 3px;
+                font-family: 'Segoe UI';
+                font-size: 8.5pt;
+                font-weight: bold;
+                padding: 2px 10px;
+                min-height: 22px;
+            }
+            QPushButton#AdjustSaveBtn:hover {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #3D8CE8, stop:1 #2264C4);
+            }
+            QPushButton#AdjustCancelBtn {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #FDFDFD, stop:1 #EAEAEA);
+                color: #222222;
+                border: 1px solid #ACACAC;
+                border-radius: 3px;
+                font-family: 'Segoe UI';
+                font-size: 8.5pt;
+                padding: 2px 8px;
+                min-height: 22px;
+            }
+            QPushButton#AdjustCancelBtn:hover {
+                background: #E0E8F5;
+                border-color: #7DA2CE;
+            }
+            """
+        )
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(8, 4, 8, 4)
+        layout.setSpacing(6)
+
+        lbl = QLabel("Adjust face box:", self)
+        layout.addWidget(lbl)
+
+        btn_save = QPushButton("✓ Done", self)
+        btn_save.setObjectName("AdjustSaveBtn")
+        btn_save.setCursor(Qt.PointingHandCursor)
+        btn_save.setToolTip("Save new bounding box (Enter)")
+        btn_save.clicked.connect(self.saved.emit)
+        layout.addWidget(btn_save)
+
+        btn_cancel = QPushButton("✕ Cancel", self)
+        btn_cancel.setObjectName("AdjustCancelBtn")
+        btn_cancel.setCursor(Qt.PointingHandCursor)
+        btn_cancel.setToolTip("Cancel adjustment (Esc)")
+        btn_cancel.clicked.connect(self.cancelled.emit)
+        layout.addWidget(btn_cancel)
+        self.adjustSize()
 
 
 class _FaceTagTargetBoxItem(QGraphicsItem):
@@ -738,14 +828,21 @@ class SingleMediaViewer(QWidget):
         self.scene.setBackgroundBrush(QBrush(QColor("#FFFFFF")))
         self.graphics_view.zoomChanged.connect(self.zoom_percent_changed.emit)
         self.graphics_view.zoomChanged.connect(lambda _: self._position_tag_someone_popup())
+        self.graphics_view.zoomChanged.connect(lambda _: self._position_adjust_toolbar())
         self.graphics_view.zoomModeSetToCustom.connect(self._on_custom_zoom_set)
         if self.graphics_view.horizontalScrollBar():
             self.graphics_view.horizontalScrollBar().valueChanged.connect(
                 lambda _: self._position_tag_someone_popup()
             )
+            self.graphics_view.horizontalScrollBar().valueChanged.connect(
+                lambda _: self._position_adjust_toolbar()
+            )
         if self.graphics_view.verticalScrollBar():
             self.graphics_view.verticalScrollBar().valueChanged.connect(
                 lambda _: self._position_tag_someone_popup()
+            )
+            self.graphics_view.verticalScrollBar().valueChanged.connect(
+                lambda _: self._position_adjust_toolbar()
             )
         self.media_stack.addWidget(self.graphics_view)
 
@@ -1111,6 +1208,15 @@ class SingleMediaViewer(QWidget):
         self._tag_someone_popup.cancelled.connect(self.stop_face_tagging_mode)
         self._tag_someone_popup.hide()
 
+        # 5. Floating Face Adjust Toolbar
+        self.is_face_adjust_mode: bool = False
+        self._adjusting_face_info: dict = {}
+        self._face_adjust_box_item: _FaceTagTargetBoxItem | None = None
+        self._adjust_toolbar = _FaceAdjustToolbar(self.graphics_view)
+        self._adjust_toolbar.saved.connect(self.save_face_adjust)
+        self._adjust_toolbar.cancelled.connect(self.stop_face_adjust_mode)
+        self._adjust_toolbar.hide()
+
     def _position_floating_toolbars(self) -> None:
         gw = self.graphics_view.width()
         for tb in (self.crop_toolbar, self.retouch_toolbar, self.red_eye_toolbar):
@@ -1118,6 +1224,7 @@ class SingleMediaViewer(QWidget):
                 sh = tb.sizeHint()
                 tb.setGeometry(max(10, (gw - sh.width()) // 2), 12, sh.width(), sh.height())
         self._position_tag_someone_popup()
+        self._position_adjust_toolbar()
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
@@ -2161,7 +2268,7 @@ class SingleMediaViewer(QWidget):
 
             sensor_rect = QRectF(rect_scene)
             sensor_rect.adjust(-4, -4, 4, 30 if name_str else 4)
-            sensor = _FaceHoverRegionItem(sensor_rect, self, related, pid)
+            sensor = _FaceHoverRegionItem(sensor_rect, self, related, pid, region_data=reg)
             sensor.setData(0, pid)
             self.scene.addItem(sensor)
             self._face_overlay_items.append(sensor)
@@ -2298,6 +2405,8 @@ class SingleMediaViewer(QWidget):
             self._face_target_item = None
         if hasattr(self, "_tag_someone_popup") and self._tag_someone_popup is not None:
             self._tag_someone_popup.hide()
+        if getattr(self, "is_face_adjust_mode", False):
+            self.stop_face_adjust_mode()
 
     def _position_tag_someone_popup(self) -> None:
         if not getattr(self, "is_face_tag_mode", False):
@@ -2370,6 +2479,273 @@ class SingleMediaViewer(QWidget):
 
         self.face_region_tagged.emit(int(self.current_media_id), person_name, rx, ry, rw, rh)
         return True
+
+    def show_face_region_context_menu(
+        self, screen_pos: QPoint, region_data: dict, person_id: int | None
+    ) -> QMenu:
+        """Context menu when right-clicking a face region in Single Image View."""
+        menu = QMenu(self)
+        menu.setFont(QFont("Segoe UI", 9))
+
+        mw = getattr(self, "main_window", None) or self.window()
+        face_id = region_data.get("face_id") or region_data.get("id") or 0
+        if not face_id and self.current_media_id is not None and person_id is not None:
+            if hasattr(mw, "catalog_repo"):
+                row = mw.catalog_repo.engine.catalog_conn().execute(
+                    "SELECT id FROM media_people WHERE media_id = ? AND (person_id = ? OR suggested_person_id = ?) LIMIT 1;",
+                    (int(self.current_media_id), int(person_id), int(person_id)),
+                ).fetchone()
+                if row:
+                    face_id = int(row["id"])
+
+        is_unconfirmed = bool(region_data.get("is_unconfirmed"))
+        person_name = str(region_data.get("name") or "").strip()
+
+        # 1. Confirm (if unconfirmed suggestion)
+        if is_unconfirmed and face_id and person_id:
+            act_confirm = menu.addAction(f"Confirm '{person_name}'")
+            bold = QFont(act_confirm.font())
+            bold.setBold(True)
+            act_confirm.setFont(bold)
+            act_confirm.triggered.connect(
+                lambda: mw._on_dock_person_confirm_requested(int(person_id), int(face_id))
+            )
+
+        # 2. Adjust bounding box
+        act_adjust = menu.addAction("Adjust bounding box")
+        act_adjust.triggered.connect(
+            lambda: self.start_face_adjust_mode(region_data, face_id, person_id)
+        )
+
+        menu.addSeparator()
+
+        # 3. Tag as someone else...
+        act_retag = menu.addAction("Tag as someone else...")
+        act_retag.triggered.connect(
+            lambda: self._on_face_region_tag_as_someone_else(region_data, person_id)
+        )
+
+        # 4. Not this person (Remove tag)
+        if person_id:
+            act_not_person = menu.addAction("Not this person")
+            act_not_person.triggered.connect(
+                lambda: self._on_face_region_not_this_person(region_data, person_id, face_id)
+            )
+
+        # 5. Not a face (Delete region)
+        act_not_face = menu.addAction("Not a face")
+        act_not_face.triggered.connect(
+            lambda: self._on_face_region_not_a_face(region_data, person_id, face_id)
+        )
+
+        # 6. Set as display picture
+        if person_id:
+            act_display_pic = menu.addAction("Set as display picture")
+            act_display_pic.triggered.connect(
+                lambda: self._on_face_region_set_display_pic(person_id, face_id)
+            )
+
+        if not getattr(self, "_suppress_menu_exec", False):
+            menu.exec(screen_pos)
+        return menu
+
+    def start_face_adjust_mode(
+        self,
+        region_data: dict,
+        face_id: int | None = None,
+        person_id: int | None = None,
+    ) -> bool:
+        """Enters interactive bounding box adjustment mode for a face region."""
+        if self.current_is_video or self.current_pil_image is None or self.current_media_id is None:
+            return False
+
+        if self.is_crop_mode:
+            self.set_crop_mode(False)
+        if self.is_retouch_mode:
+            self.set_retouch_mode(False)
+        if self.is_red_eye_mode:
+            self.set_red_eye_mode(False)
+        if self.is_face_tag_mode:
+            self.stop_face_tagging_mode()
+
+        self.stop_face_adjust_mode()
+        self.is_face_adjust_mode = True
+        self._adjusting_face_info = {
+            "region": dict(region_data),
+            "face_id": face_id,
+            "person_id": person_id,
+        }
+
+        # Hide static face overlays while adjusting
+        for it in self._face_overlay_items:
+            it.setVisible(False)
+
+        w, h = self.current_pil_image.size
+        img_rect = QRectF(0, 0, w, h)
+        rx = float(region_data.get("rect_x") or 0.0)
+        ry = float(region_data.get("rect_y") or 0.0)
+        rw = float(region_data.get("rect_w") or 0.2)
+        rh = float(region_data.get("rect_h") or 0.2)
+        target_scene_rect = QRectF(rx * w, ry * h, max(24.0, rw * w), max(24.0, rh * h))
+
+        self._face_adjust_box_item = _FaceTagTargetBoxItem(
+            target_scene_rect,
+            img_rect,
+            on_changed=self._position_adjust_toolbar,
+        )
+        self.scene.addItem(self._face_adjust_box_item)
+
+        self._adjust_toolbar.show()
+        self._adjust_toolbar.raise_()
+        self._position_adjust_toolbar()
+        return True
+
+    def stop_face_adjust_mode(self) -> None:
+        """Exits bounding box adjustment mode and restores face overlays."""
+        self.is_face_adjust_mode = False
+        self._adjusting_face_info = {}
+        if hasattr(self, "_adjust_toolbar") and self._adjust_toolbar is not None:
+            self._adjust_toolbar.hide()
+        if hasattr(self, "_face_adjust_box_item") and self._face_adjust_box_item is not None:
+            if self._face_adjust_box_item.scene() is self.scene:
+                self.scene.removeItem(self._face_adjust_box_item)
+            self._face_adjust_box_item = None
+        for it in self._face_overlay_items:
+            it.setVisible(False)
+
+    def save_face_adjust(self) -> None:
+        """Saves updated bounding box to catalog.db, updates face thumbnail, and re-renders."""
+        if not getattr(self, "is_face_adjust_mode", False) or self._face_adjust_box_item is None:
+            return
+        if self.current_pil_image is None or self.current_media_id is None:
+            self.stop_face_adjust_mode()
+            return
+        w, h = self.current_pil_image.size
+        r = self._face_adjust_box_item.rect()
+        norm_rect = (
+            max(0.0, min(1.0, r.x() / w)),
+            max(0.0, min(1.0, r.y() / h)),
+            max(0.01, min(1.0, r.width() / w)),
+            max(0.01, min(1.0, r.height() / h)),
+        )
+        face_info = getattr(self, "_adjusting_face_info", {})
+        face_id = face_info.get("face_id") or 0
+        person_id = face_info.get("person_id")
+        mw = getattr(self, "main_window", None) or self.window()
+        if hasattr(mw, "catalog_repo"):
+            if not face_id and person_id:
+                row = mw.catalog_repo.engine.catalog_conn().execute(
+                    "SELECT id FROM media_people WHERE media_id = ? AND (person_id = ? OR suggested_person_id = ?) LIMIT 1;",
+                    (int(self.current_media_id), int(person_id), int(person_id)),
+                ).fetchone()
+                if row:
+                    face_id = int(row["id"])
+            if face_id > 0:
+                thumb_repo = getattr(mw, "thumb_repo", None)
+                mw.catalog_repo.update_face_rect(face_id, norm_rect, thumb_repo=thumb_repo)
+                mw.lbl_sync_status.setText("✓ Face bounding box updated")
+            mw.refresh_navigation_and_autocomplete()
+        self.stop_face_adjust_mode()
+        if hasattr(mw, "catalog_repo"):
+            detail = mw.catalog_repo.get_media_detail(int(self.current_media_id))
+            self.render_face_regions(detail.get("people", []))
+
+    def _position_adjust_toolbar(self) -> None:
+        if not getattr(self, "is_face_adjust_mode", False):
+            return
+        if (
+            self._face_adjust_box_item is None
+            or not hasattr(self, "_adjust_toolbar")
+            or not self._adjust_toolbar.isVisible()
+        ):
+            return
+        r = self._face_adjust_box_item.rect()
+        bottom_center_vp = self.graphics_view.mapFromScene(QPointF(r.center().x(), r.bottom()))
+        tw = self._adjust_toolbar.width()
+        th = self._adjust_toolbar.height()
+        gw = self.graphics_view.width()
+        gh = self.graphics_view.height()
+
+        px = int(bottom_center_vp.x() - tw / 2)
+        px = max(8, min(gw - tw - 8, px))
+        py = int(bottom_center_vp.y() + 8)
+        if py + th > gh - 8:
+            top_center_vp = self.graphics_view.mapFromScene(QPointF(r.center().x(), r.top()))
+            py = max(8, int(top_center_vp.y() - th - 8))
+        self._adjust_toolbar.move(px, py)
+
+    def _on_face_region_tag_as_someone_else(self, region_data: dict, person_id: int | None) -> None:
+        mw = getattr(self, "main_window", None) or self.window()
+        if not hasattr(mw, "catalog_repo") or self.current_media_id is None:
+            return
+        people_rows = mw.catalog_repo.get_people_list()
+        new_name, new_pid = TagSomeoneDialog.prompt(people_rows, self, title="Tag someone")
+        if not new_name or not new_name.strip():
+            return
+        new_name_clean = new_name.strip()
+        if new_pid is None or new_pid < 0:
+            new_pid = mw.catalog_repo.upsert_person(new_name_clean)
+        rx = float(region_data.get("rect_x") or 0.0)
+        ry = float(region_data.get("rect_y") or 0.0)
+        rw = float(region_data.get("rect_w") or 0.0)
+        rh = float(region_data.get("rect_h") or 0.0)
+        rect = (rx, ry, rw, rh) if rw > 0 and rh > 0 else None
+        if person_id:
+            mw.catalog_repo.remove_person_tag(int(self.current_media_id), int(person_id))
+        mw.catalog_repo.assign_person(int(self.current_media_id), new_name_clean, rect)
+        mw.refresh_navigation_and_autocomplete()
+        detail = mw.catalog_repo.get_media_detail(int(self.current_media_id))
+        self.render_face_regions(detail.get("people", []))
+        summary = mw.catalog_repo.get_selection_summary([int(self.current_media_id)])
+        mw.right_tag_dock.bind_selection([int(self.current_media_id)], summary)
+        mw.lbl_sync_status.setText(f"✓ Retagged face to '{new_name_clean}'")
+
+    def _on_face_region_not_this_person(self, region_data: dict, person_id: int, face_id: int) -> None:
+        mw = getattr(self, "main_window", None) or self.window()
+        if not hasattr(mw, "catalog_repo") or self.current_media_id is None:
+            return
+        if face_id > 0:
+            mw.catalog_repo.add_face_rejection(face_id, person_id)
+        mw.catalog_repo.remove_person_tag(int(self.current_media_id), person_id)
+        mw.refresh_navigation_and_autocomplete()
+        detail = mw.catalog_repo.get_media_detail(int(self.current_media_id))
+        self.render_face_regions(detail.get("people", []))
+        summary = mw.catalog_repo.get_selection_summary([int(self.current_media_id)])
+        mw.right_tag_dock.bind_selection([int(self.current_media_id)], summary)
+        mw.lbl_sync_status.setText("✓ Removed person tag")
+
+    def _on_face_region_not_a_face(self, region_data: dict, person_id: int | None, face_id: int) -> None:
+        mw = getattr(self, "main_window", None) or self.window()
+        if not hasattr(mw, "catalog_repo") or self.current_media_id is None:
+            return
+        if face_id > 0:
+            mw.catalog_repo.mark_not_a_face(face_id)
+            if person_id:
+                with mw.catalog_repo.engine.write_lock:
+                    conn = mw.catalog_repo.engine.catalog_conn()
+                    conn.execute(
+                        """
+                        UPDATE people
+                        SET confirmed_count = (
+                            SELECT COUNT(*) FROM media_people WHERE person_id = people.id AND state = 1
+                        )
+                        WHERE id = ?;
+                        """,
+                        (person_id,),
+                    )
+                    conn.commit()
+        mw.refresh_navigation_and_autocomplete()
+        detail = mw.catalog_repo.get_media_detail(int(self.current_media_id))
+        self.render_face_regions(detail.get("people", []))
+        summary = mw.catalog_repo.get_selection_summary([int(self.current_media_id)])
+        mw.right_tag_dock.bind_selection([int(self.current_media_id)], summary)
+        mw.lbl_sync_status.setText("✓ Marked region as 'Not a face'")
+
+    def _on_face_region_set_display_pic(self, person_id: int, face_id: int) -> None:
+        mw = getattr(self, "main_window", None) or self.window()
+        if not hasattr(mw, "catalog_repo") or self.current_media_id is None:
+            return
+        mw._on_face_crop_set_display_pic(int(self.current_media_id), int(person_id), face_id=face_id)
 
     # -------------------------------------------------------------------------
     # Video Playback Controls & Keyboard Shortcuts
@@ -2571,6 +2947,16 @@ class SingleMediaViewer(QWidget):
                     return True
                 else:
                     self.closed.emit()
+                    event.accept()
+                    return True
+
+            if getattr(self, "is_face_adjust_mode", False):
+                if event.key() in (Qt.Key_Return, Qt.Key_Enter):
+                    self.save_face_adjust()
+                    event.accept()
+                    return True
+                elif event.key() == Qt.Key_Escape:
+                    self.stop_face_adjust_mode()
                     event.accept()
                     return True
 

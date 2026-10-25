@@ -1432,10 +1432,81 @@ class ThumbnailGridView(QListView):
         else:
             self._show_background_context_menu(event.globalPos())
 
+    def _show_face_crop_context_menu(
+        self, global_pos: QPoint, media_id: int, person_id: int
+    ) -> QMenu:
+        """Dedicated context menu for Face Crops in Person Timeline."""
+        menu = QMenu(self)
+        menu.setFont(QFont("Segoe UI", 9))
+
+        main_win = self.window()
+        is_mw = hasattr(main_win, "catalog_repo")
+
+        selected_ids = self.selected_media_ids()
+        if media_id not in selected_ids:
+            selected_ids = [media_id]
+        count = len(selected_ids)
+
+        # 1. Set as display picture (single item only)
+        act_display_pic = menu.addAction("Set as display picture")
+        if count > 1:
+            act_display_pic.setEnabled(False)
+        else:
+            if is_mw and hasattr(main_win, "_on_face_crop_set_display_pic"):
+                act_display_pic.triggered.connect(
+                    lambda: main_win._on_face_crop_set_display_pic(media_id, person_id)
+                )
+
+        menu.addSeparator()
+
+        # 2. Not this person (Remove tag)
+        label_not_person = "Not this person" if count == 1 else f"Not this person ({count} faces)"
+        act_not_person = menu.addAction(label_not_person)
+        if is_mw and hasattr(main_win, "_on_face_crop_not_this_person"):
+            act_not_person.triggered.connect(
+                lambda: main_win._on_face_crop_not_this_person(selected_ids, person_id)
+            )
+
+        # 3. Not a face (Delete region)
+        label_not_face = "Not a face" if count == 1 else f"Not a face ({count} faces)"
+        act_not_face = menu.addAction(label_not_face)
+        if is_mw and hasattr(main_win, "_on_face_crop_not_a_face"):
+            act_not_face.triggered.connect(
+                lambda: main_win._on_face_crop_not_a_face(selected_ids, person_id)
+            )
+
+        # 4. Tag as somebody else...
+        label_retag = "Tag as someone else..." if count == 1 else f"Tag as someone else... ({count} faces)"
+        act_retag = menu.addAction(label_retag)
+        if is_mw and hasattr(main_win, "_on_face_crop_tag_as_someone_else"):
+            act_retag.triggered.connect(
+                lambda: main_win._on_face_crop_tag_as_someone_else(selected_ids, person_id)
+            )
+
+        menu.addSeparator()
+
+        # 5. View full photo
+        act_view = menu.addAction("View full photo")
+        if hasattr(main_win, "open_single_viewer"):
+            act_view.triggered.connect(lambda: main_win.open_single_viewer(media_id))
+
+        # 6. Open file location
+        act_loc = menu.addAction("Open file location")
+        if hasattr(main_win, "open_file_location_for_media"):
+            act_loc.triggered.connect(lambda: main_win.open_file_location_for_media(media_id))
+
+        if not getattr(self, "_suppress_menu_exec", False):
+            menu.exec(global_pos)
+        return menu
+
     def _show_card_context_menu(
         self, global_pos: QPoint, media_id: int, is_video: bool = False
     ) -> QMenu:
-        """Authentic WLPG Media Card context menu (Photo vs Video)."""
+        """Authentic WLPG Media Card context menu (Photo vs Video vs Face Crop)."""
+        if getattr(self.card_delegate, "face_crop_person_id", None) is not None:
+            return self._show_face_crop_context_menu(
+                global_pos, media_id, int(self.card_delegate.face_crop_person_id)
+            )
         if not is_video and self.catalog_model is not None:
             for rec in getattr(self.catalog_model, "_records", []):
                 if rec.id == media_id and getattr(rec, "is_video", 0):

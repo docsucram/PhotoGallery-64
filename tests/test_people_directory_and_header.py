@@ -10,9 +10,10 @@ Verification suite for Immich / Google Photos inspired People Navigation:
 
 import struct
 from pathlib import Path
+from PIL import Image
 import numpy as np
 import pytest
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QPoint
 from PySide6.QtWidgets import QApplication
 
 from src.core.face_matcher import serialize_embedding, normalize_vector
@@ -454,5 +455,192 @@ def test_people_directory_card_dimensions_and_square_crops(qapp, db_engine):
     assert len(crop_webp) > 0
     pil_crop = Image.open(io.BytesIO(crop_webp))
     assert pil_crop.size == (128, 128)
+
+
+def test_dock_person_confirm_and_reject_suggestion(db_engine):
+    """Verifies confirming and rejecting suggestions from Tag & Caption dock and repo alias."""
+    cat_repo = CatalogRepository(db_engine)
+    m_id = _create_test_media(cat_repo, "dock_test.jpg")
+    pid = cat_repo.upsert_person("Marcus Robinson")
+
+    # Insert an unconfirmed suggestion (state = 0, suggested_person_id = pid)
+    with db_engine.write_lock:
+        conn = db_engine.catalog_conn()
+        cur = conn.execute(
+            """
+            INSERT INTO media_people (media_id, state, suggested_person_id, similarity_score, rect_x, rect_y, rect_w, rect_h)
+            VALUES (?, 0, ?, 0.85, 0.1, 0.1, 0.3, 0.3);
+            """,
+            (m_id, pid),
+        )
+        face_id = cur.lastrowid
+        conn.commit()
+
+    # 1. Test confirmation via alias confirm_face_suggestion
+    cat_repo.confirm_face_suggestion(face_id, pid)
+
+    row = db_engine.catalog_conn().execute(
+        "SELECT state, person_id, suggested_person_id FROM media_people WHERE id = ?;",
+        (face_id,),
+    ).fetchone()
+    assert row["state"] == 1
+    assert row["person_id"] == pid
+    assert row["suggested_person_id"] is None
+
+    p_row = db_engine.catalog_conn().execute(
+        "SELECT confirmed_count FROM people WHERE id = ?;", (pid,)
+    ).fetchone()
+    assert p_row["confirmed_count"] == 1
+
+    # 2. Test rejection
+    with db_engine.write_lock:
+        conn = db_engine.catalog_conn()
+        cur = conn.execute(
+            """
+            INSERT INTO media_people (media_id, state, suggested_person_id, similarity_score, rect_x, rect_y, rect_w, rect_h)
+            VALUES (?, 0, ?, 0.72, 0.5, 0.5, 0.2, 0.2);
+            """,
+            (m_id, pid),
+        )
+        face_id2 = cur.lastrowid
+        conn.commit()
+
+    cat_repo.reject_face_suggestion(face_id2, pid)
+    rejections = cat_repo.get_face_rejections()
+    assert face_id2 in rejections
+    assert pid in rejections[face_id2]
+
+
+def test_update_face_rect_and_display_picture(tmp_path: Path, db_engine):
+    """Verifies update_face_rect and set_person_display_picture_from_face."""
+    cat_repo = CatalogRepository(db_engine)
+    thm_repo = ThumbnailRepository(db_engine)
+
+    img_dir = tmp_path / "photos"
+    img_dir.mkdir(parents=True, exist_ok=True)
+    img_path = img_dir / "portrait.jpg"
+    img = Image.new("RGB", (400, 400), color=(120, 150, 180))
+    img.save(img_path)
+
+    fid = cat_repo.upsert_folder(str(img_dir), "photos", None, 1700000000)
+    items = [
+        {
+            "folder_id": fid,
+            "filename": "portrait.jpg",
+            "ext": "jpg",
+            "size": 1000,
+            "mtime": 1700000000,
+            "date_taken": 1700000000,
+            "rating": 0,
+            "flag": 0,
+        }
+    ]
+    m_id = cat_repo.bulk_upsert_media(items)[0]
+    pid = cat_repo.upsert_person("Alice")
+
+    with db_engine.write_lock:
+        conn = db_engine.catalog_conn()
+        cur = conn.execute(
+            """
+            INSERT INTO media_people (media_id, person_id, state, is_manual, rect_x, rect_y, rect_w, rect_h)
+            VALUES (?, ?, 1, 1, 0.1, 0.1, 0.2, 0.2);
+            """,
+            (m_id, pid),
+        )
+        face_id = cur.lastrowid
+        conn.commit()
+
+    # Update face rect
+    new_rect = (0.25, 0.25, 0.45, 0.45)
+    ok = cat_repo.update_face_rect(face_id, new_rect, thumb_repo=thm_repo)
+    assert ok is True
+
+    row = db_engine.catalog_conn().execute(
+        "SELECT rect_x, rect_y, rect_w, rect_h FROM media_people WHERE id = ?;", (face_id,)
+    ).fetchone()
+    assert abs(row["rect_x"] - 0.25) < 1e-4
+    assert abs(row["rect_w"] - 0.45) < 1e-4
+
+    # Set as display picture from face
+    ok_dp = cat_repo.set_person_display_picture_from_face(pid, face_id)
+    assert ok_dp is True
+
+    p_row = db_engine.catalog_conn().execute(
+        "SELECT thumbnail_blob FROM people WHERE id = ?;", (pid,)
+    ).fetchone()
+    assert p_row["thumbnail_blob"] is not None
+    assert len(p_row["thumbnail_blob"]) > 0
+
+
+def test_face_crop_context_menu_items(qapp):
+    """Verifies the Face Crop context menu presents all required face actions."""
+    from PySide6.QtCore import QPoint
+    from src.ui.grid_view import ThumbnailGridView, MediaCardDelegate
+
+    grid = ThumbnailGridView()
+    delegate = MediaCardDelegate(grid)
+    grid.setItemDelegate(delegate)
+    grid.card_delegate = delegate
+    grid.card_delegate.set_face_crop_person_id(42)
+    grid._suppress_menu_exec = True
+
+    # Invoke face crop menu
+    menu = grid._show_face_crop_context_menu(QPoint(10, 10), media_id=1, person_id=42)
+    action_texts = [a.text() for a in menu.actions() if a.text()]
+
+    assert "Set as display picture" in action_texts
+    assert any("Not this person" in t for t in action_texts)
+    assert any("Not a face" in t for t in action_texts)
+    assert any("Tag as someone else..." in t for t in action_texts)
+    assert "View full photo" in action_texts
+    assert "Open file location" in action_texts
+
+
+def test_single_viewer_face_adjust_mode(qapp):
+    """Verifies SingleMediaViewer entering and exiting face bounding box adjustment mode."""
+    from src.ui.media_viewer import SingleMediaViewer
+
+    viewer = SingleMediaViewer()
+    viewer.show()
+
+    # Create dummy image
+    test_img = Image.new("RGB", (600, 600), color=(200, 200, 200))
+    viewer.current_pil_image = test_img
+    viewer.current_media_id = 99
+    viewer.current_is_video = False
+
+    region_data = {
+        "face_id": 5,
+        "person_id": 10,
+        "name": "Marcus",
+        "rect_x": 0.2,
+        "rect_y": 0.2,
+        "rect_w": 0.3,
+        "rect_h": 0.3,
+    }
+
+    # Test context menu creation
+    viewer._suppress_menu_exec = True
+    menu = viewer.show_face_region_context_menu(QPoint(50, 50), region_data, 10)
+    action_texts = [a.text() for a in menu.actions() if a.text()]
+    assert "Adjust bounding box" in action_texts
+    assert "Tag as someone else..." in action_texts
+    assert "Not this person" in action_texts
+    assert "Not a face" in action_texts
+    assert "Set as display picture" in action_texts
+
+    # Start adjust mode
+    started = viewer.start_face_adjust_mode(region_data, face_id=5, person_id=10)
+    assert started is True
+    assert viewer.is_face_adjust_mode is True
+    assert viewer._face_adjust_box_item is not None
+    assert not viewer._adjust_toolbar.isHidden()
+
+    # Stop adjust mode
+    viewer.stop_face_adjust_mode()
+    assert viewer.is_face_adjust_mode is False
+    assert viewer._face_adjust_box_item is None
+    assert viewer._adjust_toolbar.isHidden()
+
 
 

@@ -2322,15 +2322,27 @@ class PhotoGalleryMainWindow(QMainWindow):
             self.start_face_detection()
 
     def _on_dock_person_confirm_requested(self, person_id: int, face_id: int) -> None:
-        if face_id > 0 and person_id > 0:
-            self.catalog_repo.confirm_face_suggestion(face_id, person_id)
-        self.refresh_navigation_and_autocomplete()
         target_ids = (
             [self.media_viewer.current_media_id]
             if self.central_stack.currentWidget() == self.media_viewer
             and self.media_viewer.current_media_id is not None
             else list(self._selected_ids)
         )
+        if face_id <= 0 and target_ids and person_id > 0:
+            placeholders = ",".join("?" for _ in target_ids)
+            row = self.catalog_repo.engine.catalog_conn().execute(
+                f"""
+                SELECT id FROM media_people
+                WHERE media_id IN ({placeholders}) AND (person_id = ? OR suggested_person_id = ?) AND state = 0
+                LIMIT 1;
+                """,
+                [*target_ids, person_id, person_id],
+            ).fetchone()
+            if row:
+                face_id = int(row["id"])
+        if face_id > 0 and person_id > 0:
+            self.catalog_repo.confirm_faces(face_id, person_id)
+        self.refresh_navigation_and_autocomplete()
         if target_ids:
             summary = self.catalog_repo.get_selection_summary(target_ids)
             self.right_tag_dock.bind_selection(target_ids, summary)
@@ -2340,19 +2352,35 @@ class PhotoGalleryMainWindow(QMainWindow):
         ):
             detail = self.catalog_repo.get_media_detail(self.media_viewer.current_media_id)
             self.media_viewer.render_face_regions(detail.get("people", []))
+        if hasattr(self, "person_header_bar") and self.person_header_bar.isVisible():
+            if getattr(self.person_header_bar, "current_person_id", None) == person_id:
+                self.person_header_bar.load_person(person_id)
+        self.grid_view.viewport().update()
         self.lbl_sync_status.setText("✓ Confirmed face suggestion")
         if getattr(self, "find_people_enabled", True):
             self.start_face_detection()
 
     def _on_dock_person_reject_suggestion_requested(self, person_id: int, face_id: int) -> None:
-        if face_id > 0:
-            self.catalog_repo.reject_face_suggestion(face_id, person_id if person_id > 0 else None)
         target_ids = (
             [self.media_viewer.current_media_id]
             if self.central_stack.currentWidget() == self.media_viewer
             and self.media_viewer.current_media_id is not None
             else list(self._selected_ids)
         )
+        if face_id <= 0 and target_ids and person_id > 0:
+            placeholders = ",".join("?" for _ in target_ids)
+            row = self.catalog_repo.engine.catalog_conn().execute(
+                f"""
+                SELECT id FROM media_people
+                WHERE media_id IN ({placeholders}) AND (person_id = ? OR suggested_person_id = ?) AND state = 0
+                LIMIT 1;
+                """,
+                [*target_ids, person_id, person_id],
+            ).fetchone()
+            if row:
+                face_id = int(row["id"])
+        if face_id > 0:
+            self.catalog_repo.reject_face_suggestion(face_id, person_id if person_id > 0 else None)
         if target_ids:
             summary = self.catalog_repo.get_selection_summary(target_ids)
             self.right_tag_dock.bind_selection(target_ids, summary)
@@ -2362,7 +2390,150 @@ class PhotoGalleryMainWindow(QMainWindow):
         ):
             detail = self.catalog_repo.get_media_detail(self.media_viewer.current_media_id)
             self.media_viewer.render_face_regions(detail.get("people", []))
+        if hasattr(self, "person_header_bar") and self.person_header_bar.isVisible():
+            if getattr(self.person_header_bar, "current_person_id", None) == person_id:
+                self.person_header_bar.load_person(person_id)
+        self.grid_view.viewport().update()
         self.lbl_sync_status.setText("Face suggestion dismissed")
+
+    def _on_face_crop_set_display_pic(
+        self, media_id: int, person_id: int, face_id: int | None = None
+    ) -> None:
+        """Sets cover face / display picture for person_id."""
+        if face_id is not None and face_id > 0:
+            ok = self.catalog_repo.set_person_display_picture_from_face(person_id, face_id)
+        else:
+            ok = self.catalog_repo.set_person_display_picture(person_id, media_id)
+        if ok:
+            if hasattr(self, "person_header_bar") and self.person_header_bar.isVisible():
+                if getattr(self.person_header_bar, "current_person_id", None) == person_id:
+                    self.person_header_bar.load_person(person_id)
+            self.refresh_navigation_and_autocomplete()
+            target_ids = [media_id]
+            summary = self.catalog_repo.get_selection_summary(target_ids)
+            self.right_tag_dock.bind_selection(target_ids, summary)
+            self.lbl_sync_status.setText("✓ Updated display picture")
+
+    def _on_face_crop_not_this_person(self, media_ids: list[int], person_id: int) -> None:
+        """Removes person tag from specified media and records negative rejection memory."""
+        if not media_ids or person_id <= 0:
+            return
+        conn = self.catalog_repo.engine.catalog_conn()
+        placeholders = ",".join("?" for _ in media_ids)
+        rows = conn.execute(
+            f"""
+            SELECT id, media_id FROM media_people
+            WHERE media_id IN ({placeholders}) AND person_id = ?;
+            """,
+            [*media_ids, person_id],
+        ).fetchall()
+        for r in rows:
+            mp_id = int(r["id"])
+            mid = int(r["media_id"])
+            self.catalog_repo.add_face_rejection(mp_id, person_id)
+            self.catalog_repo.remove_person_tag(mid, person_id)
+        self.refresh_navigation_and_autocomplete()
+        self.rebuild_and_run_query(preserve_selection=False)
+        if hasattr(self, "person_header_bar") and self.person_header_bar.isVisible():
+            if getattr(self.person_header_bar, "current_person_id", None) == person_id:
+                self.person_header_bar.load_person(person_id)
+        if (
+            self.central_stack.currentWidget() == self.media_viewer
+            and self.media_viewer.current_media_id is not None
+        ):
+            detail = self.catalog_repo.get_media_detail(self.media_viewer.current_media_id)
+            self.media_viewer.render_face_regions(detail.get("people", []))
+        self.lbl_sync_status.setText(f"✓ Removed person tag from {len(media_ids)} item(s)")
+
+    def _on_face_crop_not_a_face(
+        self,
+        media_ids: list[int],
+        person_id: int | None = None,
+        face_ids: list[int] | None = None,
+    ) -> None:
+        """Marks face regions as 'Not a face / Delete region' (state = -1)."""
+        target_face_ids = list(face_ids or [])
+        if not target_face_ids and media_ids:
+            conn = self.catalog_repo.engine.catalog_conn()
+            placeholders = ",".join("?" for _ in media_ids)
+            if person_id is not None and person_id > 0:
+                rows = conn.execute(
+                    f"SELECT id FROM media_people WHERE media_id IN ({placeholders}) AND person_id = ?;",
+                    [*media_ids, person_id],
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    f"SELECT id FROM media_people WHERE media_id IN ({placeholders});",
+                    list(media_ids),
+                ).fetchall()
+            target_face_ids = [int(r["id"]) for r in rows]
+        if target_face_ids:
+            self.catalog_repo.mark_not_a_face(target_face_ids)
+            if person_id is not None and person_id > 0:
+                with self.catalog_repo.engine.write_lock:
+                    conn = self.catalog_repo.engine.catalog_conn()
+                    conn.execute(
+                        """
+                        UPDATE people
+                        SET confirmed_count = (
+                            SELECT COUNT(*) FROM media_people WHERE person_id = people.id AND state = 1
+                        )
+                        WHERE id = ?;
+                        """,
+                        (person_id,),
+                    )
+                    conn.commit()
+        self.refresh_navigation_and_autocomplete()
+        self.rebuild_and_run_query(preserve_selection=False)
+        if hasattr(self, "person_header_bar") and self.person_header_bar.isVisible():
+            if person_id and getattr(self.person_header_bar, "current_person_id", None) == person_id:
+                self.person_header_bar.load_person(person_id)
+        if (
+            self.central_stack.currentWidget() == self.media_viewer
+            and self.media_viewer.current_media_id is not None
+        ):
+            detail = self.catalog_repo.get_media_detail(self.media_viewer.current_media_id)
+            self.media_viewer.render_face_regions(detail.get("people", []))
+        self.lbl_sync_status.setText(f"✓ Marked {len(target_face_ids)} face region(s) as 'Not a face'")
+
+    def _on_face_crop_tag_as_someone_else(self, media_ids: list[int], person_id: int) -> None:
+        """Prompts to tag selected faces to another person contact."""
+        if not media_ids:
+            return
+        people_rows = self.catalog_repo.get_people_list()
+        new_name, new_pid = TagSomeoneDialog.prompt(people_rows, self, title="Tag someone")
+        if not new_name or not new_name.strip():
+            return
+        new_name_clean = new_name.strip()
+        if new_pid is None or new_pid < 0:
+            new_pid = self.catalog_repo.upsert_person(new_name_clean)
+        for mid in media_ids:
+            detail = self.catalog_repo.get_media_detail(mid)
+            existing_rect = None
+            for p in detail.get("people", []):
+                if p.get("person_id") == person_id:
+                    if p.get("rect_x") is not None:
+                        existing_rect = (
+                            float(p["rect_x"]),
+                            float(p["rect_y"]),
+                            float(p["rect_w"]),
+                            float(p["rect_h"]),
+                        )
+                    break
+            self.catalog_repo.remove_person_tag(mid, person_id)
+            self.catalog_repo.assign_person(mid, new_name_clean, existing_rect)
+        self.refresh_navigation_and_autocomplete()
+        self.rebuild_and_run_query(preserve_selection=False)
+        if hasattr(self, "person_header_bar") and self.person_header_bar.isVisible():
+            if getattr(self.person_header_bar, "current_person_id", None) == person_id:
+                self.person_header_bar.load_person(person_id)
+        if (
+            self.central_stack.currentWidget() == self.media_viewer
+            and self.media_viewer.current_media_id is not None
+        ):
+            detail = self.catalog_repo.get_media_detail(self.media_viewer.current_media_id)
+            self.media_viewer.render_face_regions(detail.get("people", []))
+        self.lbl_sync_status.setText(f"✓ Retagged {len(media_ids)} item(s) to '{new_name_clean}'")
 
     def _on_dock_person_set_display_pic_requested(self, person_id: int) -> None:
         target_ids = (
@@ -2374,12 +2545,7 @@ class PhotoGalleryMainWindow(QMainWindow):
         if not target_ids:
             return
         mid = target_ids[0]
-        ok = self.catalog_repo.set_person_display_picture(person_id, mid)
-        if ok:
-            self.refresh_navigation_and_autocomplete()
-            summary = self.catalog_repo.get_selection_summary(target_ids)
-            self.right_tag_dock.bind_selection(target_ids, summary)
-            self.lbl_sync_status.setText("✓ Updated contact display picture")
+        self._on_face_crop_set_display_pic(mid, person_id)
 
     def _on_dock_person_merge_requested(self, source_person_id: int, source_name: str) -> None:
         people_rows = self.catalog_repo.get_people_list()
