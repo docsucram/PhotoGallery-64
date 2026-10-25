@@ -540,8 +540,10 @@ class PhotoGalleryMainWindow(QMainWindow):
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
-        self.setWindowTitle("Photo Gallery Live")
-        ico_path = Path(__file__).resolve().parent.parent.parent / "resources" / "icons" / "photogallery_live.ico"
+        self.setWindowTitle("Essentials Photo Gallery")
+        ico_path = Path(__file__).resolve().parent.parent.parent / "resources" / "icons" / "essentials_photo_gallery.ico"
+        if not ico_path.exists():
+            ico_path = Path(__file__).resolve().parent.parent.parent / "resources" / "icons" / "photogallery_live.ico"
         if ico_path.exists():
             from PySide6.QtGui import QIcon
             self.setWindowIcon(QIcon(str(ico_path)))
@@ -3084,9 +3086,9 @@ class PhotoGalleryMainWindow(QMainWindow):
             self._update_status_zoom_toggle_button()
 
             fname = str(detail["filename"])
-            self.setWindowTitle(f"{fname} - Photo Gallery Live")
+            self.setWindowTitle(f"{fname} - Essentials Photo Gallery")
             if hasattr(self.ribbon, "lbl_app_title"):
-                self.ribbon.lbl_app_title.setText(f"{fname} - Photo Gallery Live")
+                self.ribbon.lbl_app_title.setText(f"{fname} - Essentials Photo Gallery")
 
             self._selected_ids = [media_id]
             self._lead_selected_id = media_id
@@ -3142,9 +3144,9 @@ class PhotoGalleryMainWindow(QMainWindow):
             self.btn_status_next.setVisible(False)
             self.btn_status_fit.setVisible(False)
             self.btn_status_actual.setVisible(False)
-            self.setWindowTitle("Batch People Tagging - Photo Gallery Live")
+            self.setWindowTitle("Batch People Tagging - Essentials Photo Gallery")
             if hasattr(self.ribbon, "lbl_app_title"):
-                self.ribbon.lbl_app_title.setText("Photo Gallery Live")
+                self.ribbon.lbl_app_title.setText("Essentials Photo Gallery")
             self.lbl_sync_status.setText("Batch people tag view")
             if not self._is_navigating_history:
                 pid = getattr(self.batch_people_view, "_filter_person_id", None)
@@ -3169,9 +3171,9 @@ class PhotoGalleryMainWindow(QMainWindow):
         self.btn_status_fit.setVisible(False)
         self.btn_status_actual.setVisible(False)
 
-        self.setWindowTitle("Photo Gallery Live")
+        self.setWindowTitle("Essentials Photo Gallery")
         if hasattr(self.ribbon, "lbl_app_title"):
-            self.ribbon.lbl_app_title.setText("Photo Gallery Live")
+            self.ribbon.lbl_app_title.setText("Essentials Photo Gallery")
 
         if self.right_tag_dock.current_mode() == "fine_tune":
             self.right_tag_dock.set_mode("info")
@@ -4163,8 +4165,8 @@ class PhotoGalleryMainWindow(QMainWindow):
         elif action_id == "help":
             QMessageBox.information(
                 self,
-                "About Photo Gallery Live",
-                "Photo Gallery Live — Windows Live Photo Gallery 64-Bit Clone\n"
+                "About Essentials Photo Gallery",
+                "Essentials Photo Gallery — Windows Live Photo Gallery 64-Bit Clone\n"
                 "Google Antigravity Edition\n\n"
                 "A modern, high-performance 64-bit recreation of Windows Live Photo Gallery.\n"
                 "Supports lossless JPEG rotation, non-destructive editing, face tagging, and sub-10ms queries.",

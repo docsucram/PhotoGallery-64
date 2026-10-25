@@ -30,9 +30,11 @@ def create_app(argv: list[str] | None = None) -> QApplication:
         Qt.HighDpiScaleFactorRoundingPolicy.PassThrough
     )
     app = QApplication(argv if argv is not None else sys.argv)
-    app.setApplicationName("Photo Gallery Live")
-    app.setOrganizationName("Photo Gallery Live")
-    ico_path = Path(__file__).resolve().parent / "resources" / "icons" / "photogallery_live.ico"
+    app.setApplicationName("Essentials Photo Gallery")
+    app.setOrganizationName("Essentials Photo Gallery")
+    ico_path = Path(__file__).resolve().parent / "resources" / "icons" / "essentials_photo_gallery.ico"
+    if not ico_path.exists():
+        ico_path = Path(__file__).resolve().parent / "resources" / "icons" / "photogallery_live.ico"
     if ico_path.exists():
         from PySide6.QtGui import QIcon
         app.setWindowIcon(QIcon(str(ico_path)))
@@ -57,7 +59,7 @@ def create_app(argv: list[str] | None = None) -> QApplication:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Photo Gallery Live — Windows Live Photo Gallery 64-Bit Clone"
+        description="Essentials Photo Gallery — Windows Live Photo Gallery 64-Bit Clone"
     )
     parser.add_argument(
         "--db-dir",

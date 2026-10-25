@@ -109,10 +109,10 @@ def test_lossless_jpeg_app1_splice(tmp_path):
     assert scan_data_orig == scan_data_patched, "JPEG scan data must be 100% byte-identical"
 
 
-def test_app_title_photo_gallery_live(qapp, temp_dbs):
+def test_app_title_essentials_photo_gallery(qapp, temp_dbs):
     from src.ui.main_window import PhotoGalleryMainWindow
     win = PhotoGalleryMainWindow(temp_dbs, start_xmp_daemon=False)
-    assert win.windowTitle() == "Photo Gallery Live"
+    assert win.windowTitle() == "Essentials Photo Gallery"
     win.close()
 
 
