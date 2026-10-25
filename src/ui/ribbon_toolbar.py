@@ -3367,14 +3367,16 @@ class RibbonToolbar(QWidget):
                 )
             w = 34 if has_menu else 26
             btn.setFixedWidth(w)
-            btn.setToolTip(orig.replace("\n", " "))
+            tip = getattr(btn, "_tooltip_override", None) or orig.replace("\n", " ")
+            btn.setToolTip(tip)
         else:
             if isinstance(btn, QToolButton):
                 btn.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
             btn.setText(orig)
             btn.setMinimumWidth(btn.sizeHint().width())
             btn.setMaximumWidth(16777215)
-            btn.setToolTip(orig.replace("\n", " "))
+            tip = getattr(btn, "_tooltip_override", None) or orig.replace("\n", " ")
+            btn.setToolTip(tip)
 
     def _make_tool_btn(
         self,
@@ -3875,15 +3877,27 @@ class RibbonToolbar(QWidget):
         m_grid.setVerticalSpacing(1)
 
         self.btn_select_all = self._make_btn("Select all", "select_all", grp_manage)
+        self.btn_select_all.setToolTip("Select all (Ctrl+A)")
+        self.btn_select_all._tooltip_override = "Select all (Ctrl+A)"
         self.btn_select_all.clicked.connect(lambda: self.action_triggered.emit("select_all"))
         self.btn_copy = self._make_btn("Copy", "copy", grp_manage)
+        self.btn_copy.setToolTip("Copy (Ctrl+C)")
+        self.btn_copy._tooltip_override = "Copy (Ctrl+C)"
         self.btn_copy.clicked.connect(lambda: self.action_triggered.emit("copy"))
         self.btn_paste = self._make_btn("Paste", "paste", grp_manage)
+        self.btn_paste.setToolTip("Paste (Ctrl+V)")
+        self.btn_paste._tooltip_override = "Paste (Ctrl+V)"
         self.btn_paste.clicked.connect(lambda: self.action_triggered.emit("paste"))
 
         self.btn_rot_ccw = self._make_btn("Rotate left", "rotate_ccw", grp_manage)
+        self.btn_rot_ccw.setToolTip("Rotate left (Ctrl+,)")
+        self.btn_rot_ccw._tooltip_override = "Rotate left (Ctrl+,)"
         self.btn_rot_cw = self._make_btn("Rotate right", "rotate_cw", grp_manage)
+        self.btn_rot_cw.setToolTip("Rotate right (Ctrl+.)")
+        self.btn_rot_cw._tooltip_override = "Rotate right (Ctrl+.)"
         self.btn_delete = self._make_btn("Delete", "delete", grp_manage)
+        self.btn_delete.setToolTip("Delete (Del)")
+        self.btn_delete._tooltip_override = "Delete (Del)"
         self.btn_rot_ccw.clicked.connect(lambda: self.action_triggered.emit("rotate_left"))
         self.btn_rot_cw.clicked.connect(lambda: self.action_triggered.emit("rotate_right"))
         self.btn_delete.clicked.connect(lambda: self.action_triggered.emit("delete"))
@@ -3921,6 +3935,8 @@ class RibbonToolbar(QWidget):
         o_mid_col.addWidget(self.btn_batch_people)
 
         self.btn_tag_desc = self._make_btn("Descriptive tag", "tag", grp_org, large=False)
+        self.btn_tag_desc.setToolTip("Descriptive tag (Ctrl+T)")
+        self.btn_tag_desc._tooltip_override = "Descriptive tag (Ctrl+T)"
         self.btn_tag_desc.clicked.connect(lambda: self.action_triggered.emit("toggle_tag_pane"))
         o_mid_col.addWidget(self.btn_tag_desc)
 
@@ -3938,6 +3954,8 @@ class RibbonToolbar(QWidget):
         self.btn_geotag.clicked.connect(lambda: self.action_triggered.emit("geotag"))
 
         self.btn_home_rate = self._make_btn("Rate", "rate", grp_org)
+        self.btn_home_rate.setToolTip("Rate photo 0-5 stars (0-5)")
+        self.btn_home_rate._tooltip_override = "Rate photo 0-5 stars (0-5)"
         rate_menu = QMenu(self.btn_home_rate)
         for s in (5, 4, 3, 2, 1):
             stars_str = "★" * s + "☆" * (5 - s)
@@ -3947,6 +3965,8 @@ class RibbonToolbar(QWidget):
         self.btn_home_rate.setMenu(rate_menu)
 
         self.btn_home_flag = self._make_btn("Flag", "flag", grp_org)
+        self.btn_home_flag.setToolTip("Toggle flag (Insert / \\)")
+        self.btn_home_flag._tooltip_override = "Toggle flag (Insert / \\)"
         self.btn_home_flag.clicked.connect(lambda: self.action_triggered.emit("toggle_flag"))
 
         o_right_col.addWidget(self.btn_geotag)
@@ -4132,6 +4152,8 @@ class RibbonToolbar(QWidget):
         btn_ss = self._make_tool_btn(
             "Slide\nshow", "slideshow", grp_share, large=True, popup_mode=QToolButton.MenuButtonPopup
         )
+        btn_ss.setToolTip("Slide show (F12)")
+        btn_ss._tooltip_override = "Slide show (F12)"
         btn_ss.setMenu(self._build_slideshow_theme_menu())
         btn_ss.clicked.connect(lambda: self.action_triggered.emit("slide_show"))
         self.btn_home_slideshow = btn_ss
@@ -4856,7 +4878,9 @@ class RibbonToolbar(QWidget):
         # Group 2: Share (Slide show)
         # ---------------------------------------------------------------------
         grp_share = _RibbonGroupBox("Share", page)
-        btn_slide = self._make_btn("Slide show (F11)", "slideshow", grp_share, large=True)
+        btn_slide = self._make_btn("Slide show (F12)", "slideshow", grp_share, large=True)
+        btn_slide.setToolTip("Slide show (F12)")
+        btn_slide._tooltip_override = "Slide show (F12)"
         btn_slide.clicked.connect(lambda: self.action_triggered.emit("slide_show"))
         grp_share.content_layout.addWidget(btn_slide)
         hbox.addWidget(grp_share)
@@ -5055,14 +5079,20 @@ class RibbonToolbar(QWidget):
         z_hbox.setSpacing(3)
 
         self.btn_zoom_in = self._make_btn("Zoom\nin", "zoom_in", grp_zoom, large=True)
+        self.btn_zoom_in.setToolTip("Zoom in (+)")
+        self.btn_zoom_in._tooltip_override = "Zoom in (+)"
         self.btn_zoom_in.clicked.connect(lambda: self.action_triggered.emit("zoom_in"))
         z_hbox.addWidget(self.btn_zoom_in)
 
         self.btn_zoom_out = self._make_btn("Zoom\nout", "zoom_out", grp_zoom, large=True)
+        self.btn_zoom_out.setToolTip("Zoom out (-)")
+        self.btn_zoom_out._tooltip_override = "Zoom out (-)"
         self.btn_zoom_out.clicked.connect(lambda: self.action_triggered.emit("zoom_out"))
         z_hbox.addWidget(self.btn_zoom_out)
 
         self.btn_zoom_actual = self._make_btn("Actual\nsize", "actual_size", grp_zoom, large=True)
+        self.btn_zoom_actual.setToolTip("Actual size (Ctrl+0)")
+        self.btn_zoom_actual._tooltip_override = "Actual size (Ctrl+0)"
         self.btn_zoom_actual.clicked.connect(lambda: self.action_triggered.emit("viewer_zoom_actual"))
         self.btn_zoom_actual.setVisible(False)
         z_hbox.addWidget(self.btn_zoom_actual)
@@ -5091,6 +5121,8 @@ class RibbonToolbar(QWidget):
         self.btn_view_slideshow = self._make_tool_btn(
             "Slide\nshow", "slideshow", grp_slideshow, large=True, popup_mode=QToolButton.MenuButtonPopup
         )
+        self.btn_view_slideshow.setToolTip("Slide show (F12)")
+        self.btn_view_slideshow._tooltip_override = "Slide show (F12)"
         self.btn_view_slideshow.setMenu(self._build_slideshow_theme_menu())
         self.btn_view_slideshow.clicked.connect(lambda: self.action_triggered.emit("slide_show"))
         grp_slideshow.content_layout.addWidget(self.btn_view_slideshow)
@@ -5122,6 +5154,8 @@ class RibbonToolbar(QWidget):
         self.btn_toggle_tag_pane = self._make_btn(
             "Tag and\ncaption pane", "pane_right", grp_panes, large=True, checkable=True
         )
+        self.btn_toggle_tag_pane.setToolTip("Tag and caption pane (Ctrl+I)")
+        self.btn_toggle_tag_pane._tooltip_override = "Tag and caption pane (Ctrl+I)"
         self.btn_toggle_tag_pane.clicked.connect(
             lambda: self.action_triggered.emit("toggle_tag_pane")
         )

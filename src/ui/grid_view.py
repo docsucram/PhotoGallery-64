@@ -180,9 +180,28 @@ class MediaCardDelegate(QStyledItemDelegate):
         self.face_crop_person_id: int | None = None
         self.thumb_repo: Any | None = None
         self._face_crop_cache: dict[tuple[int, int], QPixmap] = {}
+        self._person_face_rects: dict[tuple[int, int], tuple[float, float, float, float]] = {}
 
     def set_face_crop_person_id(self, person_id: int | None) -> None:
         self.face_crop_person_id = person_id
+        self._person_face_rects.clear()
+        if person_id is not None and self.thumb_repo is not None:
+            try:
+                conn = self.thumb_repo.engine.catalog_conn()
+                rows = conn.execute(
+                    "SELECT media_id, rect_x, rect_y, rect_w, rect_h FROM media_people WHERE person_id = ? AND state = 1;",
+                    (int(person_id),),
+                ).fetchall()
+                for r in rows:
+                    mid = int(r["media_id"])
+                    rx = float(r["rect_x"] or 0.0)
+                    ry = float(r["rect_y"] or 0.0)
+                    rw = float(r["rect_w"] or 0.0)
+                    rh = float(r["rect_h"] or 0.0)
+                    if rw > 0.005 and rh > 0.005:
+                        self._person_face_rects[(mid, int(person_id))] = (rx, ry, rw, rh)
+            except Exception:
+                pass
 
     def set_cell_size(self, size: QSize) -> None:
         self._cell_size = size
@@ -397,8 +416,49 @@ class MediaCardDelegate(QStyledItemDelegate):
                     self._face_crop_cache[key] = pm
                     pixmap = pm
 
-        if pixmap is None and media_id is not None:
+            # If dedicated crop is not in database yet, dynamically extract face crop from cached photo thumbnail!
+            if pixmap is None and key in self._person_face_rects:
+                full_pm = self.pixmap_cache.get(media_id)
+                if full_pm is not None and not full_pm.isNull() and full_pm.width() > 10 and full_pm.height() > 10:
+                    rx, ry, rw, rh = self._person_face_rects[key]
+                    cx = rx + rw * 0.5
+                    cy = ry + rh * 0.5
+                    side = max(rw, rh) * 1.38
+                    pw, ph = full_pm.width(), full_pm.height()
+                    crop_x = int(max(0, (cx - side * 0.5) * pw))
+                    crop_y = int(max(0, (cy - side * 0.5) * ph))
+                    crop_w = int(min(pw - crop_x, side * pw))
+                    crop_h = int(min(ph - crop_y, side * ph))
+                    crop_side = min(crop_w, crop_h)
+                    if crop_side > 10:
+                        crop_pm = full_pm.copy(crop_x, crop_y, crop_side, crop_side)
+                        self._face_crop_cache[key] = crop_pm
+                        pixmap = crop_pm
+
+        if pixmap is None and media_id is not None and self.face_crop_person_id is None:
             pixmap = self.pixmap_cache.get(media_id)
+
+        # In face crops mode, if the crop is still being decoded, show a clean face placeholder
+        if pixmap is None and self.face_crop_person_id is not None and img_box.width() > 8 and img_box.height() > 8:
+            box_side = max(32, min(img_box.width() - 8, img_box.height() - 8, 120))
+            ph_rect = QRect(
+                img_box.center().x() - box_side // 2,
+                img_box.bottom() - box_side - 2,
+                box_side,
+                box_side,
+            )
+            painter.setPen(QColor(200, 215, 230))
+            painter.setBrush(QColor(240, 244, 250))
+            painter.drawRoundedRect(ph_rect, 4, 4)
+            # Subtle avatar silhouette
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(QColor(190, 205, 225))
+            head_r = int(box_side * 0.18)
+            head_cx = ph_rect.center().x()
+            head_cy = ph_rect.top() + int(box_side * 0.38)
+            painter.drawEllipse(QPoint(head_cx, head_cy), head_r, head_r)
+            sh_rect = QRect(head_cx - int(box_side * 0.28), head_cy + head_r + 2, int(box_side * 0.56), int(box_side * 0.38))
+            painter.drawPie(sh_rect, 0, 180 * 16)
         if pixmap is not None and not pixmap.isNull() and img_box.width() > 8 and img_box.height() > 8:
             if self._layout_mode == "mosaic":
                 scaled_sz = pixmap.size().scaled(img_box.size(), Qt.KeepAspectRatioByExpanding)

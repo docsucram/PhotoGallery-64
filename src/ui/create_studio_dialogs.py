@@ -937,6 +937,7 @@ class ColourPopCanvasView(QGraphicsView):
     brush_applied = Signal(int, int)
     stroke_started = Signal()
     stroke_finished = Signal()
+    zoom_changed = Signal(float)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -1056,7 +1057,62 @@ class ColourPopCanvasView(QGraphicsView):
     def wheelEvent(self, event) -> None:
         factor = 1.15 if event.angleDelta().y() > 0 else 1.0 / 1.15
         self.scale(factor, factor)
+        self.zoom_changed.emit(self.transform().m11())
         event.accept()
+
+
+class ZoomablePreviewCanvas(QGraphicsView):
+    """
+    Interactive zoomable/pannable canvas for creative tools previews:
+    - Wheel zoom with zoom_changed signal.
+    - Space+Drag and Middle-button drag for fluid panning.
+    """
+    zoom_changed = Signal(float)
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setRenderHint(QPainter.Antialiasing, True)
+        self.setRenderHint(QPainter.SmoothPixmapTransform, True)
+        self.setTransformationAnchor(QGraphicsView.AnchorUnderMouse)
+        self.setResizeAnchor(QGraphicsView.AnchorViewCenter)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self._space_pressed: bool = False
+
+    def wheelEvent(self, event) -> None:
+        factor = 1.15 if event.angleDelta().y() > 0 else 1.0 / 1.15
+        self.scale(factor, factor)
+        self.zoom_changed.emit(self.transform().m11())
+        event.accept()
+
+    def mousePressEvent(self, event) -> None:
+        if event.button() in (Qt.MiddleButton, Qt.LeftButton) and (self._space_pressed or event.button() == Qt.MiddleButton):
+            self.setDragMode(QGraphicsView.ScrollHandDrag)
+            super().mousePressEvent(event)
+            return
+        super().mousePressEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:
+        if event.button() in (Qt.MiddleButton, Qt.LeftButton):
+            if not self._space_pressed:
+                self.setDragMode(QGraphicsView.NoDrag)
+        super().mouseReleaseEvent(event)
+
+    def keyPressEvent(self, event) -> None:
+        if event.key() == Qt.Key_Space and not self._space_pressed:
+            self._space_pressed = True
+            self.setDragMode(QGraphicsView.ScrollHandDrag)
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+    def keyReleaseEvent(self, event) -> None:
+        if event.key() == Qt.Key_Space:
+            self._space_pressed = False
+            self.setDragMode(QGraphicsView.NoDrag)
+            event.accept()
+            return
+        super().keyReleaseEvent(event)
 
 
 class ColourPopDialog(QDialog):
@@ -1287,6 +1343,7 @@ class ColourPopDialog(QDialog):
         self.view.set_brush_radius(self.brush_radius)
         self.view.brush_applied.connect(self._on_brush_applied)
         self.view.stroke_started.connect(self._on_stroke_started)
+        self.view.zoom_changed.connect(self._on_zoom_changed)
         self.view.setStyleSheet("background: #252528; border: 1px solid #777; border-radius: 4px;")
 
         self.bg_item = QGraphicsPixmapItem()
@@ -1300,15 +1357,44 @@ class ColourPopDialog(QDialog):
         btn_layout.addWidget(self.lbl_status)
         btn_layout.addStretch(1)
 
-        # Zoom buttons
-        btn_fit = QPushButton("Fit to Window")
-        btn_fit.clicked.connect(lambda: self.view.fitInView(self.scene.sceneRect(), Qt.KeepAspectRatio))
-        btn_layout.addWidget(btn_fit)
+        # Zoom Controls
+        zoom_frame = QFrame()
+        zoom_frame.setStyleSheet("background: #f4f6fa; border: 1px solid #c0c8d8; border-radius: 3px; padding: 1px;")
+        z_layout = QHBoxLayout(zoom_frame)
+        z_layout.setContentsMargins(4, 1, 4, 1)
+        z_layout.setSpacing(4)
 
-        btn_100 = QPushButton("100%")
-        btn_100.clicked.connect(lambda: self.view.resetTransform())
-        btn_layout.addWidget(btn_100)
+        self.btn_zoom_out = QPushButton("−")
+        self.btn_zoom_out.setFixedSize(24, 22)
+        self.btn_zoom_out.setToolTip("Zoom Out (-)")
+        self.btn_zoom_out.setStyleSheet("font-size: 13px; font-weight: bold; padding: 0;")
+        self.btn_zoom_out.clicked.connect(lambda: self._apply_zoom(1.0 / 1.25))
+        z_layout.addWidget(self.btn_zoom_out)
 
+        self.btn_zoom_in = QPushButton("+")
+        self.btn_zoom_in.setFixedSize(24, 22)
+        self.btn_zoom_in.setToolTip("Zoom In (+)")
+        self.btn_zoom_in.setStyleSheet("font-size: 13px; font-weight: bold; padding: 0;")
+        self.btn_zoom_in.clicked.connect(lambda: self._apply_zoom(1.25))
+        z_layout.addWidget(self.btn_zoom_in)
+
+        self.btn_fit = QPushButton("Fit")
+        self.btn_fit.setFixedHeight(22)
+        self.btn_fit.setToolTip("Fit photo to canvas window")
+        self.btn_fit.clicked.connect(self._fit_to_view)
+        z_layout.addWidget(self.btn_fit)
+
+        self.btn_100 = QPushButton("100%")
+        self.btn_100.setFixedHeight(22)
+        self.btn_100.setToolTip("View at actual 100% pixel size (Ctrl+0)")
+        self.btn_100.clicked.connect(self._reset_zoom_100)
+        z_layout.addWidget(self.btn_100)
+
+        self.lbl_zoom_val = QLabel("100%")
+        self.lbl_zoom_val.setStyleSheet("font-size: 11px; font-weight: bold; color: #333; min-width: 40px; padding-left: 2px;")
+        z_layout.addWidget(self.lbl_zoom_val)
+
+        btn_layout.addWidget(zoom_frame)
         btn_layout.addSpacing(12)
 
         # Save & Cancel
@@ -1335,6 +1421,23 @@ class ColourPopDialog(QDialog):
         if self._first_fit and self.scene.sceneRect().width() > 0:
             self._first_fit = False
             self.view.fitInView(self.scene.sceneRect(), Qt.KeepAspectRatio)
+            self._on_zoom_changed(self.view.transform().m11())
+
+    def _on_zoom_changed(self, scale_val: float) -> None:
+        self.lbl_zoom_val.setText(f"{int(round(scale_val * 100))}%")
+
+    def _apply_zoom(self, factor: float) -> None:
+        self.view.scale(factor, factor)
+        self._on_zoom_changed(self.view.transform().m11())
+
+    def _reset_zoom_100(self) -> None:
+        self.view.resetTransform()
+        self._on_zoom_changed(1.0)
+
+    def _fit_to_view(self) -> None:
+        if self.scene.sceneRect().isValid() and self.scene.sceneRect().width() > 0:
+            self.view.fitInView(self.scene.sceneRect(), Qt.KeepAspectRatio)
+            self._on_zoom_changed(self.view.transform().m11())
 
     def _precompute_proxy_bw(self) -> None:
         gray = cv2.cvtColor(self.proxy_bgr, cv2.COLOR_BGR2GRAY).astype(np.float32)
@@ -1599,11 +1702,10 @@ class PortraitBokehDialog(QDialog):
         layout.addWidget(bar)
 
         # Canvas
-        self.view = QGraphicsView()
+        self.view = ZoomablePreviewCanvas(self)
         self.scene = QGraphicsScene(self)
         self.view.setScene(self.scene)
-        self.view.setRenderHint(QPainter.Antialiasing, True)
-        self.view.setRenderHint(QPainter.SmoothPixmapTransform, True)
+        self.view.zoom_changed.connect(self._on_zoom_changed)
         self.view.setStyleSheet("background: #252528; border: 1px solid #777; border-radius: 4px;")
         self.bg_item = QGraphicsPixmapItem()
         self.scene.addItem(self.bg_item)
@@ -1613,6 +1715,46 @@ class PortraitBokehDialog(QDialog):
         btn_layout = QHBoxLayout()
         btn_layout.addWidget(QLabel(f"Resolution: {self.original_bgr.shape[1]} × {self.original_bgr.shape[0]} px"))
         btn_layout.addStretch(1)
+
+        # Zoom Controls
+        zoom_frame = QFrame()
+        zoom_frame.setStyleSheet("background: #f4f6fa; border: 1px solid #c0c8d8; border-radius: 3px; padding: 1px;")
+        z_layout = QHBoxLayout(zoom_frame)
+        z_layout.setContentsMargins(4, 1, 4, 1)
+        z_layout.setSpacing(4)
+
+        self.btn_zoom_out = QPushButton("−")
+        self.btn_zoom_out.setFixedSize(24, 22)
+        self.btn_zoom_out.setToolTip("Zoom Out (-)")
+        self.btn_zoom_out.setStyleSheet("font-size: 13px; font-weight: bold; padding: 0;")
+        self.btn_zoom_out.clicked.connect(lambda: self._apply_zoom(1.0 / 1.25))
+        z_layout.addWidget(self.btn_zoom_out)
+
+        self.btn_zoom_in = QPushButton("+")
+        self.btn_zoom_in.setFixedSize(24, 22)
+        self.btn_zoom_in.setToolTip("Zoom In (+)")
+        self.btn_zoom_in.setStyleSheet("font-size: 13px; font-weight: bold; padding: 0;")
+        self.btn_zoom_in.clicked.connect(lambda: self._apply_zoom(1.25))
+        z_layout.addWidget(self.btn_zoom_in)
+
+        self.btn_fit = QPushButton("Fit")
+        self.btn_fit.setFixedHeight(22)
+        self.btn_fit.setToolTip("Fit photo to canvas window")
+        self.btn_fit.clicked.connect(self._fit_to_view)
+        z_layout.addWidget(self.btn_fit)
+
+        self.btn_100 = QPushButton("100%")
+        self.btn_100.setFixedHeight(22)
+        self.btn_100.setToolTip("View at actual 100% pixel size (Ctrl+0)")
+        self.btn_100.clicked.connect(self._reset_zoom_100)
+        z_layout.addWidget(self.btn_100)
+
+        self.lbl_zoom_val = QLabel("100%")
+        self.lbl_zoom_val.setStyleSheet("font-size: 11px; font-weight: bold; color: #333; min-width: 40px; padding-left: 2px;")
+        z_layout.addWidget(self.lbl_zoom_val)
+
+        btn_layout.addWidget(zoom_frame)
+        btn_layout.addSpacing(12)
 
         btn_save = QPushButton("Save New Portrait Bokeh Photo...")
         btn_save.setStyleSheet("""
@@ -1637,6 +1779,23 @@ class PortraitBokehDialog(QDialog):
         if self._first_fit and self.scene.sceneRect().width() > 0:
             self._first_fit = False
             self.view.fitInView(self.scene.sceneRect(), Qt.KeepAspectRatio)
+            self._on_zoom_changed(self.view.transform().m11())
+
+    def _on_zoom_changed(self, scale_val: float) -> None:
+        self.lbl_zoom_val.setText(f"{int(round(scale_val * 100))}%")
+
+    def _apply_zoom(self, factor: float) -> None:
+        self.view.scale(factor, factor)
+        self._on_zoom_changed(self.view.transform().m11())
+
+    def _reset_zoom_100(self) -> None:
+        self.view.resetTransform()
+        self._on_zoom_changed(1.0)
+
+    def _fit_to_view(self) -> None:
+        if self.scene.sceneRect().isValid() and self.scene.sceneRect().width() > 0:
+            self.view.fitInView(self.scene.sceneRect(), Qt.KeepAspectRatio)
+            self._on_zoom_changed(self.view.transform().m11())
 
     def _on_blur_changed(self, val: int) -> None:
         self.lbl_blur_val.setText(f"{val} px")

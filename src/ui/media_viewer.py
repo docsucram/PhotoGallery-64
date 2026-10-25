@@ -3244,16 +3244,16 @@ class SingleMediaViewer(QWidget):
         mw = getattr(self, "main_window", None) or self.window()
         is_mw = hasattr(mw, "rescan_faces_for_selection")
 
-        act_next = menu.addAction("Next")
+        act_next = menu.addAction("Next\tRight Arrow")
         act_next.triggered.connect(lambda: self.navigate_requested.emit(1))
-        act_prev = menu.addAction("Previous")
+        act_prev = menu.addAction("Previous\tLeft Arrow")
         act_prev.triggered.connect(lambda: self.navigate_requested.emit(-1))
 
         menu.addSeparator()
 
-        act_rot_cw = menu.addAction("Rotate clockwise")
+        act_rot_cw = menu.addAction("Rotate clockwise\tCtrl+.")
         act_rot_cw.triggered.connect(lambda: self.rotate_media(clockwise=True))
-        act_rot_ccw = menu.addAction("Rotate counter-clockwise")
+        act_rot_ccw = menu.addAction("Rotate counter-clockwise\tCtrl+,")
         act_rot_ccw.triggered.connect(lambda: self.rotate_media(clockwise=False))
 
         menu.addSeparator()

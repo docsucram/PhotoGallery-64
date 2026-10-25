@@ -415,6 +415,90 @@ class _AvatarBackfillWorker(QRunnable):
                 self.engine.close_thread_connections()
 
 
+class _FaceCropPreloadSignals(QObject):
+    crop_ready = Signal(int, int, bytes)  # media_id, person_id, webp_blob
+    progress = Signal(int, int)          # current, total
+    finished = Signal()
+
+
+class _FaceCropPreloadWorker(QRunnable):
+    """
+    Fast background worker that extracts and persists missing face thumbnails for a person.
+    Uses lightweight Pillow region cropping (~2ms per image) without running heavy ONNX models.
+    """
+
+    def __init__(
+        self,
+        engine: DualDatabaseEngine,
+        person_id: int,
+        signals: _FaceCropPreloadSignals,
+        cancel_flag: CancellationFlag,
+    ) -> None:
+        super().__init__()
+        self.engine = engine
+        self.person_id = person_id
+        self.signals = signals
+        self.cancel_flag = cancel_flag
+
+    def run(self) -> None:
+        try:
+            cat_conn = self.engine.catalog_conn()
+            rows = cat_conn.execute(
+                """
+                SELECT mp.id AS face_id, mp.media_id, mp.rect_x, mp.rect_y, mp.rect_w, mp.rect_h,
+                       m.filename, f.path AS folder_path
+                FROM media_people mp
+                JOIN media m ON m.id = mp.media_id
+                JOIN folders f ON f.id = m.folder_id
+                WHERE mp.person_id = ? AND mp.state = 1
+                ORDER BY m.date_taken DESC, mp.id ASC;
+                """,
+                (self.person_id,),
+            ).fetchall()
+            if not rows or self.cancel_flag.is_set():
+                self.signals.finished.emit()
+                return
+
+            thumb_repo = ThumbnailRepository(self.engine)
+            existing_face_ids: set[int] = set()
+            try:
+                t_conn = self.engine.thumb_conn()
+                f_rows = t_conn.execute("SELECT face_id FROM face_thumbnails;").fetchall()
+                existing_face_ids = {int(r[0]) for r in f_rows}
+            except Exception:
+                pass
+
+            missing = [r for r in rows if int(r["face_id"]) not in existing_face_ids]
+            total = len(missing)
+            if total == 0:
+                self.signals.finished.emit()
+                return
+
+            for idx, r in enumerate(missing, start=1):
+                if self.cancel_flag.is_set():
+                    break
+                fid = int(r["face_id"])
+                mid = int(r["media_id"])
+                rect = (
+                    float(r["rect_x"] or 0.0),
+                    float(r["rect_y"] or 0.0),
+                    float(r["rect_w"] or 0.0),
+                    float(r["rect_h"] or 0.0),
+                )
+                full_path = os.path.join(str(r["folder_path"]), str(r["filename"]))
+                blob = CatalogRepository.extract_face_crop_blob(full_path, rect, target_size=128)
+                if blob:
+                    thumb_repo.put_face_thumbnail(fid, blob)
+                    self.signals.crop_ready.emit(mid, self.person_id, blob)
+                self.signals.progress.emit(idx, total)
+        except Exception:
+            pass
+        finally:
+            self.signals.finished.emit()
+            if threading.current_thread() is not threading.main_thread():
+                self.engine.close_thread_connections()
+
+
 class PhotoGalleryMainWindow(QMainWindow):
     """
     Windows Live Photo Gallery 64-Bit Clone Main Window (`docs/reference_ui/main_ui.png`).
@@ -462,6 +546,8 @@ class PhotoGalleryMainWindow(QMainWindow):
         self.current_icon_theme: str = "wlpg_aero"
         self._scanner_status_text: str = "Scanning: Idle"
         self._face_status_text: str = "Faces: Idle"
+        self._face_crop_status_text: str = ""
+        self._face_crop_cancel = CancellationFlag()
 
         # Undo / Redo Command Stack
         self.undo_stack = QUndoStack(self)
@@ -771,7 +857,7 @@ class PhotoGalleryMainWindow(QMainWindow):
         self.btn_status_rot_ccw.setIcon(make_wlpg_icon("rotate_ccw", 18))
         self.btn_status_rot_ccw.setIconSize(QSize(18, 18))
         self.btn_status_rot_ccw.setFixedSize(22, 22)
-        self.btn_status_rot_ccw.setToolTip("Rotate counter-clockwise (lossless)")
+        self.btn_status_rot_ccw.setToolTip("Rotate left (Ctrl+,)")
         self.btn_status_rot_ccw.clicked.connect(lambda: self.rotate_selection(clockwise=False))
         r_hbox.addWidget(self.btn_status_rot_ccw)
 
@@ -779,7 +865,7 @@ class PhotoGalleryMainWindow(QMainWindow):
         self.btn_status_rot_cw.setIcon(make_wlpg_icon("rotate_cw", 18))
         self.btn_status_rot_cw.setIconSize(QSize(18, 18))
         self.btn_status_rot_cw.setFixedSize(22, 22)
-        self.btn_status_rot_cw.setToolTip("Rotate clockwise (lossless)")
+        self.btn_status_rot_cw.setToolTip("Rotate right (Ctrl+.)")
         self.btn_status_rot_cw.clicked.connect(lambda: self.rotate_selection(clockwise=True))
         r_hbox.addWidget(self.btn_status_rot_cw)
 
@@ -1512,20 +1598,41 @@ class PhotoGalleryMainWindow(QMainWindow):
             throttle_ms=5,
             force_rescan=force_rescan,
         )
+        worker.signals.status_message.connect(self.on_face_status_message)
         worker.signals.batch_progressed.connect(self.on_face_batch_progressed)
         worker.signals.suggestions_updated.connect(self.on_face_suggestions_updated)
         worker.signals.worker_finished.connect(self.on_face_worker_finished)
         self._face_worker = worker
+        self._face_status_text = "Faces: Scanning..."
+        self._update_worker_monitor()
         self.face_pool.start(worker)
 
     def stop_face_detection(self) -> None:
         """Requests cancellation of background FaceDetectionWorker."""
         self._face_cancel.set()
 
+    def on_face_status_message(self, message: str) -> None:
+        """Updates status text when FaceDetectionWorker transitions between stages."""
+        if self._face_worker is not None:
+            clean_msg = message
+            if "Stage 1:" in message:
+                clean_msg = "Verifying face tags..."
+            elif "Stage 3:" in message:
+                clean_msg = "Computing face clusters..."
+            elif "Stage 4:" in message:
+                clean_msg = "Grouping face suggestions..."
+            self._face_status_text = f"Faces: {clean_msg}"
+            self._update_worker_monitor()
+
     def on_face_batch_progressed(self, current: int, total: int) -> None:
         """Updates status bar and BatchPeopleView when face scanning makes progress."""
-        if total > 0 and current < total:
+        if total > 0 and current <= total:
+            pct = int((current / total) * 100)
+            self._face_status_text = f"Faces: {current:,}/{total:,} ({pct}%)"
+        elif total > 0:
             self._face_status_text = f"Faces: {current:,}/{total:,}"
+        elif self._face_worker is not None:
+            self._face_status_text = "Faces: Scanning..."
         else:
             self._face_status_text = "Faces: Idle"
         if hasattr(self, "batch_people_view"):
@@ -1915,12 +2022,45 @@ class PhotoGalleryMainWindow(QMainWindow):
 
     def _on_person_view_mode_changed(self, mode: str) -> None:
         """Toggles between full photos and face crops in the grid view."""
+        self._face_crop_cancel.set()
         if mode == "crops":
             selected_pids = self.left_nav_dock.current_filter_state().get("person_ids", ())
             pid = selected_pids[0] if selected_pids else None
             self.card_delegate.set_face_crop_person_id(pid)
+            if pid is not None:
+                self._face_crop_cancel = CancellationFlag()
+                signals = _FaceCropPreloadSignals()
+                signals.crop_ready.connect(self._on_face_crop_ready)
+                signals.progress.connect(self._on_face_crop_progress)
+                signals.finished.connect(self._on_face_crop_finished)
+                worker = _FaceCropPreloadWorker(self.engine, pid, signals, self._face_crop_cancel)
+                self.thumbnail_pool.start(worker)
         else:
+            self._face_crop_status_text = ""
             self.card_delegate.set_face_crop_person_id(None)
+            self._update_worker_monitor()
+        self.grid_view.viewport().update()
+
+    def _on_face_crop_ready(self, media_id: int, person_id: int, webp_blob: bytes) -> None:
+        """Stores preloaded face crop pixmap into delegate cache and refreshes view."""
+        if webp_blob and getattr(self.card_delegate, "face_crop_person_id", None) == person_id:
+            pm = QPixmap()
+            if pm.loadFromData(webp_blob):
+                self.card_delegate._face_crop_cache[(media_id, person_id)] = pm
+                self.grid_view.viewport().update()
+
+    def _on_face_crop_progress(self, current: int, total: int) -> None:
+        """Updates worker monitor status while face crops are generating."""
+        if total > 0 and current <= total:
+            self._face_crop_status_text = f"Generating face crops: {current}/{total}"
+        else:
+            self._face_crop_status_text = ""
+        self._update_worker_monitor()
+
+    def _on_face_crop_finished(self) -> None:
+        """Clears face crop status text when preload worker completes."""
+        self._face_crop_status_text = ""
+        self._update_worker_monitor()
         self.grid_view.viewport().update()
 
     def _on_people_special_filter(self, filter_kind: str) -> None:
@@ -2147,6 +2287,8 @@ class PhotoGalleryMainWindow(QMainWindow):
             )
             worker.signals.thumbnail_ready.connect(self.on_thumbnail_decoded)
             self.thumbnail_pool.start(worker)
+        if self._active_thumb_flags:
+            self._update_worker_monitor()
 
     def on_thumbnail_decoded(self, media_id: int, qimage: QImage) -> None:
         """
@@ -2154,6 +2296,8 @@ class PhotoGalleryMainWindow(QMainWindow):
         stores in LruCache, and notifies CatalogListModel to repaint the cell.
         """
         self._active_thumb_flags.pop(media_id, None)
+        if not self._active_thumb_flags:
+            self._update_worker_monitor()
         if qimage.isNull():
             return
         pixmap = QPixmap.fromImage(qimage)
@@ -4789,15 +4933,22 @@ class PhotoGalleryMainWindow(QMainWindow):
         else:
             sync_detail = "Sync: Idle"
 
+        active_thumbs = len(getattr(self, "_active_thumb_flags", {}))
+        thumb_detail = f"🖼️ Thumbnails: {active_thumbs} active" if active_thumbs > 0 else "🖼️ Thumbnails: Idle"
+        is_crops = bool(getattr(self, "_face_crop_status_text", ""))
+        crop_detail = f"👤 Face Crops: {self._face_crop_status_text}" if is_crops else "👤 Face Crops: Idle"
+
         detailed_tooltip = (
             f"📁 {self._scanner_status_text}\n"
             f"👤 {self._face_status_text}\n"
+            f"{crop_detail}\n"
+            f"{thumb_detail}\n"
             f"💾 {sync_detail}\n\n"
             "Click for details / background options"
         )
 
         is_scanning = "Idle" not in self._scanner_status_text
-        is_faces = "Idle" not in self._face_status_text
+        is_faces = (getattr(self, "_face_worker", None) is not None) or ("Idle" not in self._face_status_text)
 
         if self._workers_paused:
             summary_text = "Workers Paused"
@@ -4809,7 +4960,16 @@ class PhotoGalleryMainWindow(QMainWindow):
             summary_text = self._scanner_status_text.replace("Scanning: ", "Indexing: ")
             style = "color: #0066CC; font-size: 8.5pt;"
         elif is_faces:
-            summary_text = self._face_status_text.replace("Faces: ", "Finding people: ")
+            if "Idle" not in self._face_status_text:
+                summary_text = self._face_status_text.replace("Faces: ", "Finding people: ")
+            else:
+                summary_text = "Finding people: Scanning..."
+            style = "color: #0066CC; font-size: 8.5pt;"
+        elif is_crops:
+            summary_text = self._face_crop_status_text
+            style = "color: #0066CC; font-size: 8.5pt;"
+        elif active_thumbs > 0:
+            summary_text = f"Loading thumbnails ({active_thumbs})"
             style = "color: #0066CC; font-size: 8.5pt;"
         elif dirty_count > 0:
             summary_text = f"Saving metadata: {dirty_count:,}"
