@@ -15,9 +15,14 @@ import io
 import logging
 import math
 import os
+import warnings
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+# Suppress InsightFace / skimage SimilarityTransform.estimate deprecation FutureWarning
+warnings.filterwarnings("ignore", message=r".*`estimate` is deprecated.*", category=FutureWarning)
+warnings.filterwarnings("ignore", category=FutureWarning, module=r"insightface.*")
 
 import cv2
 import numpy as np

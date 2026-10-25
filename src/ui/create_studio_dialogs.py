@@ -96,6 +96,40 @@ def _qcolor_to_bgr(color: QColor) -> tuple[int, int, int]:
     return color.blue(), color.green(), color.red()
 
 
+def prompt_save_new_file(
+    parent: QWidget,
+    base_file_path: Path | None,
+    suffix: str,
+    ext: str = ".jpg",
+    filter_str: str = "JPEG Image (*.jpg *.jpeg);;All Files (*.*)",
+) -> Path | None:
+    """
+    Prompts the user to save the newly created item:
+    - Makes it crystal clear that a new file is being created.
+    - Suggests a default filename based on the first photo's stem + suffix (e.g. DSC3125_colourPop.jpg).
+    - Opens a standard Save File dialog rooted in the source directory.
+    """
+    if base_file_path:
+        stem = base_file_path.stem
+        src_dir = base_file_path.parent
+    else:
+        stem = "Photo"
+        src_dir = Path.home()
+
+    default_name = f"{stem}_{suffix}{ext}"
+    initial_path = (src_dir / default_name).as_posix()
+
+    selected_path, _ = QFileDialog.getSaveFileName(
+        parent,
+        f"Save New File ({suffix})",
+        initial_path,
+        filter_str,
+    )
+    if not selected_path:
+        return None
+    return Path(selected_path)
+
+
 # =============================================================================
 # 1. Panorama Stitcher Dialog (Microsoft ICE-Style)
 # =============================================================================
@@ -236,7 +270,7 @@ class PanoramaDialog(QDialog):
         btn_layout.addWidget(self.lbl_dims)
         btn_layout.addStretch(1)
 
-        self.btn_save = QPushButton("Save Panorama")
+        self.btn_save = QPushButton("Save New Panorama...")
         self.btn_save.setEnabled(False)
         self.btn_save.setStyleSheet("""
             QPushButton {
@@ -319,9 +353,10 @@ class PanoramaDialog(QDialog):
         if self.current_stitched_bgr is None:
             return
 
-        timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H%M%S")
-        out_name = f"Panorama_{timestamp}.jpg"
-        out_path = self.output_dir / out_name
+        first_path = self.photo_paths[0] if self.photo_paths else None
+        out_path = prompt_save_new_file(self, first_path, "panorama", ".jpg")
+        if not out_path:
+            return
 
         try:
             cv2.imwrite(str(out_path), self.current_stitched_bgr, [int(cv2.IMWRITE_JPEG_QUALITY), 96])
@@ -420,7 +455,7 @@ class CollageDialog(QDialog):
         self.sld_corner.valueChanged.connect(self._render_preview)
         grid_opts_layout.addWidget(self.sld_corner)
 
-        self.btn_bg_color = QPushButton("Pick Background Color")
+        self.btn_bg_color = QPushButton("Pick Background Colour")
         self.btn_bg_color.clicked.connect(self._pick_bg_color)
         grid_opts_layout.addWidget(self.btn_bg_color)
         ctrl_layout.addWidget(self.frame_grid_opts)
@@ -459,7 +494,7 @@ class CollageDialog(QDialog):
         ctrl_layout.addStretch(1)
 
         # Save and Cancel
-        self.btn_save = QPushButton("Save Collage")
+        self.btn_save = QPushButton("Save New Collage...")
         self.btn_save.setStyleSheet("""
             QPushButton {
                 background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #3c82e6, stop:1 #1c52ba);
@@ -499,7 +534,7 @@ class CollageDialog(QDialog):
         self._render_preview()
 
     def _pick_bg_color(self) -> None:
-        col = QColorDialog.getColor(self.bg_color, self, "Select Background Color")
+        col = QColorDialog.getColor(self.bg_color, self, "Select Background Colour")
         if col.isValid():
             self.bg_color = col
             self._render_preview()
@@ -586,9 +621,12 @@ class CollageDialog(QDialog):
         if self.rendered_bgr is None:
             return
 
-        timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H%M%S")
-        out_name = f"Collage_{timestamp}.jpg"
-        out_path = self.output_dir / out_name
+        first_path = self.photos_data[0].get("file_path") if self.photos_data else None
+        if first_path is not None and not isinstance(first_path, Path):
+            first_path = Path(first_path)
+        out_path = prompt_save_new_file(self, first_path, "collage", ".jpg")
+        if not out_path:
+            return
 
         try:
             cv2.imwrite(str(out_path), self.rendered_bgr, [int(cv2.IMWRITE_JPEG_QUALITY), 96])
@@ -714,7 +752,7 @@ class PhotoFuseDialog(QDialog):
         self.btn_reset.clicked.connect(self._reset_to_base)
         btn_layout.addWidget(self.btn_reset)
 
-        self.btn_save = QPushButton("Save Fused Photo")
+        self.btn_save = QPushButton("Save New Fused Photo...")
         self.btn_save.setEnabled(False)
         self.btn_save.setStyleSheet("""
             QPushButton {
@@ -872,9 +910,10 @@ class PhotoFuseDialog(QDialog):
         if self.base_fused_bgr is None:
             return
 
-        timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H%M%S")
-        out_name = f"PhotoFuse_{timestamp}.jpg"
-        out_path = self.output_dir / out_name
+        first_path = self.photo_paths[0] if self.photo_paths else None
+        out_path = prompt_save_new_file(self, first_path, "photoFuse", ".jpg")
+        if not out_path:
+            return
 
         try:
             cv2.imwrite(str(out_path), self.base_fused_bgr, [int(cv2.IMWRITE_JPEG_QUALITY), 96])
@@ -885,12 +924,12 @@ class PhotoFuseDialog(QDialog):
 
 
 # =============================================================================
-# 4. Google Photos-Style "Color Pop" (Subject Color Splash) Dialog & Canvas
+# 4. Google Photos-Style "Colour Pop" (Subject Colour Splash) Dialog & Canvas
 # =============================================================================
 
-class ColorPopCanvasView(QGraphicsView):
+class ColourPopCanvasView(QGraphicsView):
     """
-    High-performance interactive canvas for Color Pop brush editing:
+    High-performance interactive canvas for Colour Pop brush editing:
     - Real-time circular brush cursor following the pointer.
     - Continuous stroke interpolation between mouse moves so fast drags do not leave gaps.
     - Middle-click or Space+Drag for panning, mouse wheel for zoom.
@@ -1020,10 +1059,10 @@ class ColorPopCanvasView(QGraphicsView):
         event.accept()
 
 
-class ColorPopDialog(QDialog):
+class ColourPopDialog(QDialog):
     """
-    Google Photos-Style Color Pop Studio:
-    - Subject remains in full vibrant color while background is converted to dramatic B&W.
+    Google Photos-Style Colour Pop Studio:
+    - Subject remains in full vibrant colour while background is converted to dramatic B&W.
     - Seeding via GrabCut segmentation / face detection.
     - Continuous 60 FPS proxy painting with bilateral edge-aware brush snapping.
     - Full undo/redo history, before/after compare, and live parameter readouts.
@@ -1077,7 +1116,7 @@ class ColorPopDialog(QDialog):
         self.proxy_bw: np.ndarray | None = None
         self._precompute_proxy_bw()
 
-        self.setWindowTitle("Color Pop Studio — Subject Color Splash")
+        self.setWindowTitle("Colour Pop Studio — Subject Colour Splash")
         self.setWindowIcon(make_wlpg_icon("color_spectrum", 24))
         self.resize(1080, 720)
         self._init_ui()
@@ -1106,9 +1145,9 @@ class ColorPopDialog(QDialog):
         h_layout.addWidget(lbl_icon)
 
         title_vbox = QVBoxLayout()
-        lbl_title = QLabel("Color Pop Studio")
+        lbl_title = QLabel("Colour Pop Studio")
         lbl_title.setStyleSheet("font-size: 15px; font-weight: bold; color: #1e395b;")
-        lbl_sub = QLabel("Keep the main subject in vibrant color while converting background to dramatic black & white.")
+        lbl_sub = QLabel("Keep the main subject in vibrant colour while converting background to dramatic black & white.")
         lbl_sub.setStyleSheet("color: #555555; font-size: 11px;")
         title_vbox.addWidget(lbl_title)
         title_vbox.addWidget(lbl_sub)
@@ -1117,7 +1156,7 @@ class ColorPopDialog(QDialog):
 
         # Quick Actions in header
         self.btn_invert = QPushButton("Invert Mask")
-        self.btn_invert.setToolTip("Swap color subject and B&W background")
+        self.btn_invert.setToolTip("Swap colour subject and B&W background")
         self.btn_invert.setStyleSheet("padding: 4px 10px; border-radius: 3px; border: 1px solid #b0c2de; background: #ffffff;")
         self.btn_invert.clicked.connect(self._invert_mask)
         h_layout.addWidget(self.btn_invert)
@@ -1141,7 +1180,7 @@ class ColorPopDialog(QDialog):
         self.btn_group_mode = QButtonGroup(self)
         self.btn_group_mode.setExclusive(True)
 
-        self.btn_keep = QPushButton("Keep Color (+)")
+        self.btn_keep = QPushButton("Keep Colour (+)")
         self.btn_keep.setCheckable(True)
         self.btn_keep.setChecked(True)
         self.btn_keep.setStyleSheet("""
@@ -1242,7 +1281,7 @@ class ColorPopDialog(QDialog):
         layout.addWidget(bar)
 
         # 3. Interactive Canvas
-        self.view = ColorPopCanvasView(self)
+        self.view = ColourPopCanvasView(self)
         self.scene = QGraphicsScene(self)
         self.view.setScene(self.scene)
         self.view.set_brush_radius(self.brush_radius)
@@ -1256,7 +1295,7 @@ class ColorPopDialog(QDialog):
 
         # 4. Bottom Footer & Status
         btn_layout = QHBoxLayout()
-        self.lbl_status = QLabel("✓ Paint over photo to add or remove color • Space to Pan • Wheel to Zoom")
+        self.lbl_status = QLabel("✓ Paint over photo to add or remove colour • Space to Pan • Wheel to Zoom")
         self.lbl_status.setStyleSheet("color: #444; font-size: 11px;")
         btn_layout.addWidget(self.lbl_status)
         btn_layout.addStretch(1)
@@ -1273,12 +1312,12 @@ class ColorPopDialog(QDialog):
         btn_layout.addSpacing(12)
 
         # Save & Cancel
-        btn_save = QPushButton("Save Color Pop Photo")
+        btn_save = QPushButton("Save New Colour Pop Photo...")
         btn_save.setStyleSheet("""
             QPushButton {
                 background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #3c82e6, stop:1 #1c52ba);
                 color: white; font-weight: bold; border: 1px solid #143e8c;
-                border-radius: 4px; padding: 6px 20px; min-width: 130px;
+                border-radius: 4px; padding: 6px 20px; min-width: 140px;
             }
             QPushButton:hover { background: #4d8ff2; }
         """)
@@ -1306,12 +1345,12 @@ class ColorPopDialog(QDialog):
         self.brush_mode = mode
         self.btn_keep.setChecked(mode == "keep_color")
         self.btn_bw.setChecked(mode == "make_bw")
-        self.lbl_status.setText(f"Active Brush: {'Keep Vibrant Color (+)' if mode == 'keep_color' else 'Make Dramatic B&W (-)'}")
+        self.lbl_status.setText(f"Active Brush: {'Keep Vibrant Colour (+)' if mode == 'keep_color' else 'Make Dramatic B&W (-)'}")
 
     def _on_radius_changed(self, val: int) -> None:
         self.brush_radius = val
         self.lbl_radius_val.setText(f"{val} px")
-        self.view.set_brush_radius(int(val * self.proxy_scale))
+        self.view.set_brush_radius(val)
 
     def _on_contrast_changed(self, val: int) -> None:
         self.bg_contrast = val / 100.0
@@ -1339,12 +1378,11 @@ class ColorPopDialog(QDialog):
     def _on_brush_applied(self, sx: int, sy: int) -> None:
         ph, pw = self.proxy_bgr.shape[:2]
         if 0 <= sx < pw and 0 <= sy < ph:
-            r = max(4, int(self.brush_radius * self.proxy_scale))
             self.proxy_mask = refine_mask_brush(
                 self.proxy_mask,
                 self.proxy_bgr,
                 (sx, sy),
-                radius=r,
+                radius=self.brush_radius,
                 mode=self.brush_mode,
             )
             self._fast_refresh_proxy()
@@ -1398,7 +1436,11 @@ class ColorPopDialog(QDialog):
         self._fast_refresh_proxy()
 
     def _save_photo(self) -> None:
-        self.lbl_status.setText("Rendering high-resolution Color Pop photo...")
+        out_path = prompt_save_new_file(self, self.file_path, "colourPop", ".jpg")
+        if not out_path:
+            return
+
+        self.lbl_status.setText("Rendering high-resolution Colour Pop photo...")
         QApplication.processEvents()
 
         h, w = self.original_bgr.shape[:2]
@@ -1416,16 +1458,17 @@ class ColorPopDialog(QDialog):
             bg_brightness=self.bg_brightness,
         )
 
-        timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H%M%S")
-        out_name = f"ColorPop_{timestamp}.jpg"
-        out_path = self.output_dir / out_name
-
         try:
             cv2.imwrite(str(out_path), full_color_pop, [int(cv2.IMWRITE_JPEG_QUALITY), 96])
             self.saved_file_path = out_path
             self.accept()
         except Exception as e:
             QMessageBox.critical(self, "Save Error", f"Could not save photo:\n{e}")
+
+
+# Backwards compatibility aliases
+ColorPopCanvasView = ColourPopCanvasView
+ColorPopDialog = ColourPopDialog
 
 
 # =============================================================================
@@ -1571,7 +1614,7 @@ class PortraitBokehDialog(QDialog):
         btn_layout.addWidget(QLabel(f"Resolution: {self.original_bgr.shape[1]} × {self.original_bgr.shape[0]} px"))
         btn_layout.addStretch(1)
 
-        btn_save = QPushButton("Save Portrait Photo")
+        btn_save = QPushButton("Save New Portrait Bokeh Photo...")
         btn_save.setStyleSheet("""
             QPushButton {
                 background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #3c82e6, stop:1 #1c52ba);
@@ -1625,6 +1668,10 @@ class PortraitBokehDialog(QDialog):
             self.bg_item.setPixmap(_cv2_to_qpixmap(self.rendered_proxy))
 
     def _save_photo(self) -> None:
+        out_path = prompt_save_new_file(self, self.file_path, "portraitBokeh", ".jpg")
+        if not out_path:
+            return
+
         h, w = self.original_bgr.shape[:2]
         full_mask = cv2.resize(self.proxy_mask, (w, h), interpolation=cv2.INTER_LINEAR) if self.proxy_scale != 1.0 else self.proxy_mask
         full_bokeh = apply_portrait_bokeh_and_fill_light(
@@ -1633,10 +1680,6 @@ class PortraitBokehDialog(QDialog):
             bokeh_radius=self.sld_blur.value(),
             fill_light=self.sld_fill.value() / 100.0,
         )
-
-        timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H%M%S")
-        out_name = f"PortraitBokeh_{timestamp}.jpg"
-        out_path = self.output_dir / out_name
 
         try:
             cv2.imwrite(str(out_path), full_bokeh, [int(cv2.IMWRITE_JPEG_QUALITY), 96])
@@ -1783,7 +1826,7 @@ class CinematicMotionDialog(QDialog):
         btn_layout = QHBoxLayout()
         btn_layout.addStretch(1)
 
-        self.btn_render = QPushButton("Render 3D Motion Video (.mp4)")
+        self.btn_render = QPushButton("Save New 3D Motion Video (.mp4)...")
         self.btn_render.setStyleSheet("""
             QPushButton {
                 background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #3c82e6, stop:1 #1c52ba);
@@ -1836,15 +1879,21 @@ class CinematicMotionDialog(QDialog):
         self.lbl_thumb.setPixmap(self._preview_frames[self._current_frame_idx])
 
     def _start_render(self) -> None:
+        out_path = prompt_save_new_file(
+            self,
+            self.file_path,
+            "cinematic3D",
+            ".mp4",
+            "MP4 Video (*.mp4);;All Files (*.*)",
+        )
+        if not out_path:
+            return
+
         if self._timer:
             self._timer.stop()
         self.btn_render.setEnabled(False)
         self.progress_bar.setValue(0)
         self.lbl_status.setText("Estimating depth layers and inpainting background disocclusion...")
-
-        timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H%M%S")
-        out_name = f"Cinematic3D_{timestamp}.mp4"
-        out_path = self.output_dir / out_name
 
         dur_text = self.cmb_duration.currentText()
         duration = 3.0 if "3" in dur_text else (8.0 if "8" in dur_text else 5.0)

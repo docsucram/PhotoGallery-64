@@ -219,7 +219,7 @@ def test_single_media_viewer_markup_mode_and_dialogs(qapp, tmp_path: Path):
     cv2.imwrite(str(p), test_img)
 
     dlg_pop = ColorPopDialog(test_img, p)
-    assert dlg_pop.windowTitle().startswith("Color Pop")
+    assert dlg_pop.windowTitle().startswith("Colour Pop") or dlg_pop.windowTitle().startswith("Color Pop")
     dlg_pop.close()
 
     dlg_bokeh = PortraitBokehDialog(test_img, p)
@@ -231,7 +231,7 @@ def test_single_media_viewer_markup_mode_and_dialogs(qapp, tmp_path: Path):
     dlg_cinematic.close()
 
 
-def test_color_pop_interactive_tools_and_undo_redo(qapp, tmp_path: Path):
+def test_color_pop_interactive_tools_and_undo_redo(qapp, tmp_path: Path, monkeypatch):
     """Verifies ColorPopDialog canvas interaction, painting, undo/redo, invert, and save without crash."""
     from PySide6.QtCore import QPoint
     from PySide6.QtGui import QMouseEvent
@@ -294,11 +294,37 @@ def test_color_pop_interactive_tools_and_undo_redo(qapp, tmp_path: Path):
     dlg._restore_color_pop()
     qapp.processEvents()
 
-    # 7. Test Save / Apply
+    # 7. Test Save / Apply with new file prompt
+    out_save_path = tmp_path / "interactive_pop_colourPop.jpg"
+    monkeypatch.setattr(
+        "src.ui.create_studio_dialogs.QFileDialog.getSaveFileName",
+        lambda *args, **kwargs: (str(out_save_path), "JPEG Image (*.jpg *.jpeg)"),
+    )
     dlg._save_photo()
-    saved_files = list(tmp_path.glob("ColorPop_*.jpg"))
-    assert len(saved_files) >= 1
-    assert saved_files[0].exists()
+    assert out_save_path.exists()
+    assert dlg.saved_file_path == out_save_path
 
     dlg.close()
+
+
+def test_portrait_bokeh_anatomical_mask_and_normalized_conv():
+    """
+    Verifies that estimate_subject_mask with face coordinates:
+    - Eliminates tree/car halo beside head (mask == 0.0 outside head at eye/ear level).
+    - Eliminates bottom jacket horizontal seam (mask > 0.8 all the way to bottom edge).
+    """
+    h, w = 1000, 1000
+    img = np.full((h, w, 3), 210, dtype=np.uint8)
+    # Face and standing body
+    img[280:460, 520:630] = [150, 180, 220]
+    img[460:1000, 420:720] = [40, 40, 40]
+
+    fx, fy, fw, fh = int(w * 0.52), int(h * 0.28), int(w * 0.11), int(h * 0.18)
+    mask = estimate_subject_mask(img, [(fx, fy, fw, fh)])
+
+    # Beside head (left & right at eye/ear level) must be clean background
+    assert mask[int(h * 0.35), int(w * 0.35)] == 0.0
+    assert mask[int(h * 0.35), int(w * 0.70)] == 0.0
+    # Lower jacket near bottom of photo (y = 96%) must be foreground
+    assert mask[int(h * 0.96), int(w * 0.57)] > 0.8
 

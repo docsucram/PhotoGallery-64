@@ -11,6 +11,7 @@ import sys
 from pathlib import Path
 
 from PySide6.QtCore import QLoggingCategory, Qt
+from PySide6.QtGui import QColor, QPalette
 from PySide6.QtWidgets import QApplication
 
 from src.db.connection import DualDatabaseEngine
@@ -31,6 +32,10 @@ def create_app(argv: list[str] | None = None) -> QApplication:
     app = QApplication(argv if argv is not None else sys.argv)
     app.setApplicationName("PhotoGallery64")
     app.setOrganizationName("PhotoGallery64")
+    palette = app.palette()
+    palette.setColor(QPalette.ColorRole.ToolTipBase, QColor("#FFFFFF"))
+    palette.setColor(QPalette.ColorRole.ToolTipText, QColor("#1E395B"))
+    app.setPalette(palette)
     app.setStyleSheet(
         "QToolTip { "
         "background-color: #FFFFFF; "

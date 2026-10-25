@@ -41,10 +41,12 @@ QLoggingCategory.setFilterRules(
     "qt.gui.imageio.warning=false\n"
 )
 from PySide6.QtGui import (
+    QColor,
     QImage,
     QKeyEvent,
     QKeySequence,
     QMouseEvent,
+    QPalette,
     QPixmap,
     QShortcut,
     QTransform,
@@ -4408,21 +4410,21 @@ class PhotoGalleryMainWindow(QMainWindow):
         return p, bgr
 
     def open_color_pop_dialog(self) -> None:
-        """Launches the Google Photos-Style Color Pop Studio."""
-        from src.ui.create_studio_dialogs import ColorPopDialog
+        """Launches the Google Photos-Style Colour Pop Studio."""
+        from src.ui.create_studio_dialogs import ColourPopDialog
 
         p, bgr = self._get_single_selected_photo_and_bgr()
         if bgr is None:
-            QMessageBox.information(self, "Color Pop", "Please select a photo to apply Color Pop.")
+            QMessageBox.information(self, "Colour Pop", "Please select a photo to apply Colour Pop.")
             return
 
-        dlg = ColorPopDialog(bgr, p, self)
+        dlg = ColourPopDialog(bgr, p, self)
         if dlg.exec() == QDialog.Accepted and dlg.saved_file_path:
             out_file = dlg.saved_file_path
             self.scan_folder(out_file.parent, include_subfolders=False)
             self.rebuild_and_run_query()
             self._select_file_in_grid(out_file)
-            self.lbl_sync_status.setText(f"✓ Created Color Pop photo: {out_file.name}")
+            self.lbl_sync_status.setText(f"✓ Created Colour Pop photo: {out_file.name}")
 
     def open_portrait_bokeh_dialog(self) -> None:
         """Launches the Portrait Depth Bokeh & Fill Light Studio."""
@@ -5102,6 +5104,10 @@ class PhotoGalleryMainWindow(QMainWindow):
             self.setStyleSheet(qss)
             app = QApplication.instance()
             if app:
+                pal = app.palette()
+                pal.setColor(QPalette.ColorRole.ToolTipBase, QColor("#FFFFFF"))
+                pal.setColor(QPalette.ColorRole.ToolTipText, QColor("#1E395B"))
+                app.setPalette(pal)
                 app.setStyleSheet(qss)
 
     def keyPressEvent(self, event: QKeyEvent) -> None:

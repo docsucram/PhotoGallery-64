@@ -73,6 +73,19 @@ def _make_pin_icon(pinned: bool, size: int = 16) -> QIcon:
     return QIcon(pix)
 
 
+_AERO_TOOLTIP_STYLE = """
+QToolTip {
+    background-color: #FFFFFF;
+    color: #1E395B;
+    border: 1px solid #7DA2CE;
+    border-radius: 2px;
+    padding: 3px 6px;
+    font-family: 'Segoe UI', sans-serif;
+    font-size: 9pt;
+}
+"""
+
+
 class FilterChip(QFrame):
     """
     Subtle aero chip displaying an active filter facet matching authentic Windows Live Photo Gallery.
@@ -120,7 +133,7 @@ class FilterChip(QFrame):
                 background: #F8D7DA;
                 border-radius: 2px;
             }
-            """
+            """ + _AERO_TOOLTIP_STYLE
         )
         self.btn_close.clicked.connect(self.remove_clicked.emit)
         self._hbox.addWidget(self.btn_close)
@@ -236,7 +249,7 @@ class SearchScopeBar(QFrame):
                 background: #CCE2F7;
                 border-color: #7AAAD4;
             }
-            """
+            """ + _AERO_TOOLTIP_STYLE
         )
         self.btn_pin.toggled.connect(self._on_pin_toggled)
         r1_layout.addWidget(self.btn_pin)
@@ -263,7 +276,7 @@ class SearchScopeBar(QFrame):
                 background: #F8D7DA;
                 border: 1px solid #E8B4B8;
             }
-            """
+            """ + _AERO_TOOLTIP_STYLE
         )
         self.btn_close.clicked.connect(self._on_close_clicked)
         r1_layout.addWidget(self.btn_close)
@@ -316,7 +329,7 @@ class SearchScopeBar(QFrame):
             QPushButton:hover {
                 color: #004499;
             }
-            """
+            """ + _AERO_TOOLTIP_STYLE
         )
         self.btn_search_all.clicked.connect(self.search_all_requested.emit)
         self.r2_layout.addWidget(self.btn_search_all)
@@ -360,7 +373,7 @@ class SearchScopeBar(QFrame):
             QLineEdit#ScopeBarSearchInput:focus {
                 border: 1px solid #3380CC;
             }
-            """
+            """ + _AERO_TOOLTIP_STYLE
         )
         self.txt_search.textChanged.connect(self._on_search_text_edited)
         self.txt_search.returnPressed.connect(self._emit_search_text)

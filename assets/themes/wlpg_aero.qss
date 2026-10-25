@@ -1,4 +1,14 @@
 /* Windows Live Photo Gallery 2012 Classic Aero Light Theme */
+QToolTip {
+    background-color: #FFFFFF;
+    color: #1E395B;
+    border: 1px solid #7DA2CE;
+    border-radius: 2px;
+    padding: 3px 6px;
+    font-family: "Segoe UI", sans-serif;
+    font-size: 9pt;
+}
+
 QMainWindow {
     background-color: #FFFFFF;
     color: #1E1E1E;

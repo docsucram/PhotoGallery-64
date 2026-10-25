@@ -4709,8 +4709,8 @@ class RibbonToolbar(QWidget):
         self.btn_collage = btn_collage
         grp_tools.content_layout.addWidget(btn_collage)
 
-        btn_pop = self._make_btn("Color Pop", "color_spectrum", grp_tools, large=True)
-        btn_pop.setToolTip("Google Photos-Style Color Pop: keep subject in vibrant color while making background B&W.")
+        btn_pop = self._make_btn("Colour Pop", "color_spectrum", grp_tools, large=True)
+        btn_pop.setToolTip("Google Photos-Style Colour Pop: keep subject in vibrant colour while making background B&W.")
         btn_pop.clicked.connect(lambda: self.action_triggered.emit("color_pop"))
         self.btn_color_pop = btn_pop
         grp_tools.content_layout.addWidget(btn_pop)
