@@ -1227,18 +1227,26 @@ class WLPGSplitterHandle(QSplitterHandle):
         else:
             super().mousePressEvent(event)
 
+    def _on_splitter_moved(self) -> None:
+        splitter = self.splitter()
+        if splitter:
+            sizes = splitter.sizes()
+            if len(sizes) == 2:
+                self._collapsed = (sizes[1] <= 35)
+                self.update()
+
     def toggle_collapse(self) -> None:
         splitter = self.splitter()
         if splitter:
             sizes = splitter.sizes()
             if len(sizes) == 2:
-                if sizes[1] > 20:
+                if sizes[1] > 35:
                     self._last_bottom_size = sizes[1]
-                    splitter.setSizes([sizes[0] + sizes[1], 0])
+                    splitter.setSizes([sizes[0] + sizes[1] - 28, 28])
                     self._collapsed = True
                 else:
                     restored = max(140, self._last_bottom_size)
-                    splitter.setSizes([max(100, sizes[0] - restored), restored])
+                    splitter.setSizes([max(100, sizes[0] + sizes[1] - restored), restored])
                     self._collapsed = False
                 self.update()
 
@@ -1247,7 +1255,9 @@ class WLPGSplitter(QSplitter):
     """Vertical QSplitter using authentic WLPG handle with gradient line and collapse glyph."""
 
     def createHandle(self) -> QSplitterHandle:
-        return WLPGSplitterHandle(self.orientation(), self)
+        handle = WLPGSplitterHandle(self.orientation(), self)
+        self.splitterMoved.connect(lambda pos, index: handle._on_splitter_moved())
+        return handle
 
 
 class TagAndCaptionDock(QDockWidget):
@@ -1303,11 +1313,11 @@ class TagAndCaptionDock(QDockWidget):
         super().__init__("Tag and caption", parent)
         self.setObjectName("TagAndCaptionDock")
         self.setFeatures(
-            QDockWidget.DockWidgetClosable | QDockWidget.DockWidgetMovable
+            QDockWidget.DockWidgetClosable
         )
         self.setTitleBarWidget(QWidget(self))  # Hide default ugly dock titlebar
         self.setMinimumWidth(160)
-        self.setMaximumWidth(340)
+        self.setMaximumWidth(600)
 
         self._current_mode: Literal["info", "fine_tune"] = "info"
         self._selected_ids: list[int] = []
@@ -1521,6 +1531,7 @@ class TagAndCaptionDock(QDockWidget):
         bottom_scroll.setWidgetResizable(True)
         bottom_scroll.setFrameShape(QFrame.NoFrame)
         bottom_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        bottom_scroll.setMinimumHeight(28)
         bottom_scroll.setStyleSheet("background-color: #FFFFFF; border: none;")
 
         bottom_content = QWidget(bottom_scroll)
@@ -1747,6 +1758,8 @@ class TagAndCaptionDock(QDockWidget):
 
         self.info_splitter.addWidget(top_scroll)
         self.info_splitter.addWidget(bottom_scroll)
+        self.info_splitter.setCollapsible(0, False)
+        self.info_splitter.setCollapsible(1, False)
         self.info_splitter.setSizes([320, 240])
 
         page_layout.addWidget(self.info_splitter)

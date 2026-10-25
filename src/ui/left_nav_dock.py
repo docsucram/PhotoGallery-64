@@ -299,7 +299,7 @@ class LeftNavigationDock(QDockWidget):
         super().__init__("Navigation", parent)
         self.setObjectName("LeftNavigationDock")
         self.setFeatures(
-            QDockWidget.DockWidgetMovable
+            QDockWidget.DockWidgetClosable
         )
         # Hide the dock titlebar so the left pane starts cleanly with the tree like WLPG
         self.setTitleBarWidget(QWidget(self))

@@ -392,7 +392,7 @@ class DualDatabaseEngine:
         try:
             cur.execute("CREATE TABLE IF NOT EXISTS schema_flags (name TEXT PRIMARY KEY);")
             done = cur.execute(
-                "SELECT 1 FROM schema_flags WHERE name = 'dedup_media_tags_v1';"
+                "SELECT 1 FROM schema_flags WHERE name = 'dedup_media_tags_v2';"
             ).fetchone()
             if not done:
                 if cur.execute("PRAGMA table_info(media_tags);").fetchall():
@@ -420,10 +420,10 @@ class DualDatabaseEngine:
                         """
                     )
                 cur.execute(
-                    "INSERT OR IGNORE INTO schema_flags(name) VALUES ('dedup_media_tags_v1');"
+                    "INSERT OR IGNORE INTO schema_flags(name) VALUES ('dedup_media_tags_v2');"
                 )
         except Exception as exc:
-            logger.warning("Error in dedup_media_tags_v1 migration: %s", exc)
+            logger.warning("Error in dedup_media_tags_v2 migration: %s", exc)
         conn.commit()
 
     def _migrate_thumbnails_schema(self, conn: sqlite3.Connection) -> None:

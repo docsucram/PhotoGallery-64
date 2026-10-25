@@ -13,7 +13,7 @@ import logging
 from typing import Any
 
 import numpy as np
-from PySide6.QtCore import QPoint, QRect, QSize, Qt, Signal
+from PySide6.QtCore import QObject, QPoint, QRect, QRunnable, QSize, Qt, QThreadPool, Signal
 from PySide6.QtGui import (
     QBrush,
     QColor,
@@ -528,6 +528,31 @@ class _UnnamedPersonCard(QFrame):
 _UnnamedClusterCard = _UnnamedPersonCard  # Backward compatibility alias
 
 
+class _UnnamedClusterSignals(QObject):
+    clusters_ready = Signal(int, list)
+
+
+class _UnnamedClusterWorker(QRunnable):
+    """Background worker that computes unnamed face clusters without blocking GUI."""
+
+    def __init__(self, repo: CatalogRepository, gen_id: int, signals: _UnnamedClusterSignals) -> None:
+        super().__init__()
+        self.repo = repo
+        self.gen_id = gen_id
+        self.signals = signals
+
+    def run(self) -> None:
+        try:
+            clusters = self.repo.get_unnamed_face_clusters()
+            self.signals.clusters_ready.emit(self.gen_id, clusters)
+        except Exception:
+            pass
+        finally:
+            import threading
+            if threading.current_thread() is not threading.main_thread():
+                self.repo.engine.close_thread_connections()
+
+
 class PeopleDirectoryView(QWidget):
     """
     Main People Directory visual directory view (Immich / Google Photos inspired).
@@ -550,6 +575,9 @@ class PeopleDirectoryView(QWidget):
         self.thumb_repo = ThumbnailRepository(engine)
         self._all_named_people: list[dict[str, Any]] = []
         self._all_unnamed_clusters: list[dict[str, Any]] = []
+        self._cluster_gen_id: int = 0
+        self._cluster_signals = _UnnamedClusterSignals()
+        self._cluster_signals.clusters_ready.connect(self._on_unnamed_clusters_ready)
 
         self._setup_ui()
 
@@ -777,10 +805,8 @@ class PeopleDirectoryView(QWidget):
     # Directory Data Refresh & Rendering
     # -------------------------------------------------------------------------
     def refresh_directory(self) -> None:
-        """Fetches named people and unnamed people and re-renders grid cards."""
-        data = self.repo.get_people_directory_data()
-        self._all_named_people = data.get("named_people", [])
-        self._all_unnamed_clusters = data.get("unnamed_clusters", [])
+        """Fetches named people immediately (<80ms) and computes unnamed people in background."""
+        self._all_named_people = self.repo.get_named_people_directory_data()
 
         total_cnt = len(self._all_named_people)
         self.lbl_total_count.setText(f"({total_cnt:,})")
@@ -834,6 +860,17 @@ class PeopleDirectoryView(QWidget):
                 """
             )
 
+        self._render_grids()
+
+        # Compute unnamed face clusters asynchronously to prevent GUI pause
+        self._cluster_gen_id += 1
+        worker = _UnnamedClusterWorker(self.repo, self._cluster_gen_id, self._cluster_signals)
+        QThreadPool.globalInstance().start(worker)
+
+    def _on_unnamed_clusters_ready(self, gen_id: int, clusters: list[dict[str, Any]]) -> None:
+        if gen_id != self._cluster_gen_id:
+            return
+        self._all_unnamed_clusters = clusters
         self._render_grids()
 
     def reload_directory(self) -> None:

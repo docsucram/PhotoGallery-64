@@ -1149,7 +1149,7 @@ def _assign_tags_and_people_for_media(
         norm_path = str(tag_path).replace("|", "/").strip().strip("/")
         if not norm_path:
             continue
-        if norm_path.lower().startswith(("face/", "peopletags/")):
+        if norm_path.lower().startswith("face/"):
             parts = [p.strip() for p in norm_path.split("/") if p.strip()]
             person_name = _resolve_person_name_from_tag(repo, parts)
             if person_name and person_name.lower() not in assigned_people_names:

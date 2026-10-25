@@ -5145,6 +5145,8 @@ class RibbonToolbar(QWidget):
         self.btn_toggle_nav_pane = self._make_btn(
             "Navigation\npane", "pane_left", grp_panes, large=True, checkable=True
         )
+        self.btn_toggle_nav_pane.setToolTip("Navigation pane (Ctrl+N)")
+        self.btn_toggle_nav_pane._tooltip_override = "Navigation pane (Ctrl+N)"
         self.btn_toggle_nav_pane.setChecked(True)
         self.btn_toggle_nav_pane.clicked.connect(
             lambda: self.action_triggered.emit("toggle_nav_pane")

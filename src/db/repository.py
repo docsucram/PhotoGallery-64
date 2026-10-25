@@ -2320,11 +2320,8 @@ class CatalogRepository:
 
     get_all_people = get_people_list
 
-    def get_people_directory_data(self) -> dict[str, Any]:
-        """
-        Fetches named people with confirmed photo counts and pending suggestion counts,
-        plus recurring unnamed face clusters (>= 3 unassigned faces) for Immich-style directory.
-        """
+    def get_named_people_directory_data(self) -> list[dict[str, Any]]:
+        """Fast query (<80ms) for named people with photo and pending suggestion counts."""
         conn = self.engine.catalog_conn()
         named_rows = conn.execute(
             """
@@ -2348,7 +2345,11 @@ class CatalogRepository:
                 "photo_count": int(r["photo_count"] or 0),
                 "suggestion_count": int(r["suggestion_count"] or 0),
             })
+        return named_people
 
+    def get_unnamed_face_clusters(self) -> list[dict[str, Any]]:
+        """Clusters unassigned face embeddings into recurring unnamed face groups."""
+        conn = self.engine.catalog_conn()
         unassigned_rows = conn.execute(
             """
             SELECT id, embedding
@@ -2382,7 +2383,15 @@ class CatalogRepository:
                             "face_count": len(fids),
                             "representative_face_id": fids[0],
                         })
+        return unnamed_clusters
 
+    def get_people_directory_data(self, include_unnamed_clusters: bool = True) -> dict[str, Any]:
+        """
+        Fetches named people with confirmed photo counts and pending suggestion counts,
+        plus recurring unnamed face clusters (>= 3 unassigned faces) if requested.
+        """
+        named_people = self.get_named_people_directory_data()
+        unnamed_clusters = self.get_unnamed_face_clusters() if include_unnamed_clusters else []
         return {
             "named_people": named_people,
             "unnamed_clusters": unnamed_clusters,

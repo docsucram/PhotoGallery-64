@@ -1156,9 +1156,12 @@ class PhotoGalleryMainWindow(QMainWindow):
             self.media_viewer.apply_auto_adjust
         )
 
-        # Keyboard shortcuts: Ctrl+I, Ctrl+F, Ctrl+T, Undo/Redo, Navigation, Select All, Cut/Copy/Paste
+        # Keyboard shortcuts: Ctrl+I, Ctrl+F, Ctrl+N, Ctrl+T, Undo/Redo, Navigation, Select All, Cut/Copy/Paste
         self.sc_info = QShortcut(QKeySequence("Ctrl+I"), self)
         self.sc_info.activated.connect(lambda: self.toggle_right_pane("info"))
+
+        self.sc_nav_pane = QShortcut(QKeySequence("Ctrl+N"), self)
+        self.sc_nav_pane.activated.connect(self.toggle_navigation_pane)
 
         self.sc_add_tag = QShortcut(QKeySequence("Ctrl+T"), self)
         self.sc_add_tag.activated.connect(self.focus_descriptive_tag_box)
@@ -4116,6 +4119,10 @@ class PhotoGalleryMainWindow(QMainWindow):
                 )
         if hasattr(self.ribbon, "btn_toggle_tag_pane"):
             self.ribbon.btn_toggle_tag_pane.setChecked(not self.right_tag_dock.isHidden())
+
+    def toggle_navigation_pane(self) -> None:
+        """Toggles the left navigation pane visibility (Ctrl+N)."""
+        self.dispatch_ribbon_action("toggle_nav_pane")
 
     def dispatch_ribbon_action(self, action_id: str) -> None:
         if action_id == "add_folder":

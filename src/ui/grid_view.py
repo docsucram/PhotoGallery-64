@@ -936,11 +936,19 @@ class ThumbnailGridView(QListView):
             total_top_h += self.person_header_bar.height() + 8
         if getattr(self, "scope_bar", None) is not None and self.scope_bar.isVisible():
             total_top_h += 68
-        if total_top_h > 0:
-            sb = self.verticalScrollBar()
-            if sb.isVisible():
-                sb_w = sb.width() or 14
-                sb.setGeometry(self.width() - sb_w, total_top_h, sb_w, max(0, self.height() - total_top_h))
+        sb = self.verticalScrollBar()
+        if sb is not None:
+            sb_w = sb.sizeHint().width() or sb.width() or 14
+            top_y = total_top_h
+            avail_h = max(0, self.height() - top_y)
+            p = sb.parentWidget()
+            if p is not None and p is not self:
+                p.setGeometry(self.width() - sb_w, top_y, sb_w, avail_h)
+                sb.setGeometry(0, 0, sb_w, avail_h)
+                p.raise_()
+            else:
+                sb.setGeometry(self.width() - sb_w, top_y, sb_w, avail_h)
+            sb.raise_()
 
     def _on_scroll_value_changed(self, _val: int) -> None:
         self.viewport().update()
