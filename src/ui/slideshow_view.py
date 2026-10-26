@@ -21,6 +21,7 @@ from __future__ import annotations
 import math
 import os
 import random
+import time
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
@@ -236,6 +237,15 @@ class SlideshowHud(QFrame):
                 selection-background-color: #0078D7;
                 selection-color: #FFFFFF;
                 border: 1px solid #70A6E8;
+            }
+            QToolTip {
+                background-color: #FFFFFF;
+                color: #1E293B;
+                border: 1px solid #767676;
+                border-radius: 2px;
+                padding: 3px 6px;
+                font-family: 'Segoe UI';
+                font-size: 8.5pt;
             }
             """
         )
@@ -553,8 +563,9 @@ class FullscreenSlideshowDialog(QDialog):
         self.slide_timer.setInterval(self.interval_ms)
         self.slide_timer.timeout.connect(self.next_slide)
 
-        # 60 FPS smooth animation timer (16ms tick)
+        # 60 FPS smooth animation timer (16ms tick) with sub-millisecond precision
         self.anim_timer = QTimer(self)
+        self.anim_timer.setTimerType(Qt.PreciseTimer)
         self.anim_timer.setInterval(16)
         self.anim_timer.timeout.connect(self._on_anim_tick)
 
@@ -653,10 +664,19 @@ class FullscreenSlideshowDialog(QDialog):
         super().keyPressEvent(event)
 
     def _on_anim_tick(self) -> None:
+        now = time.perf_counter()
+        last = getattr(self, "_last_tick_time", None)
+        if last is not None:
+            delta_ms = (now - last) * 1000.0
+        else:
+            delta_ms = 16.0
+        self._last_tick_time = now
+
         if self.is_playing:
-            self._slide_elapsed_ms += 16
+            self._slide_elapsed_ms += delta_ms
             if self._slide_elapsed_ms >= self.interval_ms:
-                self._slide_elapsed_ms = 0
+                self._slide_elapsed_ms = 0.0
+                self._last_tick_time = None
                 self.next_slide()
                 return
         self.update()
@@ -727,7 +747,8 @@ class FullscreenSlideshowDialog(QDialog):
         if not self.records:
             return
         self._prev_pixmap = self._current_pixmap
-        self._slide_elapsed_ms = 0
+        self._slide_elapsed_ms = 0.0
+        self._last_tick_time = None
         if self.is_shuffled and len(self.records) > 1:
             if not self._shuffled_order:
                 candidates = [i for i in range(len(self.records)) if i != self.current_index]
@@ -744,7 +765,8 @@ class FullscreenSlideshowDialog(QDialog):
         if not self.records:
             return
         self._prev_pixmap = self._current_pixmap
-        self._slide_elapsed_ms = 0
+        self._slide_elapsed_ms = 0.0
+        self._last_tick_time = None
         self.current_index = (self.current_index - 1 + len(self.records)) % len(self.records)
         self._load_slide(self.current_index)
         if self.is_playing:
@@ -1021,82 +1043,95 @@ class FullscreenSlideshowDialog(QDialog):
         return pix
 
     def _get_sepia_pixmap(self, media_id: int, base_pix: QPixmap) -> QPixmap:
-        """Returns cached warm sepia duotone pixmap."""
+        """Returns cached warm sepia duotone pixmap with 4-byte stride safety."""
         if media_id in self._sepia_cache:
             return self._sepia_cache[media_id]
-        qimg = base_pix.toImage().convertToFormat(QImage.Format_RGB888)
-        w, h = qimg.width(), qimg.height()
-        b = qimg.constBits()
-        arr = np.frombuffer(b, dtype=np.uint8).reshape((h, w, 3))
-        kernel = np.array([
-            [0.393, 0.769, 0.189],
-            [0.349, 0.686, 0.168],
-            [0.272, 0.534, 0.131],
-        ])
-        sepia_arr = cv2.transform(arr, kernel)
-        sepia_arr = np.clip(sepia_arr, 0, 255).astype(np.uint8)
-        out_img = QImage(sepia_arr.tobytes(), w, h, w * 3, QImage.Format_RGB888)
-        pix = QPixmap.fromImage(out_img)
-        self._sepia_cache[media_id] = pix
-        return pix
+        try:
+            qimg = base_pix.toImage().convertToFormat(QImage.Format_RGB888)
+            w, h = qimg.width(), qimg.height()
+            bpl = qimg.bytesPerLine()
+            b = qimg.constBits()
+            # Reshape accounting for 4-byte row alignment padding in QImage
+            arr = np.frombuffer(b, dtype=np.uint8).reshape((h, bpl))[:, : w * 3].reshape((h, w, 3))
+            kernel = np.array([
+                [0.393, 0.769, 0.189],
+                [0.349, 0.686, 0.168],
+                [0.272, 0.534, 0.131],
+            ])
+            sepia_arr = cv2.transform(arr, kernel)
+            sepia_arr = np.clip(sepia_arr, 0, 255).astype(np.uint8)
+            out_img = QImage(sepia_arr.tobytes(), w, h, w * 3, QImage.Format_RGB888).copy()
+            pix = QPixmap.fromImage(out_img)
+            self._sepia_cache[media_id] = pix
+            return pix
+        except Exception:
+            return base_pix
 
     def _get_cinematic_backdrop(self, media_id: int, base_pix: QPixmap) -> QPixmap:
         """Returns cached edge-to-edge Gaussian blurred ambient backdrop."""
         if media_id in self._cinematic_backdrops:
             return self._cinematic_backdrops[media_id]
-        small = base_pix.scaled(160, 90, Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
-        qimg = small.toImage().convertToFormat(QImage.Format_RGB888)
-        w, h = qimg.width(), qimg.height()
-        b = qimg.constBits()
-        arr = np.frombuffer(b, dtype=np.uint8).reshape((h, w, 3))
-        blurred = cv2.GaussianBlur(arr, (25, 25), 12)
-        blurred = (blurred * 0.55).astype(np.uint8)
-        out_img = QImage(blurred.tobytes(), w, h, w * 3, QImage.Format_RGB888)
-        pix = QPixmap.fromImage(out_img)
-        self._cinematic_backdrops[media_id] = pix
-        return pix
+        try:
+            small = base_pix.scaled(160, 90, Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
+            qimg = small.toImage().convertToFormat(QImage.Format_RGB888)
+            w, h = qimg.width(), qimg.height()
+            bpl = qimg.bytesPerLine()
+            b = qimg.constBits()
+            arr = np.frombuffer(b, dtype=np.uint8).reshape((h, bpl))[:, : w * 3].reshape((h, w, 3))
+            blurred = cv2.GaussianBlur(arr, (25, 25), 12)
+            blurred = (blurred * 0.55).astype(np.uint8)
+            out_img = QImage(blurred.tobytes(), w, h, w * 3, QImage.Format_RGB888).copy()
+            pix = QPixmap.fromImage(out_img)
+            self._cinematic_backdrops[media_id] = pix
+            return pix
+        except Exception:
+            return base_pix
 
     def paintEvent(self, event: QPaintEvent) -> None:
         painter = QPainter(self)
-        painter.setRenderHint(QPainter.Antialiasing, True)
-        painter.setRenderHint(QPainter.SmoothPixmapTransform, True)
+        try:
+            painter.setRenderHint(QPainter.Antialiasing, True)
+            painter.setRenderHint(QPainter.SmoothPixmapTransform, True)
 
-        if not self.records or self._current_pixmap is None or self._current_pixmap.isNull():
-            painter.fillRect(self.rect(), QColor(0, 0, 0))
-            painter.setPen(QColor(180, 180, 180))
-            painter.setFont(QFont("Segoe UI", 14))
-            painter.drawText(
-                self.rect(),
-                Qt.AlignCenter,
-                "Unable to display image" if self.records else "No photos to display",
-            )
-            return
+            if not self.records or self._current_pixmap is None or self._current_pixmap.isNull():
+                painter.fillRect(self.rect(), QColor(0, 0, 0))
+                painter.setPen(QColor(180, 180, 180))
+                painter.setFont(QFont("Segoe UI", 14))
+                painter.drawText(
+                    self.rect(),
+                    Qt.AlignCenter,
+                    "Unable to display image" if self.records else "No photos to display",
+                )
+                return
 
-        # Calculate normalized progress t in [0.0, 1.0]
-        total_ms = float(max(1000, self.interval_ms))
-        t = min(1.0, max(0.0, self._slide_elapsed_ms / total_ms))
+            # Calculate normalized progress t in [0.0, 1.0]
+            total_ms = float(max(1000, self.interval_ms))
+            t = min(1.0, max(0.0, self._slide_elapsed_ms / total_ms))
 
-        # Transition cross-fade alpha in [0.0, 1.0]
-        fade_dur = 1200 if self.current_theme == "fade" else 1000
-        if self._slide_elapsed_ms < fade_dur and self._prev_pixmap is not None:
-            fade_t = min(1.0, self._slide_elapsed_ms / float(fade_dur))
-            alpha = 0.5 * (1.0 - math.cos(fade_t * math.pi))
-        else:
-            alpha = 1.0
+            # Transition cross-fade alpha in [0.0, 1.0]
+            fade_dur = 1200 if self.current_theme == "fade" else 1000
+            if self._slide_elapsed_ms < fade_dur and self._prev_pixmap is not None:
+                fade_t = min(1.0, self._slide_elapsed_ms / float(fade_dur))
+                alpha = 0.5 * (1.0 - math.cos(fade_t * math.pi))
+            else:
+                alpha = 1.0
 
-        theme = self.current_theme
-        if theme == "contemporary":
-            self._paint_contemporary(painter, t, alpha)
-        elif theme == "cinematic":
-            self._paint_cinematic(painter, t, alpha)
-        elif theme == "fade":
-            self._paint_fade(painter, t, alpha)
-        elif theme == "black_and_white":
-            self._paint_bw(painter, t, alpha)
-        elif theme == "sepia":
-            self._paint_sepia(painter, t, alpha)
-        else:
-            self._paint_pan_and_zoom(painter, t, alpha)
+            theme = self.current_theme
+            if theme == "contemporary":
+                self._paint_contemporary(painter, t, alpha)
+            elif theme == "cinematic":
+                self._paint_cinematic(painter, t, alpha)
+            elif theme == "fade":
+                self._paint_fade(painter, t, alpha)
+            elif theme == "black_and_white":
+                self._paint_bw(painter, t, alpha)
+            elif theme == "sepia":
+                self._paint_sepia(painter, t, alpha)
+            else:
+                self._paint_pan_and_zoom(painter, t, alpha)
+        finally:
+            if painter.isActive():
+                painter.end()
 
     def _paint_pan_and_zoom(
         self,
@@ -1125,10 +1160,10 @@ class FullscreenSlideshowDialog(QDialog):
             cx = face_center[0] + (0.5 - face_center[0]) * smooth_t
             cy = face_center[1] + (0.5 - face_center[1]) * smooth_t
 
-        sw_w = self.width()
-        sw_h = self.height()
-        pw, ph = cur_pix.width(), cur_pix.height()
-        base_scale = min(sw_w / float(pw), sw_h / float(ph))
+        sw_w = float(self.width())
+        sw_h = float(self.height())
+        pw, ph = float(cur_pix.width()), float(cur_pix.height())
+        base_scale = min(sw_w / pw, sw_h / ph)
         bw = pw * base_scale
         bh = ph * base_scale
         target_w = bw * scale
@@ -1140,31 +1175,29 @@ class FullscreenSlideshowDialog(QDialog):
         draw_y = (sw_h / 2.0) - img_py
 
         if target_w >= sw_w:
-            draw_x = min(0.0, max(float(sw_w - target_w), draw_x))
+            draw_x = min(0.0, max(sw_w - target_w, draw_x))
         else:
             draw_x = (sw_w - target_w) / 2.0
 
         if target_h >= sw_h:
-            draw_y = min(0.0, max(float(sw_h - target_h), draw_y))
+            draw_y = min(0.0, max(sw_h - target_h, draw_y))
         else:
             draw_y = (sw_h - target_h) / 2.0
 
         # Draw previous slide if cross-fading
         if alpha < 1.0 and self._prev_pixmap is not None and not self._prev_pixmap.isNull():
-            prev_scaled = self._prev_pixmap.scaled(
-                self.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation
-            )
-            px = (sw_w - prev_scaled.width()) // 2
-            py = (sw_h - prev_scaled.height()) // 2
+            ppw, pph = float(self._prev_pixmap.width()), float(self._prev_pixmap.height())
+            p_base_scale = min(sw_w / ppw, sw_h / pph)
+            pbw = ppw * p_base_scale
+            pbh = pph * p_base_scale
+            px = (sw_w - pbw) / 2.0
+            py = (sw_h - pbh) / 2.0
             painter.setOpacity(1.0 - alpha)
-            painter.drawPixmap(px, py, prev_scaled)
+            painter.drawPixmap(QRectF(px, py, pbw, pbh), self._prev_pixmap, QRectF(0, 0, ppw, pph))
 
-        # Draw current slide with alpha opacity
+        # Draw current slide with alpha opacity using smooth sub-pixel hardware blit (no CPU scaling)
         painter.setOpacity(alpha)
-        scaled_curr = cur_pix.scaled(
-            int(target_w), int(target_h), Qt.KeepAspectRatio, Qt.SmoothTransformation
-        )
-        painter.drawPixmap(int(draw_x), int(draw_y), scaled_curr)
+        painter.drawPixmap(QRectF(draw_x, draw_y, target_w, target_h), cur_pix, QRectF(0, 0, pw, ph))
         painter.setOpacity(1.0)
 
     def _paint_contemporary(self, painter: QPainter, t: float, alpha: float) -> None:
@@ -1232,10 +1265,7 @@ class FullscreenSlideshowDialog(QDialog):
 
             # Photo
             photo_rect = QRectF(-card_w / 2.0 + 14, -card_h / 2.0 + 14, inner_w, inner_h)
-            scaled_photo = pix.scaled(
-                int(inner_w), int(inner_h), Qt.KeepAspectRatio, Qt.SmoothTransformation
-            )
-            painter.drawPixmap(photo_rect.toRect(), scaled_photo)
+            painter.drawPixmap(photo_rect, pix, QRectF(0, 0, pw, ph))
 
             # Caption on bottom border
             caption_rect = QRectF(-card_w / 2.0 + 14, card_h / 2.0 - 44, inner_w, 36)
@@ -1248,12 +1278,11 @@ class FullscreenSlideshowDialog(QDialog):
     def _paint_cinematic(self, painter: QPainter, t: float, alpha: float) -> None:
         """Ambient blurred edge-to-edge backdrop, subtle horizontal drift, film vignette."""
         mid = self.current_media_id() or 0
-        sw_w, sw_h = self.width(), self.height()
+        sw_w, sw_h = float(self.width()), float(self.height())
 
         # 1. Edge-to-edge ambient blurred backdrop
         bg_pix = self._get_cinematic_backdrop(mid, self._current_pixmap)
-        scaled_bg = bg_pix.scaled(self.size(), Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
-        painter.drawPixmap(0, 0, scaled_bg)
+        painter.drawPixmap(QRectF(0, 0, sw_w, sw_h), bg_pix, QRectF(0, 0, bg_pix.width(), bg_pix.height()))
 
         # 2. Film vignette
         vignette = QRadialGradient(sw_w / 2.0, sw_h / 2.0, max(sw_w, sw_h) * 0.65)
@@ -1263,49 +1292,48 @@ class FullscreenSlideshowDialog(QDialog):
         painter.fillRect(self.rect(), vignette)
 
         # 3. Foreground sharp photo with subtle horizontal drift
-        pw, ph = self._current_pixmap.width(), self._current_pixmap.height()
-        fit_scale = min((sw_w * 0.84) / float(pw), (sw_h * 0.84) / float(ph))
-        target_w = int(pw * fit_scale)
-        target_h = int(ph * fit_scale)
+        pw, ph = float(self._current_pixmap.width()), float(self._current_pixmap.height())
+        fit_scale = min((sw_w * 0.84) / pw, (sw_h * 0.84) / ph)
+        target_w = pw * fit_scale
+        target_h = ph * fit_scale
 
         drift_dir = 1.0 if (self.current_index % 2 == 0) else -1.0
         drift_dx = 28.0 * (t - 0.5) * drift_dir
-        draw_x = int((sw_w - target_w) / 2.0 + drift_dx)
-        draw_y = int((sw_h - target_h) / 2.0)
+        draw_x = (sw_w - target_w) / 2.0 + drift_dx
+        draw_y = (sw_h - target_h) / 2.0
 
         # Draw drop shadow behind foreground photo
         painter.fillRect(
-            QRect(draw_x + 5, draw_y + 8, target_w, target_h), QColor(0, 0, 0, 90)
+            QRectF(draw_x + 5, draw_y + 8, target_w, target_h), QColor(0, 0, 0, 90)
         )
 
-        scaled_fg = self._current_pixmap.scaled(
-            target_w, target_h, Qt.KeepAspectRatio, Qt.SmoothTransformation
-        )
         painter.setOpacity(alpha)
-        painter.drawPixmap(draw_x, draw_y, scaled_fg)
+        painter.drawPixmap(QRectF(draw_x, draw_y, target_w, target_h), self._current_pixmap, QRectF(0, 0, pw, ph))
         painter.setOpacity(1.0)
 
     def _paint_fade(self, painter: QPainter, t: float, alpha: float) -> None:
         """Pure black background with smooth 1.2s cosine ease-in-out opacity cross-fade."""
         painter.fillRect(self.rect(), QColor(0, 0, 0))
-        sw_w, sw_h = self.width(), self.height()
+        sw_w, sw_h = float(self.width()), float(self.height())
 
         if alpha < 1.0 and self._prev_pixmap is not None and not self._prev_pixmap.isNull():
-            prev_scaled = self._prev_pixmap.scaled(
-                self.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation
-            )
-            px = (sw_w - prev_scaled.width()) // 2
-            py = (sw_h - prev_scaled.height()) // 2
+            ppw, pph = float(self._prev_pixmap.width()), float(self._prev_pixmap.height())
+            p_fit = min(sw_w / ppw, sw_h / pph)
+            pw_w = ppw * p_fit
+            pw_h = pph * p_fit
+            px = (sw_w - pw_w) / 2.0
+            py = (sw_h - pw_h) / 2.0
             painter.setOpacity(1.0 - alpha)
-            painter.drawPixmap(px, py, prev_scaled)
+            painter.drawPixmap(QRectF(px, py, pw_w, pw_h), self._prev_pixmap, QRectF(0, 0, ppw, pph))
 
-        curr_scaled = self._current_pixmap.scaled(
-            self.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation
-        )
-        cx = (sw_w - curr_scaled.width()) // 2
-        cy = (sw_h - curr_scaled.height()) // 2
+        cpw, cph = float(self._current_pixmap.width()), float(self._current_pixmap.height())
+        c_fit = min(sw_w / cpw, sw_h / cph)
+        cw = cpw * c_fit
+        ch = cph * c_fit
+        cx = (sw_w - cw) / 2.0
+        cy = (sw_h - ch) / 2.0
         painter.setOpacity(alpha)
-        painter.drawPixmap(cx, cy, curr_scaled)
+        painter.drawPixmap(QRectF(cx, cy, cw, ch), self._current_pixmap, QRectF(0, 0, cpw, cph))
         painter.setOpacity(1.0)
 
     def _paint_bw(self, painter: QPainter, t: float, alpha: float) -> None:

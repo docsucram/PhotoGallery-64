@@ -279,3 +279,58 @@ def test_people_dropdown_height_calculation(qapp):
     assert scroll.height() >= 200
 
 
+def test_sepia_arbitrary_dimensions_and_stride_safety(qapp):
+    from PySide6.QtGui import QPixmap, QPainter, QColor
+    from src.ui.slideshow_view import FullscreenSlideshowDialog
+    
+    # Exact non-4-byte-aligned dimensions that triggered the user's crash: width=811, height=1440
+    pix = QPixmap(811, 1440)
+    pix.fill(QColor(120, 160, 200))
+    
+    dlg = FullscreenSlideshowDialog(records=[], start_index=0)
+    sepia_pix = dlg._get_sepia_pixmap(999, pix)
+    
+    assert sepia_pix is not None
+    assert not sepia_pix.isNull()
+    assert sepia_pix.width() == 811
+    assert sepia_pix.height() == 1440
+    dlg.close()
+
+
+def test_ribbon_home_rate_button_dropdown(qapp):
+    from PySide6.QtWidgets import QToolButton
+    ribbon = RibbonToolbar()
+    btn_rate = ribbon.btn_home_rate
+    
+    # Must be instant popup so clicking it shows the dropdown menu immediately
+    assert btn_rate.popupMode() == QToolButton.InstantPopup
+    assert "Rate" in (getattr(btn_rate, "original_text", "") or btn_rate.text())
+    menu = btn_rate.menu()
+    assert menu is not None
+    actions = [a.text() for a in menu.actions() if a.text()]
+    assert any("5 stars" in a for a in actions)
+    assert any("Clear rating" in a for a in actions)
+
+
+def test_slideshow_split_button_adjacent_layout(qapp):
+    ribbon = RibbonToolbar()
+    btn_home = ribbon.btn_home_slideshow
+    
+    assert hasattr(btn_home, "container_widget")
+    assert hasattr(btn_home, "btn_bottom")
+    
+    # Top button has projector icon and plays slideshow (F12)
+    assert "F12" in btn_home.toolTip()
+    emitted = []
+    ribbon.action_triggered.connect(emitted.append)
+    btn_home.click()
+    assert "slide_show" in emitted
+    
+    # Bottom button has "Slide\nshow ▾" text and opens the style menu
+    btn_bot = btn_home.btn_bottom
+    assert "Slide" in btn_bot.text()
+    assert "▾" in btn_bot.text()
+    assert btn_bot.menu() is not None
+
+
+

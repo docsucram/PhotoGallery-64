@@ -3636,6 +3636,55 @@ class RibbonToolbar(QWidget):
             self._all_themed_buttons.append(btn)
         return btn
 
+    def _make_slideshow_split_button(self, parent: QWidget) -> tuple[QWidget, QToolButton]:
+        """
+        Creates an authentic WLPG 2-button vertical split slideshow control:
+        - Top button: Projector icon only -> clicking immediately plays the default slideshow (F12).
+        - Bottom button: 'Slide\\nshow ▾' text with dropdown arrow in text -> clicking immediately opens the theme menu.
+        """
+        container = QWidget(parent)
+        container.setObjectName("SlideshowSplitContainer")
+        container.setFixedSize(50, 70)
+        vbox = QVBoxLayout(container)
+        vbox.setContentsMargins(0, 0, 0, 0)
+        vbox.setSpacing(0)
+
+        # 1. Top button (icon only)
+        btn_top = QToolButton(container)
+        btn_top.setObjectName("SlideshowTopBtn")
+        btn_top.setFixedSize(50, 38)
+        btn_top.setCursor(Qt.PointingHandCursor)
+        btn_top.setIcon(make_wlpg_icon("slideshow", 32))
+        btn_top.setIconSize(QSize(30, 30))
+        btn_top.setToolTip("Slide show (F12)")
+        btn_top._tooltip_override = "Slide show (F12)"
+        btn_top.clicked.connect(lambda: self.action_triggered.emit("slide_show"))
+        vbox.addWidget(btn_top)
+
+        # 2. Bottom button (text: Slide\\nshow ▾)
+        btn_bot = QToolButton(container)
+        btn_bot.setObjectName("SlideshowBottomBtn")
+        btn_bot.setFixedSize(50, 32)
+        btn_bot.setCursor(Qt.PointingHandCursor)
+        btn_bot.setText("Slide\nshow ▾")
+        btn_bot.setToolTip("Slide show styles and themes")
+        btn_bot.setPopupMode(QToolButton.InstantPopup)
+        btn_bot.setMenu(self._build_slideshow_theme_menu())
+        vbox.addWidget(btn_bot)
+
+        # Attach delegators onto btn_top for backwards compatibility
+        btn_top.menu = btn_bot.menu
+        btn_top.setMenu = btn_bot.setMenu
+        btn_top.popupMode = btn_bot.popupMode
+        btn_top.container_widget = container
+        btn_top.btn_bottom = btn_bot
+        if hasattr(self, "_all_themed_buttons"):
+            btn_top._icon_kind = "slideshow"
+            btn_top._is_large = True
+            self._all_themed_buttons.append(btn_top)
+
+        return container, btn_top
+
     def _make_mode_toggle_btn(
         self,
         text: str,
@@ -4208,7 +4257,8 @@ class RibbonToolbar(QWidget):
         self.btn_geotag = self._make_btn("Geotag", "geotag", grp_org)
         self.btn_geotag.clicked.connect(lambda: self.action_triggered.emit("geotag"))
 
-        self.btn_home_rate = self._make_btn("Rate", "rate", grp_org)
+        self.btn_home_rate = self._make_btn("Rate ▾", "rate", grp_org)
+        self.btn_home_rate.setPopupMode(QToolButton.InstantPopup)
         self.btn_home_rate.setToolTip("Rate photo 0-5 stars (0-5)")
         self.btn_home_rate._tooltip_override = "Rate photo 0-5 stars (0-5)"
         rate_menu = QMenu(self.btn_home_rate)
@@ -4401,18 +4451,11 @@ class RibbonToolbar(QWidget):
         hbox.addWidget(grp_qfind)
 
         # ---------------------------------------------------------------------
-        # Group 5: Share / Presentation (Slide show)
+        # Group 5: Share / Presentation (Slide show 2-button vertical split)
         # ---------------------------------------------------------------------
         grp_share = _RibbonGroupBox("Share", page)
-        btn_ss = self._make_tool_btn(
-            "Slide\nshow", "slideshow", grp_share, large=True
-        )
-        btn_ss.setToolTip("Slide show (F12)")
-        btn_ss._tooltip_override = "Slide show (F12)"
-        btn_ss.setMenu(self._build_slideshow_theme_menu())
-        btn_ss.clicked.connect(lambda: self.action_triggered.emit("slide_show"))
-        self.btn_home_slideshow = btn_ss
-        grp_share.content_layout.addWidget(btn_ss)
+        split_home, self.btn_home_slideshow = self._make_slideshow_split_button(grp_share)
+        grp_share.content_layout.addWidget(split_home)
         hbox.addWidget(grp_share)
 
         hbox.addStretch(1)
@@ -4542,7 +4585,8 @@ class RibbonToolbar(QWidget):
         org_col.setContentsMargins(0, 0, 0, 0)
         org_col.setSpacing(2)
 
-        self.btn_edit_rate = self._make_btn("Rate", "rate", self.grp_edit_organize)
+        self.btn_edit_rate = self._make_btn("Rate ▾", "rate", self.grp_edit_organize)
+        self.btn_edit_rate.setPopupMode(QToolButton.InstantPopup)
         rate_menu = QMenu(self.btn_edit_rate)
         rate_menu.addAction("Unrated (0)", lambda: self.action_triggered.emit("rate_0"))
         rate_menu.addAction("★ (1)", lambda: self.action_triggered.emit("rate_1"))
@@ -4556,7 +4600,8 @@ class RibbonToolbar(QWidget):
         self.btn_edit_flag.setToolTip("Toggle flag")
         self.btn_edit_flag.clicked.connect(lambda: self.action_triggered.emit("toggle_flag"))
 
-        self.btn_edit_prop_drop = self._make_btn("Properties", "options", self.grp_edit_organize)
+        self.btn_edit_prop_drop = self._make_btn("Properties ▾", "options", self.grp_edit_organize)
+        self.btn_edit_prop_drop.setPopupMode(QToolButton.InstantPopup)
         prop_menu = QMenu(self.btn_edit_prop_drop)
         prop_menu.addAction("Adjust date and time...", lambda: self.action_triggered.emit("change_time_taken"))
         prop_menu.addAction("Resize photo...", lambda: self.action_triggered.emit("resize_photo"))
@@ -5369,18 +5414,12 @@ class RibbonToolbar(QWidget):
         hbox.addWidget(grp_zoom)
 
         # ---------------------------------------------------------------------
-        # Group 4: Views Group (Slide show & World Map)
+        # Group 4: Views Group (Slide show 2-button vertical split & World Map)
         # ---------------------------------------------------------------------
         grp_slideshow = _RibbonGroupBox("Views", page)
         self.grp_slideshow = grp_slideshow
-        self.btn_view_slideshow = self._make_tool_btn(
-            "Slide\nshow", "slideshow", grp_slideshow, large=True
-        )
-        self.btn_view_slideshow.setToolTip("Slide show (F12)")
-        self.btn_view_slideshow._tooltip_override = "Slide show (F12)"
-        self.btn_view_slideshow.setMenu(self._build_slideshow_theme_menu())
-        self.btn_view_slideshow.clicked.connect(lambda: self.action_triggered.emit("slide_show"))
-        grp_slideshow.content_layout.addWidget(self.btn_view_slideshow)
+        split_view, self.btn_view_slideshow = self._make_slideshow_split_button(grp_slideshow)
+        grp_slideshow.content_layout.addWidget(split_view)
 
         self.btn_view_map = self._make_btn("World\nMap", "globe", grp_slideshow, large=True, checkable=True)
         self.btn_view_map.setToolTip("Explore geotagged photos on the World Map (Leaflet / Offline)")
@@ -5949,6 +5988,58 @@ class RibbonToolbar(QWidget):
                 subcontrol-position: bottom center;
                 subcontrol-origin: padding;
                 bottom: 2px;
+            }
+            QWidget#SlideshowSplitContainer {
+                background: transparent;
+                border: 1px solid transparent;
+                border-radius: 3px;
+            }
+            QToolButton#SlideshowTopBtn {
+                background: transparent;
+                border: 1px solid transparent;
+                border-top-left-radius: 3px;
+                border-top-right-radius: 3px;
+                border-bottom-left-radius: 0px;
+                border-bottom-right-radius: 0px;
+                padding: 1px;
+            }
+            QToolButton#SlideshowTopBtn:hover {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #FFFDF5, stop:1 #FCE7A2);
+                border: 1px solid #D9B152;
+            }
+            QToolButton#SlideshowTopBtn:pressed {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #FCE293, stop:1 #F7CE65);
+                border: 1px solid #C28B10;
+            }
+            QToolButton#SlideshowBottomBtn {
+                background: transparent;
+                border: 1px solid transparent;
+                border-top-left-radius: 0px;
+                border-top-right-radius: 0px;
+                border-bottom-left-radius: 3px;
+                border-bottom-right-radius: 3px;
+                color: #1E395B;
+                font-family: 'Segoe UI';
+                font-size: 7.5pt;
+                text-align: center;
+                padding: 0px 2px;
+            }
+            QToolButton#SlideshowBottomBtn:hover {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #FFFDF5, stop:1 #FCE7A2);
+                border: 1px solid #D9B152;
+            }
+            QToolButton#SlideshowBottomBtn:pressed {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #FCE293, stop:1 #F7CE65);
+                border: 1px solid #C28B10;
+            }
+            QToolButton#SlideshowBottomBtn::menu-indicator {
+                image: none;
+                width: 0px;
+                height: 0px;
             }
             QToolButton::menu-button {
                 border: none;

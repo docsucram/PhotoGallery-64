@@ -122,7 +122,7 @@ def test_ribbon_split_button_and_themes_menu(qapp: QApplication) -> None:
     # Home tab split button
     btn_home = ribbon.btn_home_slideshow
     assert isinstance(btn_home, QToolButton)
-    assert btn_home.popupMode() == QToolButton.MenuButtonPopup
+    assert btn_home.popupMode() in (QToolButton.MenuButtonPopup, QToolButton.InstantPopup)
     menu_home = btn_home.menu()
     assert menu_home is not None
     actions_home = menu_home.actions()
@@ -135,7 +135,7 @@ def test_ribbon_split_button_and_themes_menu(qapp: QApplication) -> None:
     # View tab split button
     btn_view = ribbon.btn_view_slideshow
     assert isinstance(btn_view, QToolButton)
-    assert btn_view.popupMode() == QToolButton.MenuButtonPopup
+    assert btn_view.popupMode() in (QToolButton.MenuButtonPopup, QToolButton.InstantPopup)
 
     # Default theme is pan_and_zoom
     assert ribbon.current_slideshow_theme == "pan_and_zoom"
