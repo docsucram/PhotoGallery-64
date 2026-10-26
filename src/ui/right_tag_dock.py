@@ -81,7 +81,7 @@ from legacy_reference.imgBrowserv13 import (
     format_file_size,
 )
 from src.db.repository import _epoch_to_datetime_utc
-from src.ui.ribbon_toolbar import make_person_avatar_pixmap, make_wlpg_icon
+from src.ui.ribbon_toolbar import make_person_avatar_pixmap, make_symbol_icon, make_wlpg_icon
 
 
 class _AeroFineTuneSlider(QSlider):
@@ -491,9 +491,12 @@ class _UnknownFaceCardWidget(QFrame):
             """
         )
         self.txt_who.returnPressed.connect(self._on_return)
+        self.txt_who.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.txt_who.customContextMenuRequested.connect(self._show_txt_context_menu)
         hbox.addWidget(self.txt_who, 1)
 
-        self.btn_del = QPushButton("✕", self)
+        self.btn_del = QPushButton(self)
+        self.btn_del.setIcon(make_symbol_icon("cross", 14))
         self.btn_del.setFixedSize(18, 18)
         self.btn_del.setCursor(Qt.PointingHandCursor)
         self.btn_del.setToolTip("Dismiss face")
@@ -502,20 +505,43 @@ class _UnknownFaceCardWidget(QFrame):
             QPushButton {
                 border: none;
                 background: transparent;
-                color: #7B8B9B;
-                font-family: 'Segoe UI';
-                font-size: 8.5pt;
-                font-weight: bold;
+                border-radius: 2px;
             }
             QPushButton:hover {
-                color: #C50F1F;
                 background: #F8D7DA;
-                border-radius: 2px;
             }
             """
         )
         self.btn_del.clicked.connect(lambda: self.dismiss_requested.emit(self.face_id))
         hbox.addWidget(self.btn_del)
+
+    def contextMenuEvent(self, event: Any) -> None:
+        self._show_context_menu(event.globalPos())
+        event.accept()
+
+    def _show_txt_context_menu(self, pos: QPoint) -> None:
+        self._show_context_menu(self.txt_who.mapToGlobal(pos))
+
+    def _show_context_menu(self, global_pos: QPoint) -> None:
+        menu = QMenu(self)
+        menu.setFont(QFont("Segoe UI", 9))
+
+        act_tag = menu.addAction("Tag as...")
+        act_tag.triggered.connect(self._focus_name_input)
+
+        menu.addSeparator()
+
+        act_ignore = menu.addAction("Ignore face")
+        act_ignore.triggered.connect(lambda: self.dismiss_requested.emit(self.face_id))
+
+        act_not_face = menu.addAction("Not a face")
+        act_not_face.triggered.connect(lambda: self.dismiss_requested.emit(self.face_id))
+
+        menu.exec(global_pos)
+
+    def _focus_name_input(self) -> None:
+        self.txt_who.setFocus()
+        self.txt_who.selectAll()
 
     def _on_return(self) -> None:
         text = self.txt_who.text().strip()
@@ -645,35 +671,40 @@ class _PersonTagCardWidget(QFrame):
         hbox.addWidget(self.lbl_name, 1)
 
         if self.is_unconfirmed:
-            self.btn_confirm = QPushButton("✓", self)
+            self.btn_confirm = QPushButton(self)
+            self.btn_confirm.setIcon(make_symbol_icon("check", 14))
             self.btn_confirm.setFixedSize(18, 18)
             self.btn_confirm.setCursor(Qt.PointingHandCursor)
             self.btn_confirm.setToolTip("Confirm this suggestion")
             self.btn_confirm.setStyleSheet(
-                "QPushButton { background: #2E8B57; color: white; border-radius: 2px; font-size: 10px; font-weight: bold; border: none; }"
-                "QPushButton:hover { background: #236B43; }"
+                "QPushButton { background: transparent; border: 1px solid transparent; border-radius: 2px; }"
+                "QPushButton:hover { background: #E8F5E9; border: 1px solid #A5D6A7; }"
+                "QPushButton:pressed { background: #C8E6C9; }"
             )
             self.btn_confirm.clicked.connect(lambda: self.confirm_clicked.emit(self.person_id, self.face_id or 0))
             hbox.addWidget(self.btn_confirm)
 
-            self.btn_reject = QPushButton("✗", self)
+            self.btn_reject = QPushButton(self)
+            self.btn_reject.setIcon(make_symbol_icon("cross", 14))
             self.btn_reject.setFixedSize(18, 18)
             self.btn_reject.setCursor(Qt.PointingHandCursor)
             self.btn_reject.setToolTip("Not this person")
             self.btn_reject.setStyleSheet(
-                "QPushButton { background: #DC2626; color: white; border-radius: 2px; font-size: 10px; font-weight: bold; border: none; }"
-                "QPushButton:hover { background: #B91C1C; }"
+                "QPushButton { background: transparent; border: 1px solid transparent; border-radius: 2px; }"
+                "QPushButton:hover { background: #FFEBEE; border: 1px solid #FFCDD2; }"
+                "QPushButton:pressed { background: #FFCDD2; }"
             )
             self.btn_reject.clicked.connect(lambda: self.reject_suggestion_clicked.emit(self.person_id, self.face_id or 0))
             hbox.addWidget(self.btn_reject)
         else:
-            self.btn_del = QPushButton("✕", self)
+            self.btn_del = QPushButton(self)
+            self.btn_del.setIcon(make_symbol_icon("cross", 14))
             self.btn_del.setFixedSize(18, 18)
             self.btn_del.setCursor(Qt.PointingHandCursor)
             self.btn_del.setToolTip(f"Remove tag '{self.person_name}'")
             self.btn_del.setStyleSheet(
-                "QPushButton { border: none; background: transparent; color: #7B8B9B; font-family: 'Segoe UI'; font-size: 8.5pt; font-weight: bold; }"
-                "QPushButton:hover { color: #C50F1F; background: #F8D7DA; border-radius: 2px; }"
+                "QPushButton { border: none; background: transparent; border-radius: 2px; }"
+                "QPushButton:hover { background: #F8D7DA; }"
             )
             self.btn_del.clicked.connect(lambda: self.remove_clicked.emit(self.person_id))
             hbox.addWidget(self.btn_del)

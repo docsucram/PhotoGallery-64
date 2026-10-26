@@ -1416,6 +1416,24 @@ def make_wlpg_icon(kind: str, size: int = 20) -> QIcon:
     return icon_provider.get_icon(kind, size)
 
 
+def make_symbol_icon(kind: str, size: int = 14) -> QIcon:
+    """Draws a crisp antialiased checkmark or cross icon into a QIcon without font glyph clipping."""
+    pm = QPixmap(size, size)
+    pm.fill(Qt.transparent)
+    p = QPainter(pm)
+    p.setRenderHint(QPainter.Antialiasing, True)
+    if kind in ("check", "confirm"):
+        p.setPen(QPen(QColor("#2E7D32"), 2.0, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+        p.drawLine(QPointF(size * 0.20, size * 0.52), QPointF(size * 0.42, size * 0.74))
+        p.drawLine(QPointF(size * 0.42, size * 0.74), QPointF(size * 0.82, size * 0.26))
+    elif kind in ("cross", "delete", "reject", "cancel"):
+        p.setPen(QPen(QColor("#C50F1F"), 2.0, Qt.SolidLine, Qt.RoundCap))
+        p.drawLine(QPointF(size * 0.28, size * 0.28), QPointF(size * 0.72, size * 0.72))
+        p.drawLine(QPointF(size * 0.72, size * 0.28), QPointF(size * 0.28, size * 0.72))
+    p.end()
+    return QIcon(pm)
+
+
 def make_person_avatar_pixmap(
     name: str, blob: bytes | None, size: int = 38, circular: bool = False
 ) -> QPixmap:

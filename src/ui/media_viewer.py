@@ -84,7 +84,7 @@ from legacy_reference.imgBrowserv13 import (
 )
 from src.ui.crop_tool import CropOverlayItem, CropScene
 from src.ui.markup_overlay import MarkupFloatingToolbar, MarkupElement, flatten_markup_onto_image
-from src.ui.ribbon_toolbar import make_person_avatar_pixmap, make_wlpg_icon
+from src.ui.ribbon_toolbar import make_person_avatar_pixmap, make_symbol_icon, make_wlpg_icon
 from src.imaging.opencv_engine import (
     PhotoAdjustmentRecipe,
     analyze_auto_adjust,
@@ -116,12 +116,13 @@ class _InlineFaceNamePopup(QFrame):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setObjectName("InlineFaceNamePopup")
-        self.setFixedSize(200, 32)
+        self.setFixedHeight(26)
+        self.setMinimumWidth(165)
         self.setStyleSheet(
             """
             QFrame#InlineFaceNamePopup {
                 background: #FFFFFF;
-                border: 1px solid #2979CC;
+                border: 1.5px solid #2979CC;
                 border-radius: 3px;
             }
             QLineEdit {
@@ -135,7 +136,7 @@ class _InlineFaceNamePopup(QFrame):
             """
         )
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(4, 2, 4, 2)
+        layout.setContentsMargins(4, 1, 4, 1)
         layout.setSpacing(2)
 
         self.txt_name = QLineEdit(self)
@@ -148,40 +149,59 @@ class _InlineFaceNamePopup(QFrame):
         self.completer.activated[str].connect(self._on_completer_activated)
         layout.addWidget(self.txt_name, 1)
 
-        self.btn_done = QPushButton("✓", self)
-        self.btn_done.setFixedSize(18, 18)
+        self.btn_done = QPushButton(self)
+        self.btn_done.setIcon(make_symbol_icon("check", 14))
+        self.btn_done.setFixedSize(20, 20)
         self.btn_done.setCursor(Qt.PointingHandCursor)
         self.btn_done.setToolTip("Save name (Enter)")
         self.btn_done.setStyleSheet(
-            "QPushButton { background: #2E8B57; color: white; border-radius: 2px; font-weight: bold; border: none; font-size: 10px; }"
-            "QPushButton:hover { background: #236B43; }"
+            "QPushButton { background: transparent; border: 1px solid transparent; border-radius: 2px; }"
+            "QPushButton:hover { background: #E8F5E9; border: 1px solid #A5D6A7; }"
+            "QPushButton:pressed { background: #C8E6C9; }"
         )
         self.btn_done.clicked.connect(self._on_commit)
         layout.addWidget(self.btn_done)
 
-        self.btn_cancel = QPushButton("✕", self)
-        self.btn_cancel.setFixedSize(18, 18)
+        self.btn_cancel = QPushButton(self)
+        self.btn_cancel.setIcon(make_symbol_icon("cross", 14))
+        self.btn_cancel.setFixedSize(20, 20)
         self.btn_cancel.setCursor(Qt.PointingHandCursor)
         self.btn_cancel.setToolTip("Cancel (Esc)")
         self.btn_cancel.setStyleSheet(
-            "QPushButton { background: transparent; color: #7B8B9B; border-radius: 2px; font-weight: bold; border: none; font-size: 10px; }"
-            "QPushButton:hover { color: #C50F1F; background: #F8D7DA; }"
+            "QPushButton { background: transparent; border: 1px solid transparent; border-radius: 2px; }"
+            "QPushButton:hover { background: #FFEBEE; border: 1px solid #FFCDD2; }"
+            "QPushButton:pressed { background: #FFCDD2; }"
         )
         self.btn_cancel.clicked.connect(self._on_cancel)
         layout.addWidget(self.btn_cancel)
 
         self.current_face_id: int | None = None
+        self._target_badge: Any | None = None
         self.hide()
+
+    def keyPressEvent(self, event) -> None:
+        if event.key() == Qt.Key_Escape:
+            self._on_cancel()
+            event.accept()
+            return
+        super().keyPressEvent(event)
 
     def set_people_list(self, names: list[str]) -> None:
         model = QStringListModel(names, self.completer)
         self.completer.setModel(model)
 
-    def popup_at(self, face_id: int, pos_view: QPoint, initial_text: str = "") -> None:
+    def popup_at(self, face_id: int, pos_view: QPoint, initial_text: str = "", target_badge: Any | None = None) -> None:
         self.current_face_id = face_id
+        self._target_badge = target_badge
+        if self._target_badge is not None:
+            self._target_badge.setVisible(False)
         self.txt_name.setText(initial_text)
         self.txt_name.selectAll()
-        self.move(pos_view.x() - self.width() // 2, pos_view.y() + 6)
+        self.adjustSize()
+        w = max(165, self.sizeHint().width())
+        self.resize(w, 26)
+        # Position popup directly centered over where the badge was
+        self.move(pos_view.x() - w // 2, pos_view.y() - 13)
         self.show()
         self.raise_()
         self.txt_name.setFocus()
@@ -192,6 +212,8 @@ class _InlineFaceNamePopup(QFrame):
             fid = self.current_face_id
             self.hide()
             self.name_committed.emit(fid, name)
+        else:
+            self._on_cancel()
 
     def _on_completer_activated(self, text: str) -> None:
         if text.strip() and self.current_face_id is not None:
@@ -201,6 +223,9 @@ class _InlineFaceNamePopup(QFrame):
 
     def _on_cancel(self) -> None:
         self.hide()
+        if self._target_badge is not None:
+            self._target_badge.setVisible(True)
+            self._target_badge = None
         self.cancelled.emit()
 
 
@@ -236,8 +261,10 @@ class _FaceNameBadgeItem(QGraphicsItem):
         self.setZValue(15)
         self._font = QFont("Segoe UI", 10, QFont.DemiBold)
         fm = QFontMetrics(self._font)
-        text_w = max(32, fm.horizontalAdvance(self.name))
-        self._pill_w = float(text_w + 20)
+        disp_txt = f"{self.name}?" if self.is_suggestion else self.name
+        text_w = max(32, fm.horizontalAdvance(disp_txt))
+        extra_w = 46 if self.is_suggestion else 20
+        self._pill_w = float(text_w + extra_w)
         self._pill_h = float(max(24, fm.height() + 6))
         self.setCursor(Qt.PointingHandCursor)
 
@@ -245,8 +272,10 @@ class _FaceNameBadgeItem(QGraphicsItem):
         self.prepareGeometryChange()
         self.name = str(text or "")
         fm = QFontMetrics(self._font)
-        text_w = max(32, fm.horizontalAdvance(self.name))
-        self._pill_w = float(text_w + 20)
+        disp_txt = f"{self.name}?" if self.is_suggestion else self.name
+        text_w = max(32, fm.horizontalAdvance(disp_txt))
+        extra_w = 46 if self.is_suggestion else 20
+        self._pill_w = float(text_w + extra_w)
         self._pill_h = float(max(24, fm.height() + 6))
         self.update()
 
@@ -265,27 +294,27 @@ class _FaceNameBadgeItem(QGraphicsItem):
         if event.button() == Qt.LeftButton and self.viewer is not None and self.face_id is not None:
             if self.is_unknown:
                 event.accept()
-                pos_scene = self.mapToScene(QPointF(0, self._pill_h + 4.0))
-                vp_pos = self.viewer.graphics_view.mapFromScene(pos_scene)
-                self.viewer.prompt_inline_name_face(self.face_id, vp_pos, initial_text="")
+                badge_center_scene = self.mapToScene(QPointF(0, self._pill_h * 0.5))
+                vp_pos = self.viewer.graphics_view.mapFromScene(badge_center_scene)
+                self.viewer.prompt_inline_name_face(self.face_id, vp_pos, initial_text="", target_badge=self)
                 return
             elif self.is_suggestion:
                 pos_x = event.pos().x()
-                right_edge = self._pill_w / 2.0
-                if pos_x >= right_edge - 26.0:
+                half_w = self._pill_w / 2.0
+                if pos_x >= half_w - 22.0:
                     event.accept()
                     self.viewer.face_suggestion_rejected.emit(self.person_id or 0, self.face_id)
                     return
-                elif pos_x >= right_edge - 52.0:
+                elif pos_x >= half_w - 44.0:
                     event.accept()
                     self.viewer.face_suggestion_confirmed.emit(self.person_id or 0, self.face_id)
                     return
                 else:
                     event.accept()
-                    pos_scene = self.mapToScene(QPointF(0, self._pill_h + 4.0))
-                    vp_pos = self.viewer.graphics_view.mapFromScene(pos_scene)
+                    badge_center_scene = self.mapToScene(QPointF(0, self._pill_h * 0.5))
+                    vp_pos = self.viewer.graphics_view.mapFromScene(badge_center_scene)
                     pname = self.name.split("?")[0].strip()
-                    self.viewer.prompt_inline_name_face(self.face_id, vp_pos, initial_text=pname)
+                    self.viewer.prompt_inline_name_face(self.face_id, vp_pos, initial_text=pname, target_badge=self)
                     return
         super().mousePressEvent(event)
 
@@ -320,13 +349,43 @@ class _FaceNameBadgeItem(QGraphicsItem):
         painter.drawRoundedRect(rect, 3.5, 3.5)
 
         painter.setFont(self._font)
-        if self.is_unknown:
-            painter.setPen(QColor("#1A5FB4"))
-        elif self.is_suggestion:
+        half_w = self._pill_w / 2.0
+        if self.is_suggestion:
+            # Draw suggestion name with question mark on the left
+            disp_txt = f"{self.name}?" if not self.name.endswith("?") else self.name
+            text_rect = QRectF(-half_w + 8.0, 4.0, self._pill_w - 48.0, self._pill_h)
             painter.setPen(QColor("#0B3D91"))
+            painter.drawText(text_rect, Qt.AlignVCenter | Qt.AlignLeft, disp_txt)
+
+            # Vector green checkmark icon
+            btn_check_center = QPointF(half_w - 32.0, 4.0 + self._pill_h * 0.5)
+            painter.setPen(QPen(QColor("#2E7D32"), 1.8, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+            painter.drawLine(
+                QPointF(btn_check_center.x() - 4.0, btn_check_center.y()),
+                QPointF(btn_check_center.x() - 1.0, btn_check_center.y() + 3.5),
+            )
+            painter.drawLine(
+                QPointF(btn_check_center.x() - 1.0, btn_check_center.y() + 3.5),
+                QPointF(btn_check_center.x() + 4.5, btn_check_center.y() - 3.5),
+            )
+
+            # Vector red cross icon
+            btn_cross_center = QPointF(half_w - 12.0, 4.0 + self._pill_h * 0.5)
+            painter.setPen(QPen(QColor("#C50F1F"), 1.8, Qt.SolidLine, Qt.RoundCap))
+            painter.drawLine(
+                QPointF(btn_cross_center.x() - 3.5, btn_cross_center.y() - 3.5),
+                QPointF(btn_cross_center.x() + 3.5, btn_cross_center.y() + 3.5),
+            )
+            painter.drawLine(
+                QPointF(btn_cross_center.x() + 3.5, btn_cross_center.y() - 3.5),
+                QPointF(btn_cross_center.x() - 3.5, btn_cross_center.y() + 3.5),
+            )
+        elif self.is_unknown:
+            painter.setPen(QColor("#1A5FB4"))
+            painter.drawText(rect, Qt.AlignCenter, self.name)
         else:
             painter.setPen(QColor("#111111"))
-        painter.drawText(rect, Qt.AlignCenter, self.name)
+            painter.drawText(rect, Qt.AlignCenter, self.name)
         painter.restore()
 
 
@@ -361,10 +420,11 @@ class _FaceHoverRegionItem(QGraphicsRectItem):
 
     def hoverLeaveEvent(self, event) -> None:
         fid = self.region_data.get("face_id") or self.region_data.get("region_id")
-        if (
-            getattr(self.viewer, "_highlighted_person_id", None) != self.person_id
-            and getattr(self.viewer, "_highlighted_region_id", None) != fid
-        ):
+        is_highlighted = (
+            (self.person_id is not None and getattr(self.viewer, "_highlighted_person_id", None) == self.person_id)
+            or (fid is not None and getattr(self.viewer, "_highlighted_region_id", None) == fid)
+        )
+        if not is_highlighted:
             for it in self.related_items:
                 it.setVisible(False)
         super().hoverLeaveEvent(event)
@@ -380,10 +440,16 @@ class _FaceHoverRegionItem(QGraphicsRectItem):
             st = reg.get("state", 1 if reg.get("person_id") else 0)
             if fid is not None and (st == 0 or not pname):
                 event.accept()
-                r = self.rect()
-                bot_center = QPointF(r.center().x(), r.bottom())
-                vp_pos = self.viewer.graphics_view.mapFromScene(bot_center)
-                self.viewer.prompt_inline_name_face(fid, vp_pos, initial_text=pname or "")
+                badge_item = next((it for it in self.related_items if isinstance(it, _FaceNameBadgeItem)), None)
+                if badge_item is not None:
+                    badge_center_scene = badge_item.mapToScene(QPointF(0, badge_item._pill_h * 0.5))
+                    vp_pos = self.viewer.graphics_view.mapFromScene(badge_center_scene)
+                    self.viewer.prompt_inline_name_face(fid, vp_pos, initial_text=pname or "", target_badge=badge_item)
+                else:
+                    r = self.rect()
+                    bot_center = QPointF(r.center().x(), r.bottom())
+                    vp_pos = self.viewer.graphics_view.mapFromScene(bot_center)
+                    self.viewer.prompt_inline_name_face(fid, vp_pos, initial_text=pname or "")
                 return
         super().mousePressEvent(event)
 
@@ -2680,7 +2746,7 @@ class SingleMediaViewer(QWidget):
                 is_sug = False
                 is_unk = False
             elif pname:
-                display_pill = f"{pname}? [✓] [✗]"
+                display_pill = pname
                 is_sug = True
                 is_unk = False
             else:
@@ -2719,7 +2785,13 @@ class SingleMediaViewer(QWidget):
         if self.is_in_edit_mode():
             self._update_face_overlays_visibility()
 
-    def prompt_inline_name_face(self, face_id: int, pos_view: QPoint, initial_text: str = "") -> None:
+    def prompt_inline_name_face(
+        self,
+        face_id: int,
+        pos_view: QPoint,
+        initial_text: str = "",
+        target_badge: Any | None = None,
+    ) -> None:
         """Opens the on-canvas inline QLineEdit popup with completer for naming an unknown/suggested face."""
         mw = getattr(self, "main_window", None) or self.window()
         repo = getattr(mw, "catalog_repo", None) or getattr(mw, "repo", None)
@@ -2730,7 +2802,7 @@ class SingleMediaViewer(QWidget):
             except Exception:
                 names = []
         self._inline_name_popup.set_people_list(names)
-        self._inline_name_popup.popup_at(face_id, pos_view, initial_text)
+        self._inline_name_popup.popup_at(face_id, pos_view, initial_text, target_badge=target_badge)
 
     def _on_inline_name_committed(self, face_id: int, name: str) -> None:
         self.face_region_named.emit(face_id, name)
@@ -2763,8 +2835,7 @@ class SingleMediaViewer(QWidget):
                     item.setPen(p)
                 elif isinstance(item, _FaceNameBadgeItem):
                     item.set_highlighted(False)
-                if region_id is not None:
-                    item.setVisible(False)
+                item.setVisible(False)
 
     @property
     def is_face_tagging_mode(self) -> bool:
@@ -2989,7 +3060,33 @@ class SingleMediaViewer(QWidget):
                     face_id = int(row["id"])
 
         is_unconfirmed = bool(region_data.get("is_unconfirmed"))
-        person_name = str(region_data.get("name") or "").strip()
+        person_name = str(region_data.get("person_name") or region_data.get("name") or "").strip()
+
+        # Unknown face case:
+        if not person_id and not person_name:
+            act_tag = menu.addAction("Who is this? (Tag person)...")
+            bold = QFont(act_tag.font())
+            bold.setBold(True)
+            act_tag.setFont(bold)
+            act_tag.triggered.connect(
+                lambda: self.prompt_inline_name_face(face_id, self.graphics_view.mapFromGlobal(screen_pos), "")
+            )
+            act_adjust = menu.addAction("Adjust bounding box")
+            act_adjust.triggered.connect(
+                lambda: self.start_face_adjust_mode(region_data, face_id, person_id)
+            )
+            menu.addSeparator()
+            act_ignore = menu.addAction("Ignore face")
+            act_ignore.triggered.connect(
+                lambda: self._on_face_region_dismiss(face_id)
+            )
+            act_not_face = menu.addAction("Not a face")
+            act_not_face.triggered.connect(
+                lambda: self._on_face_region_not_a_face(region_data, person_id, face_id)
+            )
+            if not getattr(self, "_suppress_menu_exec", False):
+                menu.exec(screen_pos)
+            return menu
 
         # 1. Confirm (if unconfirmed suggestion)
         if is_unconfirmed and face_id and person_id:
@@ -3038,6 +3135,15 @@ class SingleMediaViewer(QWidget):
         if not getattr(self, "_suppress_menu_exec", False):
             menu.exec(screen_pos)
         return menu
+
+    def _on_face_region_dismiss(self, face_id: int) -> None:
+        mw = getattr(self, "main_window", None) or self.window()
+        if hasattr(mw, "_on_dismiss_face_requested"):
+            mw._on_dismiss_face_requested(face_id)
+        elif hasattr(mw, "catalog_repo") and self.current_media_id is not None:
+            mw.catalog_repo.dismiss_face_region(face_id)
+            detail = mw.catalog_repo.get_media_detail(int(self.current_media_id))
+            self.render_face_regions(detail.get("face_regions") or detail.get("people", []))
 
     def start_face_adjust_mode(
         self,
@@ -3571,6 +3677,34 @@ class SingleMediaViewer(QWidget):
         """Authentic context menu for SingleMediaViewer (Previous, Next, Rotate, Rescan for faces, etc.)."""
         if self.current_media_id is None:
             return
+
+        # Check if right-click was on a face region (confirmed, suggestion, or unknown face)
+        scene_pos = self.graphics_view.mapToScene(pos)
+        items_under = self.scene.items(scene_pos)
+        face_sensor = None
+        for item in items_under:
+            if isinstance(item, _FaceHoverRegionItem):
+                face_sensor = item
+                break
+            elif isinstance(item, _FaceNameBadgeItem):
+                fid = item.face_id
+                for sit in self._face_overlay_items:
+                    if isinstance(sit, _FaceHoverRegionItem) and (
+                        sit.region_data.get("face_id") == fid or sit.region_data.get("region_id") == fid
+                    ):
+                        face_sensor = sit
+                        break
+                if face_sensor:
+                    break
+
+        if face_sensor is not None:
+            self.show_face_region_context_menu(
+                self.graphics_view.mapToGlobal(pos),
+                face_sensor.region_data,
+                face_sensor.person_id,
+            )
+            return
+
         menu = QMenu(self)
         menu.setFont(QFont("Segoe UI", 9))
         mw = getattr(self, "main_window", None) or self.window()

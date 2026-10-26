@@ -14,7 +14,7 @@ from PySide6.QtWidgets import QApplication, QLineEdit, QPushButton, QSizePolicy,
 from src.db.connection import DualDatabaseEngine
 from src.db.repository import CatalogRepository, ThumbnailRepository
 from src.ui.main_window import PhotoGalleryMainWindow
-from src.ui.media_viewer import SingleMediaViewer, _FaceNameBadgeItem
+from src.ui.media_viewer import SingleMediaViewer, _FaceHoverRegionItem, _FaceNameBadgeItem
 from src.ui.right_tag_dock import TagAndCaptionDock, _PersonTagCardWidget, _UnknownFaceCardWidget
 from src.ui.ribbon_toolbar import RibbonToolbar, _RibbonGroupBox
 from src.utils.scan_logger import install_universal_tooltip_filter
@@ -345,7 +345,7 @@ def test_media_viewer_canvas_overlays_and_highlighting(qapp, tmp_path: Path):
     # Check badge names
     badge_texts = [b.name for b in badges]
     assert "Alice" in badge_texts
-    assert any("Bob? [✓] [✗]" in b for b in badge_texts)
+    assert "Bob" in badge_texts
     assert "Who is this?" in badge_texts
 
     # Test highlight_face_region
@@ -362,5 +362,29 @@ def test_media_viewer_canvas_overlays_and_highlighting(qapp, tmp_path: Path):
     non_matching = [b for b in badges if b.data(1) != 203]
     assert all(not b.isVisible() for b in non_matching)
 
+    # When un-highlighting (region_id = None), all face overlays must hide
     viewer.highlight_face_region(None)
+    qapp.processEvents()
+    assert all(not b.isVisible() for b in badges)
+
+    # Test unknown face hoverLeaveEvent hides face overlays when mouse leaves
+    sensors = [it for it in viewer._face_overlay_items if isinstance(it, _FaceHoverRegionItem)]
+    unk_sensor = [s for s in sensors if s.region_data.get("face_id") == 203][0]
+    
+    # Enter hover
+    unk_sensor.hoverEnterEvent(None)
+    assert any(it.isVisible() for it in unk_sensor.related_items)
+
+    # Leave hover -> must hide
+    unk_sensor.hoverLeaveEvent(None)
+    assert all(not it.isVisible() for it in unk_sensor.related_items)
+
+    # Test right-click over face sensor triggers show_face_region_context_menu
+    viewer._suppress_menu_exec = True
+    menu = viewer.show_face_region_context_menu(QPoint(100, 100), unk_sensor.region_data, None)
+    menu_actions = [a.text() for a in menu.actions()]
+    assert any("Who is this?" in a for a in menu_actions)
+    assert "Ignore face" in menu_actions
+    assert "Not a face" in menu_actions
+
     viewer.close()
