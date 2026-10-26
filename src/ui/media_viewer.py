@@ -263,10 +263,12 @@ class _FaceNameBadgeItem(QGraphicsItem):
         fm = QFontMetrics(self._font)
         disp_txt = f"{self.name}?" if self.is_suggestion else self.name
         text_w = max(32, fm.horizontalAdvance(disp_txt))
-        extra_w = 46 if self.is_suggestion else 20
+        extra_w = 68 if self.is_suggestion else 22
         self._pill_w = float(text_w + extra_w)
         self._pill_h = float(max(24, fm.height() + 6))
         self.setCursor(Qt.PointingHandCursor)
+        self.setAcceptHoverEvents(True)
+        self.sensor: Any | None = None
 
     def setText(self, text: str) -> None:
         self.prepareGeometryChange()
@@ -274,7 +276,7 @@ class _FaceNameBadgeItem(QGraphicsItem):
         fm = QFontMetrics(self._font)
         disp_txt = f"{self.name}?" if self.is_suggestion else self.name
         text_w = max(32, fm.horizontalAdvance(disp_txt))
-        extra_w = 46 if self.is_suggestion else 20
+        extra_w = 68 if self.is_suggestion else 22
         self._pill_w = float(text_w + extra_w)
         self._pill_h = float(max(24, fm.height() + 6))
         self.update()
@@ -290,6 +292,21 @@ class _FaceNameBadgeItem(QGraphicsItem):
     def boundingRect(self) -> QRectF:
         return QRectF(-self._pill_w / 2.0 - 2.0, 2.0, self._pill_w + 4.0, self._pill_h + 6.0)
 
+    def hoverEnterEvent(self, event) -> None:
+        sensor = getattr(self, "sensor", None)
+        if sensor is not None:
+            if hasattr(sensor, "_leave_timer"):
+                sensor._leave_timer.stop()
+            for it in getattr(sensor, "related_items", []):
+                it.setVisible(True)
+        super().hoverEnterEvent(event)
+
+    def hoverLeaveEvent(self, event) -> None:
+        sensor = getattr(self, "sensor", None)
+        if sensor is not None and hasattr(sensor, "_leave_timer"):
+            sensor._leave_timer.start(250)
+        super().hoverLeaveEvent(event)
+
     def mousePressEvent(self, event) -> None:
         if event.button() == Qt.LeftButton and self.viewer is not None and self.face_id is not None:
             if self.is_unknown:
@@ -301,11 +318,11 @@ class _FaceNameBadgeItem(QGraphicsItem):
             elif self.is_suggestion:
                 pos_x = event.pos().x()
                 half_w = self._pill_w / 2.0
-                if pos_x >= half_w - 22.0:
+                if pos_x >= half_w - 28.0:
                     event.accept()
                     self.viewer.face_suggestion_rejected.emit(self.person_id or 0, self.face_id)
                     return
-                elif pos_x >= half_w - 44.0:
+                elif pos_x >= half_w - 56.0:
                     event.accept()
                     self.viewer.face_suggestion_confirmed.emit(self.person_id or 0, self.face_id)
                     return
@@ -351,26 +368,26 @@ class _FaceNameBadgeItem(QGraphicsItem):
         painter.setFont(self._font)
         half_w = self._pill_w / 2.0
         if self.is_suggestion:
-            # Draw suggestion name with question mark on the left
+            # Draw suggestion name with question mark on the left, with full margin so '?' is never cut off
             disp_txt = f"{self.name}?" if not self.name.endswith("?") else self.name
-            text_rect = QRectF(-half_w + 8.0, 4.0, self._pill_w - 48.0, self._pill_h)
+            text_rect = QRectF(-half_w + 10.0, 4.0, text_w + 16.0, self._pill_h)
             painter.setPen(QColor("#0B3D91"))
             painter.drawText(text_rect, Qt.AlignVCenter | Qt.AlignLeft, disp_txt)
 
             # Vector green checkmark icon
-            btn_check_center = QPointF(half_w - 32.0, 4.0 + self._pill_h * 0.5)
+            btn_check_center = QPointF(half_w - 40.0, 4.0 + self._pill_h * 0.5)
             painter.setPen(QPen(QColor("#2E7D32"), 1.8, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
             painter.drawLine(
-                QPointF(btn_check_center.x() - 4.0, btn_check_center.y()),
-                QPointF(btn_check_center.x() - 1.0, btn_check_center.y() + 3.5),
+                QPointF(btn_check_center.x() - 4.5, btn_check_center.y()),
+                QPointF(btn_check_center.x() - 1.5, btn_check_center.y() + 3.5),
             )
             painter.drawLine(
-                QPointF(btn_check_center.x() - 1.0, btn_check_center.y() + 3.5),
+                QPointF(btn_check_center.x() - 1.5, btn_check_center.y() + 3.5),
                 QPointF(btn_check_center.x() + 4.5, btn_check_center.y() - 3.5),
             )
 
             # Vector red cross icon
-            btn_cross_center = QPointF(half_w - 12.0, 4.0 + self._pill_h * 0.5)
+            btn_cross_center = QPointF(half_w - 16.0, 4.0 + self._pill_h * 0.5)
             painter.setPen(QPen(QColor("#C50F1F"), 1.8, Qt.SolidLine, Qt.RoundCap))
             painter.drawLine(
                 QPointF(btn_cross_center.x() - 3.5, btn_cross_center.y() - 3.5),
@@ -405,6 +422,10 @@ class _FaceHoverRegionItem(QGraphicsRectItem):
         self.related_items = related_items
         self.person_id = person_id
         self.region_data = region_data or {}
+        self.related_badge: _FaceNameBadgeItem | None = None
+        self._leave_timer = QTimer(self.viewer if isinstance(self.viewer, QWidget) else None)
+        self._leave_timer.setSingleShot(True)
+        self._leave_timer.timeout.connect(self._do_leave_hide)
         self.setAcceptHoverEvents(True)
         self.setAcceptedMouseButtons(Qt.LeftButton | Qt.RightButton)
         self.setPen(QPen(Qt.NoPen))
@@ -414,20 +435,28 @@ class _FaceHoverRegionItem(QGraphicsRectItem):
     def hoverEnterEvent(self, event) -> None:
         if hasattr(self.viewer, "is_in_edit_mode") and self.viewer.is_in_edit_mode():
             return
+        self._leave_timer.stop()
         for it in self.related_items:
             it.setVisible(True)
         super().hoverEnterEvent(event)
 
     def hoverLeaveEvent(self, event) -> None:
+        self._leave_timer.start(250)
+        super().hoverLeaveEvent(event)
+
+    def _do_leave_hide(self) -> None:
         fid = self.region_data.get("face_id") or self.region_data.get("region_id")
         is_highlighted = (
             (self.person_id is not None and getattr(self.viewer, "_highlighted_person_id", None) == self.person_id)
             or (fid is not None and getattr(self.viewer, "_highlighted_region_id", None) == fid)
         )
         if not is_highlighted:
+            if self.related_badge is not None and self.related_badge.isUnderMouse():
+                return
+            if self.isUnderMouse():
+                return
             for it in self.related_items:
                 it.setVisible(False)
-        super().hoverLeaveEvent(event)
 
     def mousePressEvent(self, event) -> None:
         if hasattr(self.viewer, "is_in_edit_mode") and self.viewer.is_in_edit_mode():
@@ -2774,11 +2803,13 @@ class SingleMediaViewer(QWidget):
             # Interactive hover sensor over face region
             related = [shadow_box, box, badge]
             sensor_rect = QRectF(rect_scene)
-            sensor_rect.adjust(-4, -4, 4, 34)
+            sensor_rect.adjust(-8, -8, 8, max(46.0, rh * h * 0.35))
             sensor = _FaceHoverRegionItem(sensor_rect, self, related, pid, region_data=reg)
             sensor.setData(0, pid)
             sensor.setData(1, fid)
             sensor.setData(3, st)
+            sensor.related_badge = badge
+            badge.sensor = sensor
             self.scene.addItem(sensor)
             self._face_overlay_items.append(sensor)
 
@@ -3064,7 +3095,7 @@ class SingleMediaViewer(QWidget):
 
         # Unknown face case:
         if not person_id and not person_name:
-            act_tag = menu.addAction("Who is this? (Tag person)...")
+            act_tag = menu.addAction("Tag person...")
             bold = QFont(act_tag.font())
             bold.setBold(True)
             act_tag.setFont(bold)
@@ -3208,6 +3239,23 @@ class SingleMediaViewer(QWidget):
             self._face_adjust_box_item = None
         for it in self._face_overlay_items:
             it.setVisible(False)
+
+        # Reset mouse cursor and restore hover for item currently under cursor
+        if hasattr(self, "graphics_view") and self.graphics_view is not None:
+            self.graphics_view.viewport().unsetCursor()
+            self.graphics_view.unsetCursor()
+            try:
+                from PySide6.QtGui import QCursor
+                vp_pos = self.graphics_view.mapFromGlobal(QCursor.pos())
+                if self.graphics_view.viewport().rect().contains(vp_pos):
+                    scene_pos = self.graphics_view.mapToScene(vp_pos)
+                    for it in self.scene.items(scene_pos):
+                        if isinstance(it, _FaceHoverRegionItem):
+                            for rel in it.related_items:
+                                rel.setVisible(True)
+                            break
+            except Exception:
+                pass
 
     def save_face_adjust(self) -> None:
         """Saves updated bounding box to catalog.db, updates face thumbnail, and re-renders."""

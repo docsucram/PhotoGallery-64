@@ -526,7 +526,7 @@ class _UnknownFaceCardWidget(QFrame):
         menu = QMenu(self)
         menu.setFont(QFont("Segoe UI", 9))
 
-        act_tag = menu.addAction("Tag as...")
+        act_tag = menu.addAction("Tag person...")
         act_tag.triggered.connect(self._focus_name_input)
 
         menu.addSeparator()
@@ -696,18 +696,6 @@ class _PersonTagCardWidget(QFrame):
             )
             self.btn_reject.clicked.connect(lambda: self.reject_suggestion_clicked.emit(self.person_id, self.face_id or 0))
             hbox.addWidget(self.btn_reject)
-        else:
-            self.btn_del = QPushButton(self)
-            self.btn_del.setIcon(make_symbol_icon("cross", 14))
-            self.btn_del.setFixedSize(18, 18)
-            self.btn_del.setCursor(Qt.PointingHandCursor)
-            self.btn_del.setToolTip(f"Remove tag '{self.person_name}'")
-            self.btn_del.setStyleSheet(
-                "QPushButton { border: none; background: transparent; border-radius: 2px; }"
-                "QPushButton:hover { background: #F8D7DA; }"
-            )
-            self.btn_del.clicked.connect(lambda: self.remove_clicked.emit(self.person_id))
-            hbox.addWidget(self.btn_del)
 
         self.btn_menu = QToolButton(self)
         self.btn_menu.setObjectName("PersonMenuBtn")

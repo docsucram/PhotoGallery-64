@@ -266,9 +266,10 @@ def test_right_tag_dock_renders_unknown_and_suggested_cards(qapp, test_engine):
     chips = dock.people_chips_container.findChildren(_PersonTagCardWidget)
     assert len(chips) == 2  # Alice and Bob
 
-    # Alice (confirmed): has ✕ remove button
+    # Alice (confirmed): no inline ✕ button; removed via menu options
     chip_alice = [c for c in chips if c.person_name == "Alice"][0]
-    assert hasattr(chip_alice, "btn_del")
+    assert not hasattr(chip_alice, "btn_del")
+    assert hasattr(chip_alice, "btn_menu")
     assert not hasattr(chip_alice, "btn_confirm")
 
     # Bob (suggestion): has ✓ confirm and ✗ reject buttons
@@ -375,15 +376,17 @@ def test_media_viewer_canvas_overlays_and_highlighting(qapp, tmp_path: Path):
     unk_sensor.hoverEnterEvent(None)
     assert any(it.isVisible() for it in unk_sensor.related_items)
 
-    # Leave hover -> must hide
+    # Leave hover -> grace timer starts, and _do_leave_hide hides
     unk_sensor.hoverLeaveEvent(None)
+    assert unk_sensor._leave_timer.isActive()
+    unk_sensor._do_leave_hide()
     assert all(not it.isVisible() for it in unk_sensor.related_items)
 
     # Test right-click over face sensor triggers show_face_region_context_menu
     viewer._suppress_menu_exec = True
     menu = viewer.show_face_region_context_menu(QPoint(100, 100), unk_sensor.region_data, None)
     menu_actions = [a.text() for a in menu.actions()]
-    assert any("Who is this?" in a for a in menu_actions)
+    assert "Tag person..." in menu_actions
     assert "Ignore face" in menu_actions
     assert "Not a face" in menu_actions
 
