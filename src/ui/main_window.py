@@ -4204,7 +4204,9 @@ class PhotoGalleryMainWindow(QMainWindow):
                     else False
                 ),
                 "status_bar": self.statusBar().isVisible() if self.statusBar() else True,
+                "top_header": self.ribbon.top_header.isVisible() if hasattr(self.ribbon, "top_header") else True,
                 "qat": self.ribbon.qat_container.isVisible() if hasattr(self.ribbon, "qat_container") else True,
+                "scope_bar": self.scope_bar.isVisible() if hasattr(self, "scope_bar") else False,
                 "ribbon_collapsed": (
                     self.ribbon._ribbon_collapsed if hasattr(self.ribbon, "_ribbon_collapsed") else False
                 ),
@@ -4217,10 +4219,16 @@ class PhotoGalleryMainWindow(QMainWindow):
                 self.media_viewer.fix_pane.hide()
             if self.statusBar():
                 self.statusBar().hide()
+            if hasattr(self.ribbon, "top_header"):
+                self.ribbon.top_header.hide()
             if hasattr(self.ribbon, "qat_container"):
                 self.ribbon.qat_container.hide()
+            if hasattr(self, "scope_bar"):
+                self.scope_bar.hide()
             if hasattr(self.ribbon, "set_ribbon_collapsed"):
                 self.ribbon.set_ribbon_collapsed(True)
+            if hasattr(self.ribbon, "btn_exit_immersive"):
+                self.ribbon.btn_exit_immersive.show()
             self._is_immersive_mode = True
         else:
             # Restore previous visibility states
@@ -4237,14 +4245,22 @@ class PhotoGalleryMainWindow(QMainWindow):
                 self.media_viewer.fix_pane.show()
             if saved.get("status_bar", True) and self.statusBar():
                 self.statusBar().show()
+            if saved.get("top_header", True) and hasattr(self.ribbon, "top_header"):
+                self.ribbon.top_header.show()
             if saved.get("qat", True) and hasattr(self.ribbon, "qat_container"):
                 self.ribbon.qat_container.show()
+            if saved.get("scope_bar") and hasattr(self, "scope_bar"):
+                self.scope_bar.show()
             if not saved.get("ribbon_collapsed", False) and hasattr(self.ribbon, "set_ribbon_collapsed"):
                 self.ribbon.set_ribbon_collapsed(False)
+            if hasattr(self.ribbon, "btn_exit_immersive"):
+                self.ribbon.btn_exit_immersive.hide()
             self._is_immersive_mode = False
 
     def dispatch_ribbon_action(self, action_id: str) -> None:
-        if action_id == "add_folder":
+        if action_id in ("toggle_immersive", "exit_immersive"):
+            self.toggle_immersive_viewer_mode()
+        elif action_id == "add_folder":
             self._prompt_and_add_folder()
         elif action_id in ("import_media", "import_photos"):
             self.open_import_wizard()
@@ -4687,6 +4703,33 @@ class PhotoGalleryMainWindow(QMainWindow):
 
         return paths, details
 
+    def _is_path_in_library(self, folder_path: Path) -> bool:
+        """Checks whether folder_path is an existing library folder or within one."""
+        try:
+            target_norm = folder_path.resolve()
+            folders = self.catalog_repo.get_folders()
+            for f in folders:
+                f_path = Path(f["path"]).resolve()
+                if target_norm == f_path or target_norm.is_relative_to(f_path):
+                    return True
+        except Exception:
+            pass
+        return False
+
+    def _on_creation_saved(self, out_file: Path, tool_name: str) -> None:
+        """
+        Processes a newly created media file.
+        If saved within a gallery library folder, scans it so it appears in the gallery and selects it.
+        If saved to an external location (e.g. Desktop, Downloads), does NOT add the external folder to library.
+        """
+        if self._is_path_in_library(out_file.parent):
+            self.scan_folder(out_file.parent, include_subfolders=False)
+            self.rebuild_and_run_query()
+            self._select_file_in_grid(out_file)
+            self.lbl_sync_status.setText(f"✓ Created {tool_name}: {out_file.name}")
+        else:
+            self.lbl_sync_status.setText(f"✓ Saved {tool_name} to: {out_file.name}")
+
     def open_panorama_dialog(self) -> None:
         """Launches the Microsoft ICE-Style Panorama Stitcher."""
         from src.ui.create_studio_dialogs import PanoramaDialog
@@ -4702,22 +4745,7 @@ class PhotoGalleryMainWindow(QMainWindow):
 
         dlg = PanoramaDialog(paths, self)
         if dlg.exec() == QDialog.Accepted and dlg.saved_file_path:
-            out_file = dlg.saved_file_path
-            self.scan_folder(out_file.parent, include_subfolders=False)
-            self.rebuild_and_run_query()
-
-            # Select the newly created panorama in the grid
-            try:
-                conn = self.catalog_repo.engine.catalog_conn()
-                row = conn.execute(
-                    "SELECT m.id FROM media m JOIN folders f ON f.id = m.folder_id WHERE f.path = ? AND m.filename = ?",
-                    (str(out_file.parent), out_file.name),
-                ).fetchone()
-                if row:
-                    self.grid_view.select_media_id(row[0])
-            except Exception:
-                pass
-            self.lbl_sync_status.setText(f"✓ Created panorama: {out_file.name}")
+            self._on_creation_saved(dlg.saved_file_path, "panorama")
 
     def open_collage_dialog(self) -> None:
         """Launches the Interactive Collage & 'Then & Now' Studio."""
@@ -4734,21 +4762,7 @@ class PhotoGalleryMainWindow(QMainWindow):
 
         dlg = CollageDialog(details, self)
         if dlg.exec() == QDialog.Accepted and dlg.saved_file_path:
-            out_file = dlg.saved_file_path
-            self.scan_folder(out_file.parent, include_subfolders=False)
-            self.rebuild_and_run_query()
-
-            try:
-                conn = self.catalog_repo.engine.catalog_conn()
-                row = conn.execute(
-                    "SELECT m.id FROM media m JOIN folders f ON f.id = m.folder_id WHERE f.path = ? AND m.filename = ?",
-                    (str(out_file.parent), out_file.name),
-                ).fetchone()
-                if row:
-                    self.grid_view.select_media_id(row[0])
-            except Exception:
-                pass
-            self.lbl_sync_status.setText(f"✓ Created collage: {out_file.name}")
+            self._on_creation_saved(dlg.saved_file_path, "collage")
 
     def open_photo_fuse_dialog(self) -> None:
         """Launches the Photo Fuse Best-Face Group Shot Combiner."""
@@ -4765,21 +4779,7 @@ class PhotoGalleryMainWindow(QMainWindow):
 
         dlg = PhotoFuseDialog(paths, self)
         if dlg.exec() == QDialog.Accepted and dlg.saved_file_path:
-            out_file = dlg.saved_file_path
-            self.scan_folder(out_file.parent, include_subfolders=False)
-            self.rebuild_and_run_query()
-
-            try:
-                conn = self.catalog_repo.engine.catalog_conn()
-                row = conn.execute(
-                    "SELECT m.id FROM media m JOIN folders f ON f.id = m.folder_id WHERE f.path = ? AND m.filename = ?",
-                    (str(out_file.parent), out_file.name),
-                ).fetchone()
-                if row:
-                    self.grid_view.select_media_id(row[0])
-            except Exception:
-                pass
-            self.lbl_sync_status.setText(f"✓ Created fused photo: {out_file.name}")
+            self._on_creation_saved(dlg.saved_file_path, "fused photo")
 
     def toggle_markup_mode(self) -> None:
         """Toggles the Quick Markup, Callouts & Privacy Redaction tool in the viewer."""
@@ -4820,11 +4820,7 @@ class PhotoGalleryMainWindow(QMainWindow):
 
         dlg = ColourPopDialog(bgr, p, self)
         if dlg.exec() == QDialog.Accepted and dlg.saved_file_path:
-            out_file = dlg.saved_file_path
-            self.scan_folder(out_file.parent, include_subfolders=False)
-            self.rebuild_and_run_query()
-            self._select_file_in_grid(out_file)
-            self.lbl_sync_status.setText(f"✓ Created Colour Pop photo: {out_file.name}")
+            self._on_creation_saved(dlg.saved_file_path, "Colour Pop photo")
 
     def open_portrait_bokeh_dialog(self) -> None:
         """Launches the Portrait Depth Bokeh & Fill Light Studio."""
@@ -4837,11 +4833,7 @@ class PhotoGalleryMainWindow(QMainWindow):
 
         dlg = PortraitBokehDialog(bgr, p, self)
         if dlg.exec() == QDialog.Accepted and dlg.saved_file_path:
-            out_file = dlg.saved_file_path
-            self.scan_folder(out_file.parent, include_subfolders=False)
-            self.rebuild_and_run_query()
-            self._select_file_in_grid(out_file)
-            self.lbl_sync_status.setText(f"✓ Created Portrait Bokeh photo: {out_file.name}")
+            self._on_creation_saved(dlg.saved_file_path, "Portrait Bokeh photo")
 
     def open_cinematic_motion_dialog(self) -> None:
         """Launches the 3D Cinematic Motion Video Generator."""
@@ -4854,11 +4846,7 @@ class PhotoGalleryMainWindow(QMainWindow):
 
         dlg = CinematicMotionDialog(bgr, p, self)
         if dlg.exec() == QDialog.Accepted and dlg.saved_file_path:
-            out_file = dlg.saved_file_path
-            self.scan_folder(out_file.parent, include_subfolders=False)
-            self.rebuild_and_run_query()
-            self._select_file_in_grid(out_file)
-            self.lbl_sync_status.setText(f"✓ Created 3D Cinematic video: {out_file.name}")
+            self._on_creation_saved(dlg.saved_file_path, "3D Cinematic video")
 
     def _select_file_in_grid(self, file_path: Path) -> None:
         try:

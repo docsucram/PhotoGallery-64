@@ -1467,24 +1467,148 @@ def make_person_avatar_pixmap(
     return canvas
 
 
+@lru_cache(maxsize=8)
 def make_default_variation_base_image(w: int = 54, h: int = 38) -> np.ndarray:
     """Generates the authentic WLPG poppy/flower reference image for adjustment menus and effect icons."""
-    img = np.zeros((h, w, 3), dtype=np.uint8)
-    for y in range(h):
-        factor = y / float(h)
-        img[y, :] = [int(175 - factor * 40), int(205 - factor * 30), int(235 - factor * 20)]
-    for y in range(int(h * 0.65), h):
-        img[y, :] = [int(35 + (y - h * 0.65) * 5), int(135 - (y - h * 0.65) * 3), int(45)]
-    cx, cy = int(w * 0.48), int(h * 0.52)
-    cv2.line(img, (cx, h), (cx, cy + 6), (25, 110, 30), 2)
-    for ang in range(0, 360, 45):
-        rad = math.radians(ang)
-        px = int(cx + math.cos(rad) * 9)
-        py = int(cy + math.sin(rad) * 9)
-        cv2.circle(img, (px, py), 7, (215, 38, 45), -1)
-    cv2.circle(img, (cx, cy), 5, (255, 215, 0), -1)
-    cv2.circle(img, (cx, cy), 2, (70, 40, 20), -1)
-    return img
+    from PIL import Image as _PILImg, ImageDraw as _PILDProp, ImageFilter as _PILFilt
+    # Supersample at 4x for smooth anti-aliased photographic rendering
+    sw, sh = w * 4, h * 4
+    canvas = _PILImg.new("RGB", (sw, sh), (0, 0, 0))
+    draw = _PILDProp.Draw(canvas)
+
+    # 1. Sky & Nature Bokeh Background
+    for y in range(sh):
+        ratio = y / sh
+        if ratio < 0.45:
+            r = int(140 + ratio * 80)
+            g = int(185 + ratio * 55)
+            b = int(235 - ratio * 40)
+        elif ratio < 0.65:
+            t = (ratio - 0.45) / 0.20
+            r = int(176 - t * 80)
+            g = int(210 - t * 60)
+            b = int(217 - t * 130)
+        else:
+            t = (ratio - 0.65) / 0.35
+            r = int(96 - t * 50)
+            g = int(150 - t * 60)
+            b = int(87 - t * 50)
+        draw.line([(0, y), (sw, y)], fill=(r, g, b))
+
+    # Soft bokeh light circles
+    bokeh = _PILImg.new("RGBA", (sw, sh), (0, 0, 0, 0))
+    bdraw = _PILDProp.Draw(bokeh)
+    bokeh_spots = [
+        (sw * 0.15, sh * 0.25, sw * 0.12, (255, 255, 255, 45)),
+        (sw * 0.82, sh * 0.20, sw * 0.16, (240, 250, 255, 35)),
+        (sw * 0.28, sh * 0.55, sw * 0.14, (200, 240, 160, 40)),
+        (sw * 0.75, sh * 0.60, sw * 0.18, (180, 230, 140, 45)),
+        (sw * 0.88, sh * 0.78, sw * 0.15, (130, 200, 100, 50)),
+        (sw * 0.08, sh * 0.72, sw * 0.13, (150, 210, 110, 40)),
+    ]
+    for bx, by, br, bcol in bokeh_spots:
+        bdraw.ellipse([bx - br, by - br, bx + br, by + br], fill=bcol)
+    bokeh = bokeh.filter(_PILFilt.GaussianBlur(sw * 0.04))
+    canvas.paste(bokeh, (0, 0), bokeh)
+
+    # 2. Curved Stem & Leaf
+    stem_layer = _PILImg.new("RGBA", (sw, sh), (0, 0, 0, 0))
+    sdraw = _PILDProp.Draw(stem_layer)
+    cx, cy = sw * 0.49, sh * 0.48
+    stem_points = [
+        (cx + sw * 0.02, cy + sh * 0.12),
+        (cx + sw * 0.015, cy + sh * 0.24),
+        (cx - sw * 0.01, cy + sh * 0.38),
+        (cx - sw * 0.03, sh + 10)
+    ]
+    sdraw.line(stem_points, fill=(45, 115, 32, 255), width=int(sw * 0.032), joint="curve")
+    sdraw.line(stem_points, fill=(70, 155, 45, 255), width=int(sw * 0.020), joint="curve")
+    sdraw.line(stem_points, fill=(110, 190, 75, 180), width=int(sw * 0.008), joint="curve")
+
+    leaf_poly = [
+        (cx - sw * 0.01, cy + sh * 0.32),
+        (cx - sw * 0.12, cy + sh * 0.28),
+        (cx - sw * 0.20, cy + sh * 0.35),
+        (cx - sw * 0.08, cy + sh * 0.40),
+        (cx - sw * 0.015, cy + sh * 0.36),
+    ]
+    sdraw.polygon(leaf_poly, fill=(55, 130, 38, 255))
+    sdraw.line([leaf_poly[0], leaf_poly[2]], fill=(95, 175, 60, 220), width=int(sw * 0.006))
+    stem_layer = stem_layer.filter(_PILFilt.GaussianBlur(1))
+    canvas.paste(stem_layer, (0, 0), stem_layer)
+
+    # 3. Layered Poppy Petals
+    flower_layer = _PILImg.new("RGBA", (sw, sh), (0, 0, 0, 0))
+    fdraw = _PILDProp.Draw(flower_layer)
+    pr = sw * 0.26
+
+    back_petals = [
+        (cx - pr * 0.7, cy - pr * 0.6, pr * 0.85, pr * 0.80, (195, 28, 32)),
+        (cx + pr * 0.6, cy - pr * 0.65, pr * 0.90, pr * 0.85, (205, 32, 35)),
+        (cx - pr * 0.85, cy + pr * 0.1, pr * 0.80, pr * 0.75, (185, 25, 30)),
+        (cx + pr * 0.85, cy + pr * 0.1, pr * 0.85, pr * 0.78, (190, 26, 30)),
+        (cx, cy - pr * 0.85, pr * 0.95, pr * 0.82, (215, 35, 38)),
+    ]
+    for px, py, rx, ry, col in back_petals:
+        fdraw.ellipse([px - rx, py - ry, px + rx, py + ry], fill=col + (255,))
+
+    mid_petals = [
+        (cx - pr * 0.45, cy - pr * 0.35, pr * 0.88, pr * 0.82, (230, 42, 40)),
+        (cx + pr * 0.45, cy - pr * 0.40, pr * 0.90, pr * 0.84, (242, 50, 45)),
+        (cx - pr * 0.55, cy + pr * 0.35, pr * 0.86, pr * 0.80, (225, 38, 36)),
+        (cx + pr * 0.55, cy + pr * 0.32, pr * 0.88, pr * 0.80, (238, 48, 42)),
+        (cx - pr * 0.1, cy + pr * 0.55, pr * 0.92, pr * 0.78, (248, 58, 48)),
+    ]
+    for px, py, rx, ry, col in mid_petals:
+        fdraw.ellipse([px - rx, py - ry, px + rx, py + ry], fill=col + (255,))
+
+    fore_petals = [
+        (cx - pr * 0.25, cy + pr * 0.25, pr * 0.72, pr * 0.62, (255, 78, 62)),
+        (cx + pr * 0.30, cy + pr * 0.22, pr * 0.74, pr * 0.64, (255, 88, 70)),
+        (cx + pr * 0.05, cy + pr * 0.42, pr * 0.78, pr * 0.58, (255, 98, 78)),
+    ]
+    for px, py, rx, ry, col in fore_petals:
+        fdraw.ellipse([px - rx, py - ry, px + rx, py + ry], fill=col + (255,))
+
+    # Radial shadow for velvety depth
+    shadow = _PILImg.new("RGBA", (sw, sh), (0, 0, 0, 0))
+    shdraw = _PILDProp.Draw(shadow)
+    shdraw.ellipse([cx - pr * 0.42, cy - pr * 0.42, cx + pr * 0.42, cy + pr * 0.42], fill=(130, 10, 15, 140))
+    shdraw.ellipse([cx - pr * 0.25, cy - pr * 0.25, cx + pr * 0.25, cy + pr * 0.25], fill=(70, 5, 10, 200))
+    shadow = shadow.filter(_PILFilt.GaussianBlur(sw * 0.02))
+    flower_layer.paste(shadow, (0, 0), shadow)
+
+    # 4. Center Core, Stamens and Golden Pollen
+    core_r = pr * 0.22
+    fdraw.ellipse([cx - core_r, cy - core_r, cx + core_r, cy + core_r], fill=(24, 12, 14, 255))
+    rng = np.random.RandomState(42)
+    for _ in range(60):
+        ang = rng.uniform(0, 2 * math.pi)
+        dist = rng.uniform(core_r * 0.7, core_r * 1.55)
+        sx = cx + math.cos(ang) * dist
+        sy = cy + math.sin(ang) * dist
+        fdraw.line([(cx + math.cos(ang) * core_r * 0.4, cy + math.sin(ang) * core_r * 0.4), (sx, sy)], fill=(50, 30, 20, 220), width=max(1, int(sw * 0.003)))
+        pollen_r = rng.uniform(sw * 0.006, sw * 0.012)
+        pollen_col = (255, rng.randint(210, 245), rng.randint(20, 60), 255)
+        fdraw.ellipse([sx - pollen_r, sy - pollen_r, sx + pollen_r, sy + pollen_r], fill=pollen_col)
+
+    # Seed capsule star
+    cap_r = core_r * 0.48
+    fdraw.ellipse([cx - cap_r, cy - cap_r, cx + cap_r, cy + cap_r], fill=(85, 115, 38, 255))
+    for ang in np.linspace(0, 2 * math.pi, 8, endpoint=False):
+        ex = cx + math.cos(ang) * cap_r
+        ey = cy + math.sin(ang) * cap_r
+        fdraw.line([(cx, cy), (ex, ey)], fill=(255, 230, 110, 240), width=max(1, int(sw * 0.004)))
+    fdraw.ellipse([cx - sw * 0.008, cy - sw * 0.008, cx + sw * 0.008, cy + sw * 0.008], fill=(255, 240, 150, 255))
+
+    # Dewdrop
+    dx, dy, dr = cx - pr * 0.48, cy - pr * 0.15, sw * 0.018
+    fdraw.ellipse([dx - dr, dy - dr * 0.75, dx + dr, dy + dr * 0.75], fill=(255, 255, 255, 180))
+    fdraw.ellipse([dx - dr * 0.5, dy - dr * 0.4, dx, dy], fill=(255, 255, 255, 240))
+
+    canvas.paste(flower_layer, (0, 0), flower_layer)
+    res = canvas.resize((w, h), _PILImg.Resampling.LANCZOS)
+    return np.array(res)
 
 
 @lru_cache(maxsize=16)
@@ -2074,7 +2198,14 @@ class _RibbonEffectsGallery(QFrame):
 
         menu.aboutToHide.connect(self.effect_unhovered.emit)
         if not getattr(self, "_suppress_menu_exec", False):
-            menu.exec(self.btn_more.mapToGlobal(QPoint(0, self.btn_more.height())))
+            pos = self.mapToGlobal(QPoint(0, self.height()))
+            screen = self.screen() or (QApplication.primaryScreen() if QApplication.instance() else None)
+            if screen:
+                avail_w = screen.availableGeometry().right()
+                menu_w = menu.sizeHint().width()
+                if pos.x() + menu_w > avail_w:
+                    pos.setX(max(10, avail_w - menu_w - 10))
+            menu.exec(pos)
 
     def _select_from_menu(self, eff_id: str) -> None:
         self.set_active_effect(eff_id)
@@ -2454,8 +2585,9 @@ class _WLPGPeopleMenuWidget(QWidget):
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         scroll.setFrameShape(QFrame.NoFrame)
-        est_height = 80 + (len(other_people) + 9) // 10 * 46
-        scroll.setFixedHeight(min(380, max(140, est_height)))
+        other_rows = (len(other_people) + 9) // 10 if other_people else 0
+        needed_h = 80 + (32 + other_rows * 46 if other_rows > 0 else 0) + 12
+        scroll.setFixedHeight(min(360, max(140, needed_h)))
         scroll.setStyleSheet(
             """
             QScrollArea {
@@ -3269,11 +3401,43 @@ class RibbonToolbar(QWidget):
         self.tab_widget.tabBarDoubleClicked.connect(self._on_tab_bar_double_clicked)
         self.tab_widget.tabBarClicked.connect(self._on_tab_bar_clicked)
 
-        # Right Corner: Minimize the Ribbon button
+        # Right Corner: Minimize the Ribbon button and Exit Immersive Pill
         right_corner = QWidget(self.tab_widget)
         rc_layout = QHBoxLayout(right_corner)
         rc_layout.setContentsMargins(2, 0, 8, 0)
-        rc_layout.setSpacing(0)
+        rc_layout.setSpacing(4)
+
+        # Exit Immersive Mode Button (subtle pill, hidden by default)
+        self.btn_exit_immersive = QPushButton("✕ Exit Immersive (F4)", right_corner)
+        self.btn_exit_immersive.setFixedHeight(22)
+        self.btn_exit_immersive.setCursor(Qt.PointingHandCursor)
+        self.btn_exit_immersive.setToolTip("Exit Immersive Viewer Mode (F4)")
+        self.btn_exit_immersive.setStyleSheet(
+            """
+            QPushButton {
+                border: 1px solid #70A6E8;
+                border-radius: 3px;
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #FFFFFF, stop:0.4 #E8F1FC, stop:1 #D2E4F8);
+                color: #1E395B;
+                font-family: 'Segoe UI';
+                font-size: 8pt;
+                font-weight: 600;
+                padding: 1px 8px;
+                margin-right: 4px;
+            }
+            QPushButton:hover {
+                border: 1px solid #3399FF;
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #FFFFFF, stop:0.4 #D9EBFC, stop:1 #B9DAFB);
+            }
+            QPushButton:pressed {
+                background: #A0C8F5;
+                border: 1px solid #2272D0;
+            }
+            """
+        )
+        self.btn_exit_immersive.clicked.connect(lambda: self.action_triggered.emit("toggle_immersive"))
+        self.btn_exit_immersive.hide()
+        rc_layout.addWidget(self.btn_exit_immersive)
 
         self.btn_collapse_ribbon = QPushButton("▲", right_corner)
         self.btn_collapse_ribbon.setFixedSize(22, 22)

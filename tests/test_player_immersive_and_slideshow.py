@@ -161,8 +161,13 @@ def test_immersive_mode_f4(qapp):
     mw.statusBar = MagicMock(return_value=mock_status_bar)
     
     mw.ribbon = MagicMock()
+    mw.ribbon.top_header.isVisible.return_value = True
     mw.ribbon.qat_container.isVisible.return_value = True
+    mw.ribbon.btn_exit_immersive = MagicMock()
     mw.ribbon._ribbon_collapsed = False
+
+    mw.scope_bar = MagicMock()
+    mw.scope_bar.isVisible.return_value = True
 
     mw.resizeDocks = MagicMock()
 
@@ -173,8 +178,11 @@ def test_immersive_mode_f4(qapp):
     mw.right_tag_dock.hide.assert_called_once()
     mw.media_viewer.fix_pane.hide.assert_called_once()
     mock_status_bar.hide.assert_called_once()
+    mw.ribbon.top_header.hide.assert_called_once()
     mw.ribbon.qat_container.hide.assert_called_once()
+    mw.scope_bar.hide.assert_called_once()
     mw.ribbon.set_ribbon_collapsed.assert_called_with(True)
+    mw.ribbon.btn_exit_immersive.show.assert_called_once()
 
     # 2. Toggle OFF immersive mode (restores previously visible components)
     PhotoGalleryMainWindow.toggle_immersive_viewer_mode(mw)
@@ -183,6 +191,91 @@ def test_immersive_mode_f4(qapp):
     mw.right_tag_dock.show.assert_called_once()
     mw.media_viewer.fix_pane.show.assert_called_once()
     mock_status_bar.show.assert_called_once()
+    mw.ribbon.top_header.show.assert_called_once()
     mw.ribbon.qat_container.show.assert_called_once()
+    mw.scope_bar.show.assert_called_once()
     mw.ribbon.set_ribbon_collapsed.assert_called_with(False)
+    mw.ribbon.btn_exit_immersive.hide.assert_called_once()
+
+
+def test_ribbon_exit_immersive_pill(qapp):
+    ribbon = RibbonToolbar()
+    assert hasattr(ribbon, "btn_exit_immersive")
+    assert ribbon.btn_exit_immersive.isHidden()
+    assert "Exit Immersive" in ribbon.btn_exit_immersive.text()
+    
+    # Test action triggered signal when clicked
+    actions_emitted = []
+    ribbon.action_triggered.connect(actions_emitted.append)
+    ribbon.btn_exit_immersive.click()
+    assert "toggle_immersive" in actions_emitted
+
+
+def test_creation_saved_does_not_add_desktop_to_library(tmp_path):
+    from unittest.mock import MagicMock
+    from src.ui.main_window import PhotoGalleryMainWindow
+
+    mw = PhotoGalleryMainWindow.__new__(PhotoGalleryMainWindow)
+    mw.catalog_repo = MagicMock()
+    # User's library only contains Pictures/Photos
+    lib_folder = tmp_path / "Pictures" / "Photos"
+    lib_folder.mkdir(parents=True, exist_ok=True)
+    mw.catalog_repo.get_folders.return_value = [{"id": 1, "path": str(lib_folder)}]
+
+    mw.scan_folder = MagicMock()
+    mw.rebuild_and_run_query = MagicMock()
+    mw._select_file_in_grid = MagicMock()
+    mw.lbl_sync_status = MagicMock()
+
+    # Case A: Saved to Desktop (External folder)
+    desktop_folder = tmp_path / "Desktop"
+    desktop_folder.mkdir(parents=True, exist_ok=True)
+    desktop_file = desktop_folder / "panorama_output.jpg"
+    desktop_file.write_text("dummy")
+
+    assert mw._is_path_in_library(desktop_folder) is False
+    mw._on_creation_saved(desktop_file, "panorama")
+    
+    # scan_folder must NOT be called for external folder (prevents adding Desktop to library)
+    mw.scan_folder.assert_not_called()
+    mw.lbl_sync_status.setText.assert_called_with("✓ Saved panorama to: panorama_output.jpg")
+
+    # Case B: Saved inside Library
+    internal_file = lib_folder / "collage_output.jpg"
+    internal_file.write_text("dummy")
+
+    assert mw._is_path_in_library(lib_folder) is True
+    mw._on_creation_saved(internal_file, "collage")
+    mw.scan_folder.assert_called_once_with(lib_folder, include_subfolders=False)
+
+
+def test_effects_flower_and_alignment(qapp):
+    from src.ui.ribbon_toolbar import make_default_variation_base_image, make_effect_preview_icon
+    
+    img = make_default_variation_base_image(84, 54)
+    assert img.shape == (54, 84, 3)
+    assert img.dtype == np.uint8
+    
+    # Rich color variation across the photographic flower image
+    assert len(np.unique(img.reshape(-1, 3), axis=0)) > 500
+
+    icon_bw = make_effect_preview_icon("bw")
+    assert not icon_bw.isNull()
+
+
+def test_people_dropdown_height_calculation(qapp):
+    from src.ui.ribbon_toolbar import _WLPGPeopleMenuWidget
+    from PySide6.QtWidgets import QMenu, QScrollArea
+
+    menu = QMenu()
+    # Test with 25 people (top 10 + 15 other people = 2 rows of other people)
+    people = [{"id": i, "name": f"Person {i}", "media_count": i} for i in range(25)]
+    w = _WLPGPeopleMenuWidget(menu, people)
+    
+    # Find scroll area
+    scroll = w.findChild(QScrollArea)
+    assert scroll is not None
+    # For 2 other rows, height must be at least 200px to avoid bottom row cutoff
+    assert scroll.height() >= 200
+
 
