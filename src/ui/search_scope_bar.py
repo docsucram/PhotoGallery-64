@@ -194,6 +194,7 @@ class SearchScopeBar(QFrame):
     date_clear_requested = Signal()
     location_clear_requested = Signal()
     special_people_clear_requested = Signal()
+    media_type_clear_requested = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -554,6 +555,25 @@ class SearchScopeBar(QFrame):
 
             chip = FilterChip(location_label, self.chips_widget)
             chip.remove_clicked.connect(self.location_clear_requested.emit)
+            self.chips_layout.addWidget(chip)
+
+        # 7. Active Media Type Chip: "Media type: Video" (or "Photos")
+        media_type = filter_state.get("media_type")
+        if media_type:
+            lbl_m = QLabel("Media type:", self.chips_widget)
+            lbl_m.setStyleSheet("color: #55687C; font-family: 'Segoe UI'; font-size: 8.5pt;")
+            self.chips_layout.addWidget(lbl_m)
+
+            m_val = str(media_type).lower().strip()
+            if m_val in ("video", "videos"):
+                m_label = "Video"
+            elif m_val in ("image", "photo", "photos", "picture", "pictures"):
+                m_label = "Photos"
+            else:
+                m_label = str(media_type).capitalize()
+
+            chip = FilterChip(m_label, self.chips_widget)
+            chip.remove_clicked.connect(self.media_type_clear_requested.emit)
             self.chips_layout.addWidget(chip)
 
     def _resolve_person_name(self, person_id: int, catalog_repo: CatalogRepository) -> str:

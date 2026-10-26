@@ -411,14 +411,57 @@ class _SlidePreloadWorker(QRunnable):
             p = Path(self.file_path)
             if not p.exists():
                 return
-            with Image.open(p) as img:
-                img = ImageOps.exif_transpose(img)
-                img.thumbnail((self.max_w, self.max_h), Image.Resampling.BILINEAR)
-                if img.mode != "RGB":
-                    img = img.convert("RGB")
-                data = img.tobytes("raw", "RGB")
-                qimg = QImage(data, img.width, img.height, img.width * 3, QImage.Format_RGB888)
-                self.signals.preloaded.emit(self.media_id, qimg)
+            max_w = max(1920, self.max_w)
+            max_h = max(1080, self.max_h)
+
+            # 1. Try PIL (handles EXIF orientation)
+            try:
+                with Image.open(p) as img:
+                    img = ImageOps.exif_transpose(img)
+                    img.thumbnail((max_w, max_h), Image.Resampling.BILINEAR)
+                    if img.mode != "RGB":
+                        img = img.convert("RGB")
+                    data = img.tobytes("raw", "RGB")
+                    qimg = QImage(data, img.width, img.height, img.width * 3, QImage.Format_RGB888).copy()
+                    if not qimg.isNull():
+                        self.signals.preloaded.emit(self.media_id, qimg)
+                        return
+            except Exception:
+                pass
+
+            # 2. Try OpenCV (handles formats PIL might choke on, or video poster frames)
+            try:
+                bgr = cv2.imread(str(p), cv2.IMREAD_COLOR)
+                if bgr is None:
+                    cap = cv2.VideoCapture(str(p))
+                    if cap.isOpened():
+                        ok, frame = cap.read()
+                        if ok and frame is not None:
+                            bgr = frame
+                        cap.release()
+                if bgr is not None and bgr.size > 0:
+                    h, w = bgr.shape[:2]
+                    scale = min(1.0, min(max_w / float(w), max_h / float(h)))
+                    if scale < 1.0:
+                        bgr = cv2.resize(bgr, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
+                    rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+                    h, w = rgb.shape[:2]
+                    qimg = QImage(rgb.data, w, h, w * 3, QImage.Format_RGB888).copy()
+                    if not qimg.isNull():
+                        self.signals.preloaded.emit(self.media_id, qimg)
+                        return
+            except Exception:
+                pass
+
+            # 3. Direct QImage
+            try:
+                qimg = QImage(str(p))
+                if not qimg.isNull():
+                    if qimg.width() > max_w or qimg.height() > max_h:
+                        qimg = qimg.scaled(max_w, max_h, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                    self.signals.preloaded.emit(self.media_id, qimg)
+            except Exception:
+                pass
         except Exception:
             pass
 
@@ -777,6 +820,17 @@ class FullscreenSlideshowDialog(QDialog):
         else:
             file_path = self._resolve_file_path(rec)
             pix = self._load_high_res_pixmap(file_path) if file_path else None
+            # If high-res failed or is a video without direct frame, try catalog thumbnail cache as fallback
+            if (pix is None or pix.isNull()) and self.catalog_repo is not None:
+                try:
+                    tb = self.catalog_repo.get_thumbnail_blob(mid)
+                    if tb:
+                        pm = QPixmap()
+                        if pm.loadFromData(tb) and not pm.isNull():
+                            pix = pm
+                except Exception:
+                    pass
+
             if pix is not None and not pix.isNull():
                 self._current_pixmap = pix
                 self._cache[mid] = pix
@@ -822,13 +876,39 @@ class FullscreenSlideshowDialog(QDialog):
 
     def _resolve_file_path(self, rec: MediaItemRecord) -> str | None:
         file_path = getattr(rec, "file_path", None)
-        if not file_path and self.catalog_repo is not None:
+        if file_path:
+            return str(file_path)
+
+        if not hasattr(self, "_folder_paths"):
+            self._folder_paths: dict[int, str] = {}
+
+        fid = getattr(rec, "folder_id", None)
+        fname = getattr(rec, "filename", None)
+        if fid is not None and fname and self.catalog_repo is not None:
+            if fid not in self._folder_paths:
+                f_info = self.catalog_repo.get_folder_by_id(fid)
+                if f_info and f_info.get("path"):
+                    self._folder_paths[fid] = str(f_info["path"])
+                else:
+                    self._folder_paths[fid] = ""
+            base_dir = self._folder_paths.get(fid)
+            if base_dir:
+                p = Path(base_dir) / fname
+                if p.exists():
+                    return str(p)
+
+        if self.catalog_repo is not None:
             try:
                 detail = self.catalog_repo.get_media_detail(rec.id)
-                file_path = str(Path(detail["folder_path"]) / str(detail["filename"]))
+                p = Path(detail["folder_path"]) / str(detail["filename"])
+                if p.exists():
+                    return str(p)
+                fp = detail.get("file_path")
+                if fp and Path(fp).exists():
+                    return str(fp)
             except Exception:
-                file_path = None
-        return file_path
+                pass
+        return None
 
     def _trigger_preload(self, index: int) -> None:
         if not self.records or not (0 <= index < len(self.records)):
@@ -877,16 +957,57 @@ class FullscreenSlideshowDialog(QDialog):
             p = Path(file_path)
             if not p.exists():
                 return None
-            with Image.open(p) as img:
-                img = ImageOps.exif_transpose(img)
-                max_w = max(1920, self.width())
-                max_h = max(1080, self.height())
-                img.thumbnail((max_w, max_h), Image.Resampling.BILINEAR)
-                if img.mode != "RGB":
-                    img = img.convert("RGB")
-                data = img.tobytes("raw", "RGB")
-                qimg = QImage(data, img.width, img.height, img.width * 3, QImage.Format_RGB888)
-                return QPixmap.fromImage(qimg)
+            max_w = max(1920, self.width())
+            max_h = max(1080, self.height())
+
+            # 1. Try PIL (handles EXIF orientation)
+            try:
+                with Image.open(p) as img:
+                    img = ImageOps.exif_transpose(img)
+                    img.thumbnail((max_w, max_h), Image.Resampling.BILINEAR)
+                    if img.mode != "RGB":
+                        img = img.convert("RGB")
+                    data = img.tobytes("raw", "RGB")
+                    qimg = QImage(data, img.width, img.height, img.width * 3, QImage.Format_RGB888).copy()
+                    if not qimg.isNull():
+                        return QPixmap.fromImage(qimg)
+            except Exception:
+                pass
+
+            # 2. Try OpenCV (handles formats PIL might choke on, or video poster frames)
+            try:
+                bgr = cv2.imread(str(p), cv2.IMREAD_COLOR)
+                if bgr is None:
+                    cap = cv2.VideoCapture(str(p))
+                    if cap.isOpened():
+                        ok, frame = cap.read()
+                        if ok and frame is not None:
+                            bgr = frame
+                        cap.release()
+                if bgr is not None and bgr.size > 0:
+                    h, w = bgr.shape[:2]
+                    scale = min(1.0, min(max_w / float(w), max_h / float(h)))
+                    if scale < 1.0:
+                        bgr = cv2.resize(bgr, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
+                    rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+                    h, w = rgb.shape[:2]
+                    qimg = QImage(rgb.data, w, h, w * 3, QImage.Format_RGB888).copy()
+                    if not qimg.isNull():
+                        return QPixmap.fromImage(qimg)
+            except Exception:
+                pass
+
+            # 3. Direct QImage
+            try:
+                qimg = QImage(str(p))
+                if not qimg.isNull():
+                    if qimg.width() > max_w or qimg.height() > max_h:
+                        qimg = qimg.scaled(max_w, max_h, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                    return QPixmap.fromImage(qimg)
+            except Exception:
+                pass
+
+            return None
         except Exception:
             return None
 

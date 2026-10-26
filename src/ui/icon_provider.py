@@ -133,6 +133,9 @@ _FLUENT_MAP: dict[str, tuple[str, str]] = {
     "invert": ("ri.contrast-drop-line", "#0078D4"),
     "play": ("ri.play-fill", "#0078D4"),
     "pause": ("ri.pause-fill", "#0078D4"),
+    "volume": ("ri.volume-up-fill", "#0078D4"),
+    "volume_low": ("ri.volume-down-fill", "#0078D4"),
+    "volume_mute": ("ri.volume-mute-fill", "#666666"),
 }
 
 

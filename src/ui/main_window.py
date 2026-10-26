@@ -1056,6 +1056,9 @@ class PhotoGalleryMainWindow(QMainWindow):
         self.scope_bar.date_clear_requested.connect(
             lambda: self.left_nav_dock.select_date(None, None, None)
         )
+        self.scope_bar.media_type_clear_requested.connect(
+            lambda: self.left_nav_dock.set_media_type(None)
+        )
 
         # Quick Access Toolbar & Navigation History Signals
         self.ribbon.back_requested.connect(self.navigate_history_back)
@@ -1210,6 +1213,11 @@ class PhotoGalleryMainWindow(QMainWindow):
 
         self.sc_actual_size = QShortcut(QKeySequence("Ctrl+0"), self)
         self.sc_actual_size.activated.connect(lambda: self.media_viewer.set_zoom_mode("100"))
+
+        # F4: Immersive Viewer Mode (hides side panes, status bar, QAT, and collapses ribbon)
+        self.sc_immersive = QShortcut(QKeySequence("F4"), self)
+        self.sc_immersive.setContext(Qt.ApplicationShortcut)
+        self.sc_immersive.activated.connect(self.toggle_immersive_viewer_mode)
 
         # Star rating shortcuts (0 through 5)
         self._rating_shortcuts = []
@@ -1733,6 +1741,7 @@ class PhotoGalleryMainWindow(QMainWindow):
             or state.get("include_tag_ids")
             or state.get("ratings")
             or state.get("flagged_only")
+            or state.get("media_type")
             or state.get("date_year") is not None
             or state.get("date_month") is not None
             or self._search_text
@@ -4182,6 +4191,58 @@ class PhotoGalleryMainWindow(QMainWindow):
         """Toggles the left navigation pane visibility (Ctrl+N)."""
         self.dispatch_ribbon_action("toggle_nav_pane")
 
+    def toggle_immersive_viewer_mode(self) -> None:
+        """Toggles Immersive Viewer Mode (F4): hides/restores all side panes, status bar, QAT and collapses ribbon."""
+        if not getattr(self, "_is_immersive_mode", False):
+            # Enter immersive mode: save current visibility states
+            self._immersive_saved_state = {
+                "left_nav": self.left_nav_dock.isVisible() if hasattr(self, "left_nav_dock") else False,
+                "right_tag": self.right_tag_dock.isVisible() if hasattr(self, "right_tag_dock") else False,
+                "fix_pane": (
+                    self.media_viewer.fix_pane.isVisible()
+                    if hasattr(self, "media_viewer") and hasattr(self.media_viewer, "fix_pane")
+                    else False
+                ),
+                "status_bar": self.statusBar().isVisible() if self.statusBar() else True,
+                "qat": self.ribbon.qat_container.isVisible() if hasattr(self.ribbon, "qat_container") else True,
+                "ribbon_collapsed": (
+                    self.ribbon._ribbon_collapsed if hasattr(self.ribbon, "_ribbon_collapsed") else False
+                ),
+            }
+            if hasattr(self, "left_nav_dock"):
+                self.left_nav_dock.hide()
+            if hasattr(self, "right_tag_dock"):
+                self.right_tag_dock.hide()
+            if hasattr(self, "media_viewer") and hasattr(self.media_viewer, "fix_pane"):
+                self.media_viewer.fix_pane.hide()
+            if self.statusBar():
+                self.statusBar().hide()
+            if hasattr(self.ribbon, "qat_container"):
+                self.ribbon.qat_container.hide()
+            if hasattr(self.ribbon, "set_ribbon_collapsed"):
+                self.ribbon.set_ribbon_collapsed(True)
+            self._is_immersive_mode = True
+        else:
+            # Restore previous visibility states
+            saved = getattr(self, "_immersive_saved_state", {})
+            if saved.get("left_nav") and hasattr(self, "left_nav_dock"):
+                self.left_nav_dock.show()
+                try:
+                    self.resizeDocks([self.left_nav_dock], [230], Qt.Horizontal)
+                except Exception:
+                    pass
+            if saved.get("right_tag") and hasattr(self, "right_tag_dock"):
+                self.right_tag_dock.show()
+            if saved.get("fix_pane") and hasattr(self, "media_viewer") and hasattr(self.media_viewer, "fix_pane"):
+                self.media_viewer.fix_pane.show()
+            if saved.get("status_bar", True) and self.statusBar():
+                self.statusBar().show()
+            if saved.get("qat", True) and hasattr(self.ribbon, "qat_container"):
+                self.ribbon.qat_container.show()
+            if not saved.get("ribbon_collapsed", False) and hasattr(self.ribbon, "set_ribbon_collapsed"):
+                self.ribbon.set_ribbon_collapsed(False)
+            self._is_immersive_mode = False
+
     def dispatch_ribbon_action(self, action_id: str) -> None:
         if action_id == "add_folder":
             self._prompt_and_add_folder()
@@ -4258,6 +4319,8 @@ class PhotoGalleryMainWindow(QMainWindow):
                 self.resizeDocks([self.left_nav_dock], [230], Qt.Horizontal)
             if hasattr(self.ribbon, "btn_toggle_nav_pane"):
                 self.ribbon.btn_toggle_nav_pane.setChecked(new_vis)
+        elif action_id == "toggle_immersive":
+            self.toggle_immersive_viewer_mode()
         elif action_id == "show_tag_hierarchy":
             self.open_tag_hierarchy_dialog()
         elif action_id == "toggle_map_view":

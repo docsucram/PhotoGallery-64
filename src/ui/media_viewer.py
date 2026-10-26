@@ -926,8 +926,14 @@ class SingleMediaViewer(QWidget):
         )
         t_hbox = QHBoxLayout(transport)
         t_hbox.setContentsMargins(8, 2, 8, 2)
+        t_hbox.setSpacing(6)
 
-        self.btn_play_pause = QPushButton("▶ Play", transport)
+        self.btn_play_pause = QPushButton(transport)
+        self.btn_play_pause.setFixedSize(28, 24)
+        self.btn_play_pause.setIcon(make_wlpg_icon("play", 16))
+        self.btn_play_pause.setIconSize(QSize(16, 16))
+        self.btn_play_pause.setToolTip("Play / Pause (Space)")
+        self.btn_play_pause.setCursor(Qt.PointingHandCursor)
         self.btn_play_pause.clicked.connect(self.toggle_video_playback)
         t_hbox.addWidget(self.btn_play_pause)
 
@@ -939,7 +945,26 @@ class SingleMediaViewer(QWidget):
         t_hbox.addWidget(self.slider_position, 1)
 
         self.lbl_video_time = QLabel("00:00 / 00:00", transport)
+        self.lbl_video_time.setStyleSheet("font-size: 11px; color: #333; margin: 0 4px;")
         t_hbox.addWidget(self.lbl_video_time)
+
+        # Volume control with icon to the right of the seek bar
+        self.btn_volume = QPushButton(transport)
+        self.btn_volume.setFixedSize(24, 24)
+        self.btn_volume.setIcon(make_wlpg_icon("volume", 14))
+        self.btn_volume.setIconSize(QSize(14, 14))
+        self.btn_volume.setToolTip("Mute / Unmute")
+        self.btn_volume.setCursor(Qt.PointingHandCursor)
+        self.btn_volume.clicked.connect(self._toggle_mute)
+        t_hbox.addWidget(self.btn_volume)
+
+        self.slider_volume = QSlider(Qt.Horizontal, transport)
+        self.slider_volume.setRange(0, 100)
+        self.slider_volume.setValue(100)
+        self.slider_volume.setFixedWidth(65)
+        self.slider_volume.setToolTip("Volume")
+        self.slider_volume.valueChanged.connect(self._on_volume_changed)
+        t_hbox.addWidget(self.slider_volume)
 
         vid_vbox.addWidget(transport)
         self.media_stack.addWidget(self.video_container)
@@ -1318,7 +1343,8 @@ class SingleMediaViewer(QWidget):
             self.fix_pane.setVisible(False)
             self.media_player.setSource(QUrl.fromLocalFile(str(self.current_file_path)))
             self.media_player.play()
-            self.btn_play_pause.setText("⏸ Pause")
+            self.btn_play_pause.setIcon(make_wlpg_icon("pause", 16))
+            self.btn_play_pause.setToolTip("Pause (Space)")
             return True
 
         self.media_player.stop()
@@ -2937,21 +2963,48 @@ class SingleMediaViewer(QWidget):
     # -------------------------------------------------------------------------
     def _on_playback_state_changed(self, state: QMediaPlayer.PlaybackState) -> None:
         if state == QMediaPlayer.PlayingState:
-            self.btn_play_pause.setText("⏸ Pause")
+            self.btn_play_pause.setIcon(make_wlpg_icon("pause", 16))
+            self.btn_play_pause.setToolTip("Pause (Space)")
         else:
-            self.btn_play_pause.setText("▶ Play")
+            self.btn_play_pause.setIcon(make_wlpg_icon("play", 16))
+            self.btn_play_pause.setToolTip("Play (Space)")
 
     def toggle_video_playback(self) -> None:
         if self.media_player.playbackState() == QMediaPlayer.PlayingState:
             self.media_player.pause()
-            self.btn_play_pause.setText("▶ Play")
+            self.btn_play_pause.setIcon(make_wlpg_icon("play", 16))
+            self.btn_play_pause.setToolTip("Play (Space)")
         else:
             self.media_player.play()
-            self.btn_play_pause.setText("⏸ Pause")
+            self.btn_play_pause.setIcon(make_wlpg_icon("pause", 16))
+            self.btn_play_pause.setToolTip("Pause (Space)")
 
     def stop_video_playback(self) -> None:
         self.media_player.stop()
-        self.btn_play_pause.setText("▶ Play")
+        self.btn_play_pause.setIcon(make_wlpg_icon("play", 16))
+        self.btn_play_pause.setToolTip("Play (Space)")
+
+    def _on_volume_changed(self, val: int) -> None:
+        vol = max(0.0, min(1.0, val / 100.0))
+        self.audio_output.setVolume(vol)
+        if val == 0 or self.audio_output.isMuted():
+            self.btn_volume.setIcon(make_wlpg_icon("volume_mute", 14))
+        elif val < 50:
+            self.btn_volume.setIcon(make_wlpg_icon("volume_low", 14))
+        else:
+            self.btn_volume.setIcon(make_wlpg_icon("volume", 14))
+
+    def _toggle_mute(self) -> None:
+        is_muted = not self.audio_output.isMuted()
+        self.audio_output.setMuted(is_muted)
+        if is_muted:
+            self.btn_volume.setIcon(make_wlpg_icon("volume_mute", 14))
+        else:
+            val = self.slider_volume.value()
+            if val < 50:
+                self.btn_volume.setIcon(make_wlpg_icon("volume_low", 14))
+            else:
+                self.btn_volume.setIcon(make_wlpg_icon("volume", 14))
 
     def _show_video_context_menu(self, pos: QPoint) -> QMenu:
         menu = QMenu(self)

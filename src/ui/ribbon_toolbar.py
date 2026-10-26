@@ -1347,6 +1347,56 @@ def _render_aero_raw(kind: str, size: int = 20) -> QIcon:
         p.drawLine(QPointF(s * 0.28, s * 0.10), QPointF(s * 0.28, s * 0.26))
         p.drawLine(QPointF(s * 0.20, s * 0.18), QPointF(s * 0.36, s * 0.18))
 
+    elif kind == "play":
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor("#0078D4"))
+        triangle = QPolygonF([
+            QPointF(s * 0.25, s * 0.18),
+            QPointF(s * 0.82, s * 0.50),
+            QPointF(s * 0.25, s * 0.82),
+        ])
+        p.drawPolygon(triangle)
+
+    elif kind == "pause":
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor("#0078D4"))
+        p.drawRoundedRect(QRectF(s * 0.22, s * 0.20, s * 0.22, s * 0.60), 1.5, 1.5)
+        p.drawRoundedRect(QRectF(s * 0.56, s * 0.20, s * 0.22, s * 0.60), 1.5, 1.5)
+
+    elif kind in ("volume", "volume_low"):
+        p.setPen(QPen(QColor("#0078D4"), 1.2))
+        p.setBrush(QColor("#0078D4"))
+        horn = QPolygonF([
+            QPointF(s * 0.15, s * 0.35),
+            QPointF(s * 0.32, s * 0.35),
+            QPointF(s * 0.55, s * 0.15),
+            QPointF(s * 0.55, s * 0.85),
+            QPointF(s * 0.32, s * 0.65),
+            QPointF(s * 0.15, s * 0.65),
+        ])
+        p.drawPolygon(horn)
+        p.setBrush(Qt.NoBrush)
+        p.drawArc(QRectF(s * 0.58, s * 0.32, s * 0.26, s * 0.36), -50 * 16, 100 * 16)
+        if kind == "volume":
+            p.drawArc(QRectF(s * 0.58, s * 0.20, s * 0.38, s * 0.60), -60 * 16, 120 * 16)
+
+    elif kind == "volume_mute":
+        p.setPen(QPen(QColor("#777777"), 1.2))
+        p.setBrush(QColor("#777777"))
+        horn = QPolygonF([
+            QPointF(s * 0.15, s * 0.35),
+            QPointF(s * 0.32, s * 0.35),
+            QPointF(s * 0.55, s * 0.15),
+            QPointF(s * 0.55, s * 0.85),
+            QPointF(s * 0.32, s * 0.65),
+            QPointF(s * 0.15, s * 0.65),
+        ])
+        p.drawPolygon(horn)
+        # Red/grey diagonal mute slash
+        p.setPen(QPen(QColor("#C0392B"), 1.5))
+        p.drawLine(QPointF(s * 0.62, s * 0.35), QPointF(s * 0.85, s * 0.65))
+        p.drawLine(QPointF(s * 0.85, s * 0.35), QPointF(s * 0.62, s * 0.65))
+
     else:
         p.setPen(QPen(QColor("#3E6B99"), 1.1))
         p.setBrush(QColor("#D8EAF9"))
@@ -3722,6 +3772,18 @@ class RibbonToolbar(QWidget):
             if hasattr(self, "act_qat_minimize"):
                 self.act_qat_minimize.setChecked(False)
 
+    def set_ribbon_collapsed(self, collapsed: bool) -> None:
+        if collapsed:
+            self.tab_widget.setFixedHeight(28)
+            self.btn_collapse_ribbon.setText("▼")
+            if hasattr(self, "act_qat_minimize"):
+                self.act_qat_minimize.setChecked(True)
+        else:
+            self.tab_widget.setFixedHeight(118)
+            self.btn_collapse_ribbon.setText("▲")
+            if hasattr(self, "act_qat_minimize"):
+                self.act_qat_minimize.setChecked(False)
+
     def _toggle_qat_position(self) -> None:
         self.set_qat_below_ribbon(not getattr(self, "_qat_below_ribbon", False))
 
@@ -3795,6 +3857,11 @@ class RibbonToolbar(QWidget):
             """
         )
 
+        act_play = menu.addAction(make_wlpg_icon("play", 16), "Play slide show (F12)")
+        act_play.setFont(QFont("Segoe UI", 9, QFont.Bold))
+        act_play.triggered.connect(lambda: self.action_triggered.emit("slide_show"))
+        menu.addSeparator()
+
         header = menu.addAction("Slide show themes")
         header.setEnabled(False)
         font_bold = QFont("Segoe UI", 9, QFont.Bold)
@@ -3832,6 +3899,30 @@ class RibbonToolbar(QWidget):
     def _on_slideshow_menu_theme_selected(self, theme_id: str) -> None:
         self.set_slideshow_theme(theme_id)
         self.action_triggered.emit("slide_show")
+
+    def _build_flagged_menu(self, btn: QToolButton) -> None:
+        menu = QMenu(btn)
+        menu.setFont(QFont("Segoe UI", 9))
+        act_all = menu.addAction("All items")
+        act_flagged = menu.addAction("Flagged")
+        act_unflagged = menu.addAction("Not flagged")
+
+        def _on_all():
+            self.flag_filter_selected.emit(None)
+            self.flagged_filter_selected.emit(False)
+
+        def _on_flagged():
+            self.flag_filter_selected.emit(1)
+            self.flagged_filter_selected.emit(True)
+
+        def _on_unflagged():
+            self.flag_filter_selected.emit(0)
+            self.flagged_filter_selected.emit(False)
+
+        act_all.triggered.connect(_on_all)
+        act_flagged.triggered.connect(_on_flagged)
+        act_unflagged.triggered.connect(_on_unflagged)
+        btn.setMenu(menu)
 
     def minimumSizeHint(self) -> QSize:
         return QSize(350, 88)
@@ -4150,7 +4241,7 @@ class RibbonToolbar(QWidget):
         # ---------------------------------------------------------------------
         grp_share = _RibbonGroupBox("Share", page)
         btn_ss = self._make_tool_btn(
-            "Slide\nshow", "slideshow", grp_share, large=True, popup_mode=QToolButton.MenuButtonPopup
+            "Slide\nshow", "slideshow", grp_share, large=True
         )
         btn_ss.setToolTip("Slide show (F12)")
         btn_ss._tooltip_override = "Slide show (F12)"
@@ -4635,9 +4726,9 @@ class RibbonToolbar(QWidget):
         self.btn_find_tags.setMenu(self.menu_find_tags)
         f_hbox.addWidget(self.btn_find_tags)
 
-        self.btn_find_flagged = self._make_btn("Flagged", "flag", grp_file, checkable=True, large=True)
-        self.btn_find_flagged.setToolTip("Filter flagged photos only")
-        self.btn_find_flagged.toggled.connect(self.flagged_filter_selected.emit)
+        self.btn_find_flagged = self._make_tool_btn("Flagged", "flag", grp_file, large=True)
+        self.btn_find_flagged.setToolTip("Filter by flagged items")
+        self._build_flagged_menu(self.btn_find_flagged)
         f_hbox.addWidget(self.btn_find_flagged)
 
         f_col = QVBoxLayout()
@@ -5119,7 +5210,7 @@ class RibbonToolbar(QWidget):
         grp_slideshow = _RibbonGroupBox("Views", page)
         self.grp_slideshow = grp_slideshow
         self.btn_view_slideshow = self._make_tool_btn(
-            "Slide\nshow", "slideshow", grp_slideshow, large=True, popup_mode=QToolButton.MenuButtonPopup
+            "Slide\nshow", "slideshow", grp_slideshow, large=True
         )
         self.btn_view_slideshow.setToolTip("Slide show (F12)")
         self.btn_view_slideshow._tooltip_override = "Slide show (F12)"
