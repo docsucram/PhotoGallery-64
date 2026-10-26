@@ -129,3 +129,98 @@ def test_open_file_on_startup_and_get_media_by_path(tmp_path):
         assert win.media_viewer.current_media_id == mid
     finally:
         win.close()
+
+
+def test_left_nav_dock_people_collapsed_by_default(tmp_path):
+    app = QApplication.instance() or QApplication([])
+    from src.ui.left_nav_dock import LeftNavigationDock
+
+    cat_path = tmp_path / "catalog.db"
+    thumb_path = tmp_path / "thumbnails.db"
+    engine = DualDatabaseEngine(cat_path, thumb_path)
+    engine.initialize_schemas()
+    repo = CatalogRepository(engine)
+    repo.upsert_person("Alice")
+
+    dock = LeftNavigationDock()
+    # Initially collapsed by default
+    assert dock.root_people.isExpanded() is False
+
+    # After refresh_trees, stays collapsed
+    dock.refresh_trees(repo)
+    assert dock.root_people.isExpanded() is False
+
+    # When user expands, stays expanded on subsequent refresh
+    dock.root_people.setExpanded(True)
+    dock.refresh_trees(repo)
+    assert dock.root_people.isExpanded() is True
+
+
+def test_merge_people_dialog_typing_autocomplete_and_preview(tmp_path):
+    app = QApplication.instance() or QApplication([])
+    from src.ui.people_directory_view import MergePeopleDialog
+
+    candidates = [
+        {"id": 10, "name": "Bob Jones", "photo_count": 8, "thumbnail_blob": None},
+        {"id": 20, "name": "Charlie Brown", "photo_count": 3, "thumbnail_blob": None},
+    ]
+
+    dlg = MergePeopleDialog(
+        source_person_name="Alice Smith",
+        candidates=candidates,
+        source_person_id=1,
+        source_photo_count=12,
+    )
+
+    # Initial state: button disabled, no target selected
+    assert dlg.btn_action.isEnabled() is False
+    assert dlg.target_person_id() is None
+
+    # Clicking line edit opens suggestions popup
+    dlg.txt_target.show_completion_popup()
+    assert dlg.txt_target.completer() is not None
+
+    # User types "Bob"
+    dlg.txt_target.setText("Bob Jones")
+    assert dlg.btn_action.isEnabled() is True
+    assert dlg.btn_action.text() == "Merge"
+    assert dlg.target_person_id() == 10
+    assert dlg.is_rename() is False
+
+    # User types brand new name "David Clark"
+    dlg.txt_target.setText("David Clark")
+    assert dlg.btn_action.isEnabled() is True
+    assert dlg.btn_action.text() == "Rename"
+    assert dlg.is_rename() is True
+    assert dlg.target_person_name() == "David Clark"
+
+    # User types source person name (cannot merge into self)
+    dlg.txt_target.setText("Alice Smith")
+    assert dlg.btn_action.isEnabled() is False
+
+
+def test_person_header_bar_name_autocomplete(tmp_path):
+    app = QApplication.instance() or QApplication([])
+    from src.ui.person_header_bar import PersonHeaderBar
+
+    cat_path = tmp_path / "catalog.db"
+    thumb_path = tmp_path / "thumbnails.db"
+    engine = DualDatabaseEngine(cat_path, thumb_path)
+    engine.initialize_schemas()
+    repo = CatalogRepository(engine)
+    p1 = repo.upsert_person("Alice")
+    p2 = repo.upsert_person("Bob")
+    p3 = repo.upsert_person("Charlie")
+
+    bar = PersonHeaderBar(engine)
+    bar.load_person(p1)
+
+    # txt_name has completer populated with other people
+    comp = bar.txt_name.completer()
+    assert comp is not None
+    # Bob and Charlie in model, Alice excluded
+    model = comp.model()
+    names = [model.index(i, 0).data() for i in range(model.rowCount())]
+    assert "Bob" in names
+    assert "Charlie" in names
+    assert "Alice" not in names

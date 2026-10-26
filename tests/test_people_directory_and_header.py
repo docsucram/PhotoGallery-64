@@ -175,6 +175,9 @@ def test_inline_naming_unnamed_cluster(qapp, db_engine):
 
     view = PeopleDirectoryView(db_engine)
     view.refresh_directory()
+    from PySide6.QtCore import QThreadPool
+    QThreadPool.globalInstance().waitForDone(2000)
+    qapp.processEvents()
     assert len(view._all_unnamed_clusters) >= 1
 
     # Simulate user typing "Daniel" in the inline text field and pressing Enter

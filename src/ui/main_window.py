@@ -689,6 +689,7 @@ class PhotoGalleryMainWindow(QMainWindow):
         self.people_directory_view.person_selected.connect(self._on_directory_person_selected)
         self.people_directory_view.unnamed_selected.connect(self._on_directory_unnamed_selected)
         self.people_directory_view.review_suggestions_requested.connect(self.open_batch_people_view)
+        self.people_directory_view.directory_updated.connect(self.refresh_navigation_and_autocomplete)
         self.person_header_bar.unnamed_person_named.connect(self._on_unnamed_person_named)
         self.central_stack.addWidget(self.people_directory_view)
 
@@ -2918,7 +2919,7 @@ class PhotoGalleryMainWindow(QMainWindow):
     def _on_dock_person_merge_requested(self, source_person_id: int, source_name: str) -> None:
         people_rows = self.catalog_repo.get_people_list()
         candidates = [
-            (int(r["id"]), str(r["name"]))
+            dict(r)
             for r in people_rows
             if int(r["id"]) != int(source_person_id)
         ]
@@ -2929,22 +2930,36 @@ class PhotoGalleryMainWindow(QMainWindow):
                 "There are no other people contacts in the catalog to merge with.",
             )
             return
-        names = [name for _pid, name in candidates]
-        target_name, ok = QInputDialog.getItem(
-            self,
-            "Merge People",
-            f"Merge '{source_name}' into:",
-            names,
-            0,
-            False,
+
+        src_row = next((r for r in people_rows if int(r["id"]) == int(source_person_id)), None)
+        src_thumb = src_row.get("thumbnail_blob") if src_row else None
+        src_cnt = src_row.get("confirmed_count", 0) if src_row else 0
+
+        from src.ui.people_directory_view import MergePeopleDialog
+        dlg = MergePeopleDialog(
+            source_person_name=source_name,
+            candidates=candidates,
+            source_person_id=source_person_id,
+            source_photo_count=src_cnt,
+            source_thumb_blob=src_thumb,
+            parent=self,
         )
-        if not ok or not target_name:
+        if dlg.exec() != QDialog.Accepted:
             return
-        target_id = next((pid for pid, nm in candidates if nm == target_name), None)
-        if target_id is None:
-            return
-        self.catalog_repo.merge_people(source_person_id, target_id)
+
+        if dlg.is_rename():
+            target_name = dlg.target_person_name()
+            target_id = self.catalog_repo.rename_person(source_person_id, target_name)
+        else:
+            target_id = dlg.target_person_id()
+            target_name = dlg.target_person_name()
+            if target_id is None:
+                return
+            self.catalog_repo.merge_people(source_person_id, target_id)
+
         self.refresh_navigation_and_autocomplete()
+        if hasattr(self, "people_directory_view"):
+            self.people_directory_view.refresh_directory()
         if hasattr(self, "left_nav_dock"):
             curr_pids = self.left_nav_dock.current_filter_state().get("person_ids", ())
             if source_person_id in curr_pids:

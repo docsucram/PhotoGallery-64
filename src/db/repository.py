@@ -2228,16 +2228,26 @@ class CatalogRepository:
             return
         with self.engine.write_lock:
             conn = self.engine.catalog_conn()
+            src_row = conn.execute("SELECT id FROM people WHERE id = ?;", (src_id,)).fetchone()
+            dst_row = conn.execute("SELECT id FROM people WHERE id = ?;", (dst_id,)).fetchone()
+            if not src_row or not dst_row:
+                logger.warning("merge_people: invalid source (%s) or target (%s) person id", src_id, dst_id)
+                return
+
             conn.execute(
                 """
                 UPDATE people
                 SET thumbnail_blob = COALESCE(
                     thumbnail_blob,
                     (SELECT thumbnail_blob FROM people WHERE id = ?)
+                ),
+                avatar_media_people_id = COALESCE(
+                    avatar_media_people_id,
+                    (SELECT avatar_media_people_id FROM people WHERE id = ?)
                 )
                 WHERE id = ?;
                 """,
-                (src_id, dst_id),
+                (src_id, src_id, dst_id),
             )
             conn.execute(
                 "UPDATE media_people SET person_id = ? WHERE person_id = ?;",
@@ -2402,9 +2412,10 @@ class CatalogRepository:
         conn = self.engine.catalog_conn()
         unassigned_rows = conn.execute(
             """
-            SELECT id, embedding
-            FROM media_people
-            WHERE state = 0 AND embedding IS NOT NULL;
+            SELECT mp.id, mp.embedding, mp.suggested_person_id, p.name AS suggested_person_name
+            FROM media_people mp
+            LEFT JOIN people p ON p.id = mp.suggested_person_id
+            WHERE mp.state = 0 AND mp.embedding IS NOT NULL;
             """
         ).fetchall()
 
@@ -2415,11 +2426,15 @@ class CatalogRepository:
 
             valid_fids: list[int] = []
             emb_list: list[np.ndarray] = []
+            face_suggestions: dict[int, str] = {}
             for r in unassigned_rows:
                 raw_emb = bytes(r["embedding"]) if r["embedding"] else None
                 if raw_emb and len(raw_emb) >= 2048:
-                    valid_fids.append(int(r["id"]))
+                    fid = int(r["id"])
+                    valid_fids.append(fid)
                     emb_list.append(deserialize_embedding(raw_emb))
+                    if r["suggested_person_name"]:
+                        face_suggestions[fid] = str(r["suggested_person_name"])
 
             if len(valid_fids) >= 3 and len(emb_list) >= 3:
                 clusters = FaceVectorMatcher.cluster_unnamed_faces(
@@ -2427,11 +2442,19 @@ class CatalogRepository:
                 )
                 for cluster_name, fids in clusters.items():
                     if cluster_name != "Other Unnamed Faces" and len(fids) >= 3:
+                        cluster_suggs = [
+                            face_suggestions[fid] for fid in fids if fid in face_suggestions
+                        ]
+                        best_sugg = (
+                            max(set(cluster_suggs), key=cluster_suggs.count)
+                            if cluster_suggs else None
+                        )
                         unnamed_clusters.append({
                             "cluster_name": cluster_name,
                             "face_ids": fids,
                             "face_count": len(fids),
                             "representative_face_id": fids[0],
+                            "suggested_person_name": best_sugg,
                         })
         return unnamed_clusters
 

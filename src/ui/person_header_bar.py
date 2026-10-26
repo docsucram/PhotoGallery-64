@@ -25,6 +25,7 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import (
     QButtonGroup,
+    QCompleter,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -57,14 +58,15 @@ def make_circular_avatar(blob: bytes | None, name: str, size: int = 52) -> QPixm
         p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
 
         # Consistent color based on hash of name
-        h = abs(hash(name or "Unknown")) % 360
+        safe_name = (str(name) if name is not None else "").strip()
+        h = abs(hash(safe_name or "Unknown")) % 360
         bg_color = QColor.fromHsl(h, 110, 140)
         p.setBrush(QBrush(bg_color))
         p.setPen(Qt.PenStyle.NoPen)
         p.drawEllipse(0, 0, size, size)
 
         # Initials
-        initials = (name.strip()[:2] if name.strip() else "?").upper()
+        initials = (safe_name[:2] if safe_name else "?").upper()
         p.setPen(QColor("#FFFFFF"))
         font = QFont("Segoe UI", max(10, size // 3), QFont.Weight.Bold)
         p.setFont(font)
@@ -131,6 +133,27 @@ def make_square_face_thumbnail(blob: bytes | None, size: int = 60) -> QPixmap:
     p.drawRect(0, 0, size - 1, size - 1)
     p.end()
     return result
+
+
+class _AutoPopupLineEdit(QLineEdit):
+    """
+    A QLineEdit subclass that immediately opens its QCompleter dropdown on mouse click or focus,
+    showing all candidate items when empty or filtered items when text is present.
+    """
+
+    def mousePressEvent(self, event: Any) -> None:
+        super().mousePressEvent(event)
+        self.show_completion_popup()
+
+    def focusInEvent(self, event: Any) -> None:
+        super().focusInEvent(event)
+        self.show_completion_popup()
+
+    def show_completion_popup(self) -> None:
+        comp = self.completer()
+        if comp:
+            comp.setCompletionPrefix(self.text().strip())
+            comp.complete()
 
 
 class _QuickFaceSuggestionCard(QFrame):
@@ -284,7 +307,7 @@ class PersonHeaderBar(QFrame):
         v_info.setSpacing(2)
         v_info.setAlignment(Qt.AlignmentFlag.AlignLeft)
 
-        self.txt_name = QLineEdit(self)
+        self.txt_name = _AutoPopupLineEdit(self)
         self.txt_name.setFont(QFont("Segoe UI", 13, QFont.Weight.Bold))
         self.txt_name.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         self.txt_name.setToolTip("Click to rename")
@@ -426,6 +449,7 @@ class PersonHeaderBar(QFrame):
         cnt_text = f"{cnt:,} photo{'s' if cnt != 1 else ''} • Find them quickly by name with search"
         self.lbl_photo_count.setText(cnt_text)
         self.lbl_avatar.setPixmap(make_circular_avatar(thumb_blob, "?", size=48))
+        self._update_name_completer()
         self.btn_full_photos.setChecked(True)
         self.btn_face_crops.setChecked(False)
         self.current_view_mode = "photos"
@@ -484,6 +508,7 @@ class PersonHeaderBar(QFrame):
         # Avatar
         thumb_blob = bytes(p_row["thumbnail_blob"]) if p_row["thumbnail_blob"] else None
         self.lbl_avatar.setPixmap(make_circular_avatar(thumb_blob, self.current_person_name, size=48))
+        self._update_name_completer()
 
         # Check for pending suggestions
         suggestions = self.repo.get_unconfirmed_suggestions_for_person(person_id, limit=12)
@@ -565,6 +590,31 @@ class PersonHeaderBar(QFrame):
     def _on_review_all_clicked(self) -> None:
         if self.current_person_id:
             self.review_suggestions_requested.emit(self.current_person_id)
+
+    def _update_name_completer(self) -> None:
+        """Populates the name line edit with autocomplete suggestions from existing people."""
+        if not self.repo:
+            return
+        try:
+            people_rows = self.repo.get_people_list()
+            names = [
+                str(p["name"]) for p in people_rows
+                if p.get("name") and str(p["name"]).strip() and str(p["name"]) != self.current_person_name
+            ]
+            if names:
+                comp = QCompleter(names, self.txt_name)
+                comp.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
+                comp.setFilterMode(Qt.MatchFlag.MatchContains)
+                self.txt_name.setCompleter(comp)
+                comp.activated.connect(self._on_completer_activated)
+            else:
+                self.txt_name.setCompleter(None)
+        except Exception:
+            pass
+
+    def _on_completer_activated(self, text: str) -> None:
+        self.txt_name.setText(text)
+        self._on_name_edited()
 
     def _on_name_edited(self) -> None:
         new_name = self.txt_name.text().strip()

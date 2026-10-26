@@ -454,13 +454,13 @@ class LeftNavigationDock(QDockWidget):
             self.root_dates.setForeground(0, section_color)
             self.root_dates.setExpanded(True)
 
-            # 3. People root
+            # 3. People root (collapsed by default unless user explicitly clicks arrow)
             self.root_people = QTreeWidgetItem(self.tree, ["People"])
             self.root_people.setData(0, _NODE_TYPE_ROLE, "section_people")
             self.root_people.setIcon(0, make_wlpg_icon("person", 16))
             self.root_people.setFont(0, sec_font)
             self.root_people.setForeground(0, section_color)
-            self.root_people.setExpanded(True)
+            self.root_people.setExpanded(False)
 
             # 4. Descriptive tags root
             self.root_tags = QTreeWidgetItem(self.tree, ["Descriptive tags"])
@@ -541,6 +541,7 @@ class LeftNavigationDock(QDockWidget):
         self.tree.blockSignals(True)
         try:
             had_existing_folders = bool(self._folder_items)
+            was_people_expanded = self.root_people.isExpanded() if hasattr(self, "root_people") else False
             expanded_folder_ids = {
                 fid for fid, itm in self._folder_items.items() if itm.isExpanded()
             }
@@ -708,7 +709,7 @@ class LeftNavigationDock(QDockWidget):
 
             self.root_folders.setExpanded(True)
             self.root_tags.setExpanded(True)
-            self.root_people.setExpanded(True)
+            self.root_people.setExpanded(was_people_expanded)
         finally:
             self.tree.blockSignals(False)
             self._updating_tree = False

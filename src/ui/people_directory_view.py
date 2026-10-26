@@ -36,6 +36,8 @@ from PySide6.QtWidgets import (
     QInputDialog,
     QLabel,
     QLineEdit,
+    QListWidget,
+    QListWidgetItem,
     QMenu,
     QMessageBox,
     QPushButton,
@@ -53,49 +55,272 @@ from src.core.face_matcher import (
 )
 from src.db.connection import DualDatabaseEngine
 from src.db.repository import CatalogRepository, ThumbnailRepository
-from src.ui.person_header_bar import make_circular_avatar
+from src.ui.person_header_bar import _AutoPopupLineEdit, make_circular_avatar
 from src.ui.ribbon_toolbar import make_wlpg_icon
 
 logger = logging.getLogger(__name__)
 
 
-class _MergePeopleDialog(QDialog):
-    """Dialog allowing user to merge one person contact into another."""
+class MergePeopleDialog(QDialog):
+    """
+    Dialog allowing user to merge one person contact into another or rename.
+    Supports typing with instant autocomplete suggestions and a visual candidate picker.
+    """
 
     def __init__(
         self,
         source_person_name: str,
         candidates: list[dict[str, Any]],
+        source_person_id: int | None = None,
+        source_photo_count: int = 0,
+        source_thumb_blob: bytes | None = None,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
+        self.source_person_name = source_person_name
+        self.source_person_id = source_person_id
+        self.source_photo_count = source_photo_count
+        self.source_thumb_blob = source_thumb_blob
+        self.candidates = candidates
+
         self.setWindowTitle(f"Merge '{source_person_name}'")
-        self.setFixedSize(380, 160)
+        self.setFixedSize(440, 420)
+        self.setStyleSheet(
+            """
+            QDialog {
+                background-color: #FFFFFF;
+                border-radius: 8px;
+            }
+            """
+        )
 
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(18, 16, 18, 16)
         layout.setSpacing(10)
 
-        lbl = QLabel(
-            f"Select the person to merge <b>{source_person_name}</b> into.<br>"
-            "All photos and face tags will be consolidated into the target person.",
-            self,
+        # 1. Header with Source Info
+        h_src = QHBoxLayout()
+        h_src.setSpacing(12)
+
+        lbl_src_av = QLabel(self)
+        lbl_src_av.setFixedSize(48, 48)
+        lbl_src_av.setPixmap(make_circular_avatar(source_thumb_blob, source_person_name, size=48))
+        h_src.addWidget(lbl_src_av)
+
+        v_src_txt = QVBoxLayout()
+        v_src_txt.setSpacing(2)
+        lbl_title = QLabel(f"Merge <b>{source_person_name}</b> into:", self)
+        lbl_title.setFont(QFont("Segoe UI", 11, QFont.Weight.Bold))
+        lbl_title.setStyleSheet("color: #0F172A;")
+        v_src_txt.addWidget(lbl_title)
+
+        cnt_str = f"{source_photo_count} photo{'s' if source_photo_count != 1 else ''}"
+        lbl_sub = QLabel(f"All photos ({cnt_str}) and face tags will be consolidated.", self)
+        lbl_sub.setFont(QFont("Segoe UI", 9))
+        lbl_sub.setStyleSheet("color: #64748B;")
+        v_src_txt.addWidget(lbl_sub)
+        h_src.addLayout(v_src_txt, 1)
+
+        layout.addLayout(h_src)
+
+        # 2. Searchable Name Input with Completer
+        lbl_prompt = QLabel("Type a name or choose from contacts below:", self)
+        lbl_prompt.setFont(QFont("Segoe UI", 9, QFont.Weight.Bold))
+        lbl_prompt.setStyleSheet("color: #334155; margin-top: 4px;")
+        layout.addWidget(lbl_prompt)
+
+        self.txt_target = _AutoPopupLineEdit(self)
+        self.txt_target.setPlaceholderText("Start typing contact name...")
+        self.txt_target.setFont(QFont("Segoe UI", 10))
+        self.txt_target.setFixedHeight(32)
+        self.txt_target.setStyleSheet(
+            """
+            QLineEdit {
+                border: 1px solid #CBD5E1;
+                border-radius: 6px;
+                padding: 4px 8px;
+                background-color: #F8FAFC;
+                color: #0F172A;
+            }
+            QLineEdit:focus {
+                border-color: #2563EB;
+                background-color: #FFFFFF;
+            }
+            """
         )
-        lbl.setWordWrap(True)
-        layout.addWidget(lbl)
 
-        self.combo = QComboBox(self)
-        for c in candidates:
-            cnt = c.get("photo_count", 0)
-            self.combo.addItem(f"{c['name']} ({cnt} photos)", c["id"])
-        layout.addWidget(self.combo)
+        candidate_names = [str(c["name"]) for c in candidates if c.get("name")]
+        comp = QCompleter(candidate_names, self.txt_target)
+        comp.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
+        comp.setFilterMode(Qt.MatchFlag.MatchContains)
+        self.txt_target.setCompleter(comp)
+        comp.activated.connect(self._on_completer_activated)
+        self.txt_target.textChanged.connect(self._on_text_changed)
+        layout.addWidget(self.txt_target)
 
-        btn_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel, self)
-        btn_box.accepted.connect(self.accept)
-        btn_box.rejected.connect(self.reject)
-        layout.addWidget(btn_box)
+        # 3. Candidate Quick-Pick List
+        self.list_candidates = QListWidget(self)
+        self.list_candidates.setFixedHeight(140)
+        self.list_candidates.setStyleSheet(
+            """
+            QListWidget {
+                border: 1px solid #E2E8F0;
+                border-radius: 6px;
+                background-color: #FFFFFF;
+                color: #0F172A;
+            }
+            QListWidget::item {
+                padding: 4px 6px;
+                border-bottom: 1px solid #F1F5F9;
+            }
+            QListWidget::item:hover {
+                background-color: #F1F5F9;
+            }
+            QListWidget::item:selected {
+                background-color: #EFF6FF;
+                color: #1D4ED8;
+                font-weight: bold;
+            }
+            """
+        )
+        self._populate_candidate_list(self.candidates)
+        self.list_candidates.itemClicked.connect(self._on_list_item_clicked)
+        layout.addWidget(self.list_candidates)
+
+        # 4. Status / Live Preview Label
+        self.lbl_preview = QLabel(self)
+        self.lbl_preview.setFont(QFont("Segoe UI", 9))
+        self.lbl_preview.setWordWrap(True)
+        self.lbl_preview.setStyleSheet("color: #475569; padding: 2px;")
+        layout.addWidget(self.lbl_preview)
+
+        layout.addStretch(1)
+
+        # 5. Buttons
+        h_btn = QHBoxLayout()
+        h_btn.setSpacing(8)
+        h_btn.addStretch(1)
+
+        self.btn_cancel = QPushButton("Cancel", self)
+        self.btn_cancel.setFixedSize(80, 32)
+        self.btn_cancel.setStyleSheet(
+            """
+            QPushButton {
+                background-color: #FFFFFF;
+                border: 1px solid #CBD5E1;
+                border-radius: 6px;
+                color: #334155;
+                font-weight: 600;
+            }
+            QPushButton:hover {
+                background-color: #F1F5F9;
+            }
+            """
+        )
+        self.btn_cancel.clicked.connect(self.reject)
+        h_btn.addWidget(self.btn_cancel)
+
+        self.btn_action = QPushButton("Merge", self)
+        self.btn_action.setFixedSize(110, 32)
+        self.btn_action.setStyleSheet(
+            """
+            QPushButton {
+                background-color: #2563EB;
+                border: none;
+                border-radius: 6px;
+                color: #FFFFFF;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #1D4ED8;
+            }
+            QPushButton:disabled {
+                background-color: #94A3B8;
+                color: #E2E8F0;
+            }
+            """
+        )
+        self.btn_action.setEnabled(False)
+        self.btn_action.clicked.connect(self.accept)
+        h_btn.addWidget(self.btn_action)
+
+        layout.addLayout(h_btn)
+
+        # Initial state update
+        self._update_preview()
+
+    def _populate_candidate_list(self, items: list[dict[str, Any]]) -> None:
+        self.list_candidates.clear()
+        for c in items:
+            cnt = c.get("photo_count", c.get("confirmed_count", 0))
+            name = c.get("name", "")
+            icon = QIcon(make_circular_avatar(c.get("thumbnail_blob"), name, size=24))
+            item = QListWidgetItem(icon, f"{name}  ({cnt} photo{'s' if cnt != 1 else ''})")
+            item.setData(Qt.ItemDataRole.UserRole, c)
+            self.list_candidates.addItem(item)
+
+    def _on_completer_activated(self, text: str) -> None:
+        self.txt_target.setText(text)
+        self._on_text_changed(text)
+
+    def _on_list_item_clicked(self, item: QListWidgetItem) -> None:
+        c = item.data(Qt.ItemDataRole.UserRole)
+        if c:
+            self.txt_target.setText(c["name"])
+
+    def _on_text_changed(self, text: str) -> None:
+        query = text.strip().lower()
+        # Filter list items
+        for i in range(self.list_candidates.count()):
+            itm = self.list_candidates.item(i)
+            c = itm.data(Qt.ItemDataRole.UserRole)
+            matches = not query or (c and query in c["name"].lower())
+            itm.setHidden(not matches)
+            if c and c["name"].lower() == query:
+                self.list_candidates.setCurrentItem(itm)
+        self._update_preview()
+
+    def _update_preview(self) -> None:
+        txt = self.txt_target.text().strip()
+        if not txt:
+            self.lbl_preview.setText("Select a contact to merge into.")
+            self.btn_action.setEnabled(False)
+            self.btn_action.setText("Merge")
+            return
+
+        if txt.lower() == self.source_person_name.lower():
+            self.lbl_preview.setText("<span style='color: #DC2626;'>Cannot merge a person into themselves.</span>")
+            self.btn_action.setEnabled(False)
+            return
+
+        matched = next((c for c in self.candidates if c["name"].lower() == txt.lower()), None)
+        if matched:
+            cnt = matched.get("photo_count", matched.get("confirmed_count", 0))
+            self.lbl_preview.setText(
+                f"Consolidating <b>{self.source_person_name}</b> into <b>{matched['name']}</b> ({cnt} photos)."
+            )
+            self.btn_action.setText("Merge")
+            self.btn_action.setEnabled(True)
+        else:
+            self.lbl_preview.setText(
+                f"<b>'{txt}'</b> is a new name. This will rename <b>{self.source_person_name}</b>."
+            )
+            self.btn_action.setText("Rename")
+            self.btn_action.setEnabled(True)
 
     def target_person_id(self) -> int | None:
-        return self.combo.currentData()
+        txt = self.txt_target.text().strip()
+        matched = next((c for c in self.candidates if c["name"].lower() == txt.lower()), None)
+        return matched["id"] if matched else None
+
+    def target_person_name(self) -> str:
+        return self.txt_target.text().strip()
+
+    def is_rename(self) -> bool:
+        return self.target_person_id() is None
+
+
+_MergePeopleDialog = MergePeopleDialog  # Backward compatibility alias
 
 
 class _MergeConfirmDialog(QDialog):
@@ -422,8 +647,8 @@ class _UnnamedPersonCard(QFrame):
         self.lbl_avatar.setPixmap(pix)
         v_layout.addWidget(self.lbl_avatar, 0, Qt.AlignmentFlag.AlignCenter)
 
-        # 2. Inline "Add a name" input (Immich pill style)
-        self.txt_name = QLineEdit(self)
+        # 2. Inline "Add a name" input (Immich pill style with instant click-to-suggest)
+        self.txt_name = _AutoPopupLineEdit(self)
         self.txt_name.setPlaceholderText("Add a name")
         self.txt_name.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.txt_name.setFont(QFont("Segoe UI", 9))
@@ -928,12 +1153,20 @@ class PeopleDirectoryView(QWidget):
             for idx, c in enumerate(self._all_unnamed_clusters):
                 rep_fid = c.get("representative_face_id")
                 thumb_blob = self.thumb_repo.get_face_thumbnail(rep_fid) if rep_fid else None
+                card_names = list(existing_names)
+                sugg_nm = c.get("suggested_person_name")
+                if sugg_nm and sugg_nm in card_names:
+                    card_names.remove(sugg_nm)
+                    card_names.insert(0, sugg_nm)
+                elif sugg_nm:
+                    card_names.insert(0, sugg_nm)
+
                 card_u = _UnnamedPersonCard(
                     cluster_name=c["cluster_name"],
                     face_ids=c["face_ids"],
                     face_count=c["face_count"],
                     thumb_blob=thumb_blob,
-                    existing_names=existing_names,
+                    existing_names=card_names,
                     parent=self.sec2_container,
                 )
                 card_u.clicked.connect(lambda fids, tb: self.unnamed_selected.emit(fids, tb))
@@ -1052,16 +1285,36 @@ class PeopleDirectoryView(QWidget):
             QMessageBox.information(self, "Merge Person", "No other people available to merge into.")
             return
 
-        dlg = _MergePeopleDialog(source_name, candidates, self)
+        src_info = next((p for p in self._all_named_people if p["id"] == person_id), None)
+        src_thumb = src_info.get("thumbnail_blob") if src_info else None
+        src_cnt = src_info.get("photo_count", 0) if src_info else 0
+
+        dlg = MergePeopleDialog(
+            source_person_name=source_name,
+            candidates=candidates,
+            source_person_id=person_id,
+            source_photo_count=src_cnt,
+            source_thumb_blob=src_thumb,
+            parent=self,
+        )
         if dlg.exec() == QDialog.Accepted:
-            dst_id = dlg.target_person_id()
-            if dst_id is not None:
+            if dlg.is_rename():
+                new_name = dlg.target_person_name()
                 try:
-                    self.repo.merge_people(person_id, dst_id)
+                    self.repo.rename_person(person_id, new_name)
                     self.refresh_directory()
                     self.directory_updated.emit()
                 except Exception as e:
-                    QMessageBox.warning(self, "Merge Failed", f"Could not merge people: {e}")
+                    QMessageBox.warning(self, "Rename Failed", f"Could not rename person: {e}")
+            else:
+                dst_id = dlg.target_person_id()
+                if dst_id is not None:
+                    try:
+                        self.repo.merge_people(person_id, dst_id)
+                        self.refresh_directory()
+                        self.directory_updated.emit()
+                    except Exception as e:
+                        QMessageBox.warning(self, "Merge Failed", f"Could not merge people: {e}")
 
     def _on_review_person(self, person_id: int) -> None:
         self.person_selected.emit(person_id)
