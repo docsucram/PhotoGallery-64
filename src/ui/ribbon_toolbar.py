@@ -69,10 +69,11 @@ from PySide6.QtWidgets import (
 
 from src.db.repository import ArrangeMode
 from src.imaging.opencv_engine import PhotoAdjustmentRecipe, render_adjusted_image
+from src.utils.paths import get_icons_dir
 
 import src.ui.icon_provider as icon_provider
 
-ARROW_DROPDOWN_PATH = (Path(__file__).resolve().parents[2] / "assets" / "icons" / "arrow_dropdown_mini.svg").as_posix()
+ARROW_DROPDOWN_PATH = (get_icons_dir() / "arrow_dropdown_mini.svg").as_posix()
 
 _ICON_CACHE: dict[tuple[str, int], QIcon] = {}
 
@@ -5846,8 +5847,8 @@ class RibbonToolbar(QWidget):
 
 
     def _apply_aero_stylesheet(self) -> None:
-        icon_check = (Path(__file__).resolve().parents[2] / "assets" / "icons" / "check_dark.svg").as_posix()
-        arrow_drop_down = (Path(__file__).resolve().parents[2] / "assets" / "icons" / "arrow_dropdown_mini.svg").as_posix()
+        icon_check = (get_icons_dir() / "check_dark.svg").as_posix()
+        arrow_drop_down = (get_icons_dir() / "arrow_dropdown_mini.svg").as_posix()
         self.setStyleSheet(
             """
             QTabWidget#RibbonTabs::pane {

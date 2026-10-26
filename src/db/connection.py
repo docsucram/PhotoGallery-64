@@ -12,6 +12,8 @@ import threading
 from collections.abc import Generator
 from pathlib import Path
 
+from src.utils.paths import get_schema_path
+
 logger = logging.getLogger(__name__)
 
 THUMBNAILS_SCHEMA_SPLIT_MARKER = "-- === THUMBNAILS_DB_SCHEMA ==="
@@ -30,7 +32,7 @@ class DualDatabaseEngine:
         self.catalog_path = Path(catalog_path)
         self.thumbnails_path = Path(thumbnails_path)
         if schema_sql_path is None:
-            self.schema_sql_path = Path(__file__).resolve().parents[2] / "db" / "schema.sql"
+            self.schema_sql_path = get_schema_path()
         else:
             self.schema_sql_path = Path(schema_sql_path)
 

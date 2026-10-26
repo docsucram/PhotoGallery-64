@@ -331,6 +331,7 @@ class _FaceNameBadgeItem(QGraphicsItem):
                     badge_center_scene = self.mapToScene(QPointF(0, self._pill_h * 0.5))
                     vp_pos = self.viewer.graphics_view.mapFromScene(badge_center_scene)
                     pname = self.name.split("?")[0].strip()
+                    self.setVisible(False)
                     self.viewer.prompt_inline_name_face(self.face_id, vp_pos, initial_text=pname, target_badge=self)
                     return
         super().mousePressEvent(event)
@@ -370,6 +371,8 @@ class _FaceNameBadgeItem(QGraphicsItem):
         if self.is_suggestion:
             # Draw suggestion name with question mark on the left, with full margin so '?' is never cut off
             disp_txt = f"{self.name}?" if not self.name.endswith("?") else self.name
+            fm = QFontMetrics(self._font)
+            text_w = fm.horizontalAdvance(disp_txt)
             text_rect = QRectF(-half_w + 10.0, 4.0, text_w + 16.0, self._pill_h)
             painter.setPen(QColor("#0B3D91"))
             painter.drawText(text_rect, Qt.AlignVCenter | Qt.AlignLeft, disp_txt)
@@ -435,8 +438,13 @@ class _FaceHoverRegionItem(QGraphicsRectItem):
     def hoverEnterEvent(self, event) -> None:
         if hasattr(self.viewer, "is_in_edit_mode") and self.viewer.is_in_edit_mode():
             return
-        self._leave_timer.stop()
+        if hasattr(self, "_leave_timer"):
+            self._leave_timer.stop()
+        popup = getattr(self.viewer, "_inline_name_popup", None)
+        popup_fid = popup.current_face_id if (popup is not None and popup.isVisible()) else None
         for it in self.related_items:
+            if isinstance(it, _FaceNameBadgeItem) and popup_fid is not None and it.face_id == popup_fid:
+                continue
             it.setVisible(True)
         super().hoverEnterEvent(event)
 

@@ -16,6 +16,7 @@ from PySide6.QtWidgets import QApplication, QToolTip, QWidget
 
 from src.db.connection import DualDatabaseEngine
 from src.ui.main_window import PhotoGalleryMainWindow
+from src.utils.paths import get_default_db_dir, get_resource_path
 from src.utils.scan_logger import (
     install_global_crash_logger,
     install_universal_tooltip_filter,
@@ -36,9 +37,9 @@ def create_app(argv: list[str] | None = None) -> QApplication:
     app = QApplication(argv if argv is not None else sys.argv)
     app.setApplicationName("Essentials Photo Gallery")
     app.setOrganizationName("Essentials Photo Gallery")
-    ico_path = Path(__file__).resolve().parent / "resources" / "icons" / "essentials_photo_gallery.ico"
+    ico_path = get_resource_path("resources/icons/essentials_photo_gallery.ico")
     if not ico_path.exists():
-        ico_path = Path(__file__).resolve().parent / "resources" / "icons" / "photogallery_live.ico"
+        ico_path = get_resource_path("resources/icons/photogallery_live.ico")
     if ico_path.exists():
         from PySide6.QtGui import QIcon
         app.setWindowIcon(QIcon(str(ico_path)))
@@ -78,8 +79,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--db-dir",
         type=Path,
-        default=Path(__file__).resolve().parent / "db",
-        help="Directory for catalog.db and thumbnails.db",
+        default=None,
+        help="Directory for catalog.db and thumbnails.db (defaults to %LOCALAPPDATA%/PhotoGallery/db or local db/)",
     )
     parser.add_argument(
         "--scan-folder",
@@ -96,11 +97,12 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     app = create_app(argv)
-    args.db_dir.mkdir(parents=True, exist_ok=True)
+    db_dir = args.db_dir if args.db_dir is not None else get_default_db_dir()
+    db_dir.mkdir(parents=True, exist_ok=True)
 
     engine = DualDatabaseEngine(
-        catalog_path=args.db_dir / "catalog.db",
-        thumbnails_path=args.db_dir / "thumbnails.db",
+        catalog_path=db_dir / "catalog.db",
+        thumbnails_path=db_dir / "thumbnails.db",
     )
 
     window = PhotoGalleryMainWindow(engine=engine, start_xmp_daemon=True)

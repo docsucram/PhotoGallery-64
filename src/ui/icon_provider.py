@@ -18,6 +18,8 @@ os.environ.setdefault("QT_API", "pyside6")
 from PySide6.QtCore import QObject, Signal
 from PySide6.QtGui import QIcon, QPixmap
 
+from src.utils.paths import get_icons_dir
+
 _CURRENT_ICON_THEME: str = "wlpg_aero"
 _ICON_CACHE: dict[tuple[str, str, int], QIcon] = {}
 _AERO_RENDERER: Callable[[str, int], QIcon] | None = None
@@ -178,7 +180,7 @@ def get_icon(kind: str, size: int = 20, color_override: str | None = None) -> QI
     icon: QIcon | None = None
 
     # Check for direct PNG/SVG file asset in assets/icons/<theme>/
-    assets_dir = Path(__file__).resolve().parent.parent.parent / "assets" / "icons"
+    assets_dir = get_icons_dir()
     theme_dir = assets_dir / _CURRENT_ICON_THEME
     asset_file = theme_dir / f"{kind}.png"
     if not asset_file.exists():

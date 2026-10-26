@@ -5,6 +5,23 @@ import traceback
 from pathlib import Path
 from typing import Any
 
+from src.utils.paths import get_app_data_dir
+
+
+def _get_log_dir() -> Path:
+    """Returns a writable directory for application logs."""
+    local_logs = Path("logs")
+    try:
+        local_logs.mkdir(parents=True, exist_ok=True)
+        t = local_logs / ".w"
+        t.touch()
+        t.unlink()
+        return local_logs
+    except (PermissionError, OSError):
+        p = get_app_data_dir() / "logs"
+        p.mkdir(parents=True, exist_ok=True)
+        return p
+
 
 def log_scan_error(worker_name: str, file_path: str | Path, error: Exception | str) -> None:
     """
@@ -12,8 +29,7 @@ def log_scan_error(worker_name: str, file_path: str | Path, error: Exception | s
     Safe against I/O exceptions and creates the logs directory if it does not exist.
     """
     try:
-        log_dir = Path("logs")
-        log_dir.mkdir(parents=True, exist_ok=True)
+        log_dir = _get_log_dir()
         log_file = log_dir / "scan_errors.log"
         ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         with open(log_file, "a", encoding="utf-8") as f:
@@ -27,7 +43,7 @@ def install_global_crash_logger(log_dir: Path | str | None = None) -> None:
     Installs a sys.excepthook crash handler that logs uncaught exceptions
     and full tracebacks to logs/crash.log without terminating the GUI thread.
     """
-    target_dir = Path(log_dir) if log_dir else Path("logs")
+    target_dir = Path(log_dir) if log_dir else _get_log_dir()
     try:
         target_dir.mkdir(parents=True, exist_ok=True)
     except Exception:

@@ -93,6 +93,7 @@ from src.ui.left_nav_dock import LeftNavigationDock
 from src.ui.map_view import WorldMapView
 from src.ui.media_viewer import SingleMediaViewer
 from src.ui.people_directory_view import PeopleDirectoryView
+from src.utils.paths import get_icons_dir, get_themes_dir
 from src.ui.person_header_bar import PersonHeaderBar
 from src.ui.ribbon_toolbar import RibbonToolbar, make_wlpg_icon
 from src.ui.right_tag_dock import TagAndCaptionDock
@@ -5566,17 +5567,10 @@ class PhotoGalleryMainWindow(QMainWindow):
     # -------------------------------------------------------------------------
     def apply_theme(self, theme_name: str) -> None:
         self.current_theme = theme_name  # type: ignore[assignment]
-        theme_file = (
-            Path(__file__).resolve().parents[2]
-            / "assets"
-            / "themes"
-            / f"{theme_name}.qss"
-        )
+        theme_file = get_themes_dir() / f"{theme_name}.qss"
         if theme_file.exists():
             qss = theme_file.read_text(encoding="utf-8")
-            icons_dir = (
-                Path(__file__).resolve().parents[2] / "assets" / "icons"
-            ).as_posix()
+            icons_dir = get_icons_dir().as_posix()
             qss = qss.replace("{ICONS_PATH}", icons_dir)
             self.setStyleSheet(qss)
             app = QApplication.instance()
