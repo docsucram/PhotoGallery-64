@@ -4116,7 +4116,7 @@ class RibbonToolbar(QWidget):
 
         themes = [
             ("pan_and_zoom", "Pan and Zoom"),
-            ("contemporary", "Contemporary"),
+            ("polaroid", "Polaroid"),
             ("cinematic", "Cinematic"),
             ("fade", "Fade"),
             ("black_and_white", "Black and White"),

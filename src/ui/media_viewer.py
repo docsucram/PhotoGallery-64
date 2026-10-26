@@ -1450,25 +1450,102 @@ class SingleMediaViewer(QWidget):
             }
         """
 
-        # 1. Crop Toolbar
+        # 1. Crop Toolbar (Photoshop style Ratio presets, custom W x H, and swap button ⇄)
         self.crop_toolbar = QFrame(self.graphics_view)
         self.crop_toolbar.setStyleSheet(tb_style)
         ct_layout = QHBoxLayout(self.crop_toolbar)
-        ct_layout.setContentsMargins(6, 4, 6, 4)
-        ct_layout.setSpacing(8)
+        ct_layout.setContentsMargins(8, 4, 8, 4)
+        ct_layout.setSpacing(6)
 
-        ct_lbl = QLabel("Crop Proportion:", self.crop_toolbar)
+        self._updating_crop_inputs = False
+
         self.combo_crop_ratio = QComboBox(self.crop_toolbar)
         self.combo_crop_ratio.addItems([
+            "Ratio",
             "Custom",
             "Original",
             "1:1 (Square)",
-            "3:2",
             "4:3",
+            "3:4",
+            "3:2",
+            "2:3",
             "5:4",
+            "4:5",
             "16:9",
+            "9:16",
         ])
+        self.combo_crop_ratio.setStyleSheet("""
+            QComboBox {
+                border: 1px solid #CBD5E1;
+                border-radius: 4px;
+                padding: 2px 6px;
+                background: #FFFFFF;
+                color: #1E293B;
+                font-size: 11px;
+                min-width: 68px;
+            }
+            QComboBox:hover { border-color: #94A3B8; }
+            QComboBox::drop-down { border: none; width: 14px; }
+        """)
         self.combo_crop_ratio.currentTextChanged.connect(self._on_crop_ratio_changed)
+
+        input_style = """
+            QLineEdit {
+                border: 1px solid #CBD5E1;
+                border-radius: 4px;
+                padding: 2px 4px;
+                background: #FFFFFF;
+                color: #1E293B;
+                font-size: 11px;
+                font-weight: 600;
+            }
+            QLineEdit:focus {
+                border-color: #2563EB;
+                background: #FFFFFF;
+            }
+        """
+
+        self.txt_crop_w = QLineEdit(self.crop_toolbar)
+        self.txt_crop_w.setFixedSize(36, 24)
+        self.txt_crop_w.setAlignment(Qt.AlignCenter)
+        self.txt_crop_w.setStyleSheet(input_style)
+        self.txt_crop_w.setPlaceholderText("W")
+        self.txt_crop_w.textEdited.connect(self._on_crop_custom_text_edited)
+
+        self.btn_crop_swap = QPushButton("⇄", self.crop_toolbar)
+        self.btn_crop_swap.setFixedSize(26, 24)
+        self.btn_crop_swap.setToolTip("Swap Width and Height (Landscape / Portrait)")
+        self.btn_crop_swap.setStyleSheet("""
+            QPushButton {
+                border: 1px solid #CBD5E1;
+                border-radius: 4px;
+                background: #F8FAFC;
+                color: #334155;
+                font-size: 13px;
+                font-weight: bold;
+                padding: 0px;
+            }
+            QPushButton:hover {
+                background: #E2E8F0;
+                border-color: #94A3B8;
+            }
+            QPushButton:pressed {
+                background: #CBD5E1;
+            }
+        """)
+        self.btn_crop_swap.clicked.connect(self._on_crop_swap_clicked)
+
+        self.txt_crop_h = QLineEdit(self.crop_toolbar)
+        self.txt_crop_h.setFixedSize(36, 24)
+        self.txt_crop_h.setAlignment(Qt.AlignCenter)
+        self.txt_crop_h.setStyleSheet(input_style)
+        self.txt_crop_h.setPlaceholderText("H")
+        self.txt_crop_h.textEdited.connect(self._on_crop_custom_text_edited)
+
+        # Subtle vertical separator
+        sep = QFrame(self.crop_toolbar)
+        sep.setFrameShape(QFrame.VLine)
+        sep.setStyleSheet("color: #CBD5E1; margin: 2px 2px;")
 
         btn_crop_apply = QPushButton("✓ Apply (Enter)", self.crop_toolbar)
         btn_crop_apply.clicked.connect(self.apply_crop)
@@ -1476,8 +1553,11 @@ class SingleMediaViewer(QWidget):
         btn_crop_cancel = QPushButton("✕ Cancel (Esc)", self.crop_toolbar)
         btn_crop_cancel.clicked.connect(lambda: self.set_crop_mode(False))
 
-        ct_layout.addWidget(ct_lbl)
         ct_layout.addWidget(self.combo_crop_ratio)
+        ct_layout.addWidget(self.txt_crop_w)
+        ct_layout.addWidget(self.btn_crop_swap)
+        ct_layout.addWidget(self.txt_crop_h)
+        ct_layout.addWidget(sep)
         ct_layout.addWidget(btn_crop_apply)
         ct_layout.addWidget(btn_crop_cancel)
         self.crop_toolbar.hide()
@@ -1841,35 +1921,157 @@ class SingleMediaViewer(QWidget):
                 self.graphics_view.setDragMode(ImageGraphicsView.ScrollHandDrag)
 
     def _on_crop_ratio_changed(self, text: str) -> None:
+        if getattr(self, "_updating_crop_inputs", False):
+            return
         if self.current_pil_image is None:
             return
-        w, h = self.current_pil_image.size
-        if w <= 0 or h <= 0:
+        img_w, img_h = self.current_pil_image.size
+        if img_w <= 0 or img_h <= 0:
             return
 
-        if text == "Custom":
-            self.scene.crop_rect_item.set_aspect_ratio(None)
+        self._updating_crop_inputs = True
+        try:
+            if text in ("Ratio", "Custom"):
+                self.txt_crop_w.setText("")
+                self.txt_crop_h.setText("")
+                self.scene.crop_rect_item.set_aspect_ratio(None)
+                self.scene.crop_rect_updated.emit()
+                return
+
+            w_val: float
+            h_val: float
+            if text == "Original":
+                import math
+                g = math.gcd(img_w, img_h)
+                if g > 1 and img_w // g < 100:
+                    w_val = float(img_w // g)
+                    h_val = float(img_h // g)
+                else:
+                    w_val = round(float(img_w) / float(img_h), 2)
+                    h_val = 1.0
+            elif text == "1:1 (Square)":
+                w_val, h_val = 1.0, 1.0
+            elif text == "4:3":
+                w_val, h_val = 4.0, 3.0
+            elif text == "3:4":
+                w_val, h_val = 3.0, 4.0
+            elif text == "3:2":
+                w_val, h_val = 3.0, 2.0
+            elif text == "2:3":
+                w_val, h_val = 2.0, 3.0
+            elif text == "5:4":
+                w_val, h_val = 5.0, 4.0
+            elif text == "4:5":
+                w_val, h_val = 4.0, 5.0
+            elif text == "16:9":
+                w_val, h_val = 16.0, 9.0
+            elif text == "9:16":
+                w_val, h_val = 9.0, 16.0
+            else:
+                return
+
+            self.txt_crop_w.setText(str(int(w_val) if w_val.is_integer() else w_val))
+            self.txt_crop_h.setText(str(int(h_val) if h_val.is_integer() else h_val))
+            target_ratio = float(w_val) / float(h_val)
+            self.scene.crop_rect_item.set_aspect_ratio(target_ratio)
             self.scene.crop_rect_updated.emit()
+        finally:
+            self._updating_crop_inputs = False
+
+    def _on_crop_swap_clicked(self) -> None:
+        """Swaps Width and Height ratio inputs (Landscape <-> Portrait) Photoshop-style."""
+        w_str = self.txt_crop_w.text().strip()
+        h_str = self.txt_crop_h.text().strip()
+
+        # If empty, default to 4 and 3 or current crop ratio
+        if not w_str and not h_str:
+            cur_ratio = self.scene.crop_rect_item.aspect_ratio()
+            if cur_ratio is not None and cur_ratio > 0:
+                w_str, h_str = str(round(cur_ratio, 2)), "1"
+            elif self.current_pil_image:
+                iw, ih = self.current_pil_image.size
+                if iw >= ih:
+                    w_str, h_str = "4", "3"
+                else:
+                    w_str, h_str = "3", "4"
+            else:
+                w_str, h_str = "4", "3"
+
+        # Swap values
+        new_w, new_h = h_str, w_str
+        self._updating_crop_inputs = True
+        try:
+            self.txt_crop_w.setText(new_w)
+            self.txt_crop_h.setText(new_h)
+            try:
+                nw_val = float(new_w)
+                nh_val = float(new_h)
+            except ValueError:
+                return
+            if nw_val <= 0 or nh_val <= 0:
+                return
+            new_ratio = nw_val / nh_val
+            self.scene.crop_rect_item.set_aspect_ratio(new_ratio)
+            self.scene.crop_rect_updated.emit()
+
+            # Update combo text if it matches a preset
+            self._match_crop_combo_to_inputs(nw_val, nh_val)
+        finally:
+            self._updating_crop_inputs = False
+
+    def _on_crop_custom_text_edited(self) -> None:
+        """Applies custom aspect ratio as user types in Width or Height boxes."""
+        if getattr(self, "_updating_crop_inputs", False):
+            return
+        w_str = self.txt_crop_w.text().strip()
+        h_str = self.txt_crop_h.text().strip()
+        if not w_str or not h_str:
+            self._updating_crop_inputs = True
+            try:
+                self.scene.crop_rect_item.set_aspect_ratio(None)
+                self.scene.crop_rect_updated.emit()
+                self.combo_crop_ratio.setCurrentText("Custom")
+            finally:
+                self._updating_crop_inputs = False
             return
 
-        target_ratio: float
-        if text == "Original":
-            target_ratio = float(w) / float(h)
-        elif text == "1:1 (Square)":
-            target_ratio = 1.0
-        elif text == "3:2":
-            target_ratio = 3.0 / 2.0
-        elif text == "4:3":
-            target_ratio = 4.0 / 3.0
-        elif text == "5:4":
-            target_ratio = 5.0 / 4.0
-        elif text == "16:9":
-            target_ratio = 16.0 / 9.0
-        else:
+        try:
+            w_val = float(w_str)
+            h_val = float(h_str)
+        except ValueError:
             return
 
-        self.scene.crop_rect_item.set_aspect_ratio(target_ratio)
-        self.scene.crop_rect_updated.emit()
+        if w_val <= 0 or h_val <= 0:
+            return
+
+        self._updating_crop_inputs = True
+        try:
+            target_ratio = w_val / h_val
+            self.scene.crop_rect_item.set_aspect_ratio(target_ratio)
+            self.scene.crop_rect_updated.emit()
+            self._match_crop_combo_to_inputs(w_val, h_val)
+        finally:
+            self._updating_crop_inputs = False
+
+    def _match_crop_combo_to_inputs(self, w_val: float, h_val: float) -> None:
+        """Updates combo box selection if the ratio matches one of the presets."""
+        ratio = w_val / h_val
+        presets = [
+            ("1:1 (Square)", 1.0),
+            ("4:3", 4.0 / 3.0),
+            ("3:4", 3.0 / 4.0),
+            ("3:2", 3.0 / 2.0),
+            ("2:3", 2.0 / 3.0),
+            ("5:4", 5.0 / 4.0),
+            ("4:5", 4.0 / 5.0),
+            ("16:9", 16.0 / 9.0),
+            ("9:16", 9.0 / 16.0),
+        ]
+        for name, r in presets:
+            if abs(ratio - r) < 0.005:
+                self.combo_crop_ratio.setCurrentText(name)
+                return
+        self.combo_crop_ratio.setCurrentText("Custom")
 
     def apply_crop(self) -> bool:
         """Applies the active CropScene rectangle and rotation angle non-destructively to the recipe."""

@@ -153,15 +153,18 @@ class CropOverlayItem(QGraphicsRectItem):
 
     def set_aspect_ratio(self, ratio: float | None) -> None:
         self._aspect_ratio = ratio
-        if ratio is not None and not self._rect.isEmpty():
+        if ratio is not None and ratio > 0 and not self._rect.isEmpty():
             cx, cy = self._rect.center().x(), self._rect.center().y()
             w = self._rect.width()
             h = w / ratio
-            if self.scene():
+            if self.scene() and self.scene().sceneRect().isValid():
                 s_rect = self.scene().sceneRect()
                 if h > s_rect.height() * 0.95:
                     h = s_rect.height() * 0.85
                     w = h * ratio
+                if w > s_rect.width() * 0.95:
+                    w = s_rect.width() * 0.85
+                    h = w / ratio
             self.setRect(QRectF(cx - w / 2.0, cy - h / 2.0, w, h))
 
     def aspect_ratio(self) -> float | None:

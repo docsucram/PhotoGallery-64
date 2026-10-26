@@ -1244,11 +1244,24 @@ class PhotoFuseDialog(QDialog):
         sidebar_scroll.setWidget(sidebar_content)
         main_layout.addWidget(sidebar_scroll)
 
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        if hasattr(self, "scene") and self.scene.sceneRect().isValid() and self.scene.sceneRect().width() > 0:
+            self.view.fitInView(self.scene.sceneRect(), Qt.KeepAspectRatio)
+            self._is_fit_mode = True
+            current_scale = self.view.transform().m11()
+            self._on_zoom_changed(current_scale)
+            if hasattr(self, "zoom_bar"):
+                self.zoom_bar.set_is_fit(True)
+
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
         if getattr(self, "_is_fit_mode", True) and hasattr(self, "view") and hasattr(self, "scene"):
             if self.scene.sceneRect().isValid() and self.scene.sceneRect().width() > 0:
                 self.view.fitInView(self.scene.sceneRect(), Qt.KeepAspectRatio)
+                self._on_zoom_changed(self.view.transform().m11())
+                if hasattr(self, "zoom_bar"):
+                    self.zoom_bar.set_is_fit(True)
 
     def _toggle_fit_zoom(self) -> None:
         if not hasattr(self, "scene") or not self.scene.sceneRect().isValid() or self.scene.sceneRect().width() == 0:
@@ -2281,11 +2294,24 @@ class PortraitBokehDialog(QDialog):
         sidebar_scroll.setWidget(sidebar_content)
         main_layout.addWidget(sidebar_scroll)
 
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        if hasattr(self, "scene") and self.scene.sceneRect().isValid() and self.scene.sceneRect().width() > 0:
+            self.view.fitInView(self.scene.sceneRect(), Qt.KeepAspectRatio)
+            self._is_fit_mode = True
+            current_scale = self.view.transform().m11()
+            self._on_zoom_changed(current_scale)
+            if hasattr(self, "zoom_bar"):
+                self.zoom_bar.set_is_fit(True)
+
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
         if getattr(self, "_is_fit_mode", True) and hasattr(self, "view") and hasattr(self, "scene"):
             if self.scene.sceneRect().isValid() and self.scene.sceneRect().width() > 0:
                 self.view.fitInView(self.scene.sceneRect(), Qt.KeepAspectRatio)
+                self._on_zoom_changed(self.view.transform().m11())
+                if hasattr(self, "zoom_bar"):
+                    self.zoom_bar.set_is_fit(True)
 
     def _toggle_fit_zoom(self) -> None:
         if not hasattr(self, "scene") or not self.scene.sceneRect().isValid() or self.scene.sceneRect().width() == 0:
@@ -2345,9 +2371,11 @@ class PortraitBokehDialog(QDialog):
         self.bg_item.setPixmap(pm)
         ph, pw = self.proxy_bgr.shape[:2]
         self.scene.setSceneRect(QRectF(0, 0, pw, ph))
-        if self._is_fit_mode:
+        if self._is_fit_mode and self.isVisible():
             self.view.fitInView(self.scene.sceneRect(), Qt.KeepAspectRatio)
             self._on_zoom_changed(self.view.transform().m11())
+            if hasattr(self, "zoom_bar"):
+                self.zoom_bar.set_is_fit(True)
 
     def _show_original(self) -> None:
         self.bg_item.setPixmap(_cv2_to_qpixmap(self.proxy_bgr))

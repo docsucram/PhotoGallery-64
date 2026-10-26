@@ -105,7 +105,7 @@ def make_slideshow_theme_icon(theme_id: str) -> QIcon:
         p.drawLine(20, 18, 28, 18)
         p.drawLine(24, 14, 24, 22)
 
-    elif theme_id == "contemporary":
+    elif theme_id in ("polaroid", "contemporary"):
         p.fillRect(rect, QColor("#1E242B"))
         # Polaroid white border card tilted -6 deg
         p.save()
@@ -170,7 +170,7 @@ class SlideshowHud(QFrame):
 
     THEME_OPTIONS = [
         ("pan_and_zoom", "Pan and Zoom"),
-        ("contemporary", "Contemporary"),
+        ("polaroid", "Polaroid"),
         ("cinematic", "Cinematic"),
         ("fade", "Fade"),
         ("black_and_white", "Black and White"),
@@ -364,7 +364,8 @@ class SlideshowHud(QFrame):
         self.btn_play_pause.setToolTip("Pause (Space)" if is_playing else "Play (Space)")
 
     def set_theme(self, theme_id: str) -> None:
-        idx = self.combo_theme.findData(theme_id)
+        tid = "polaroid" if theme_id == "contemporary" else theme_id
+        idx = self.combo_theme.findData(tid)
         if idx >= 0 and self.combo_theme.currentIndex() != idx:
             self.combo_theme.blockSignals(True)
             self.combo_theme.setCurrentIndex(idx)
@@ -689,7 +690,10 @@ class FullscreenSlideshowDialog(QDialog):
 
     def set_theme(self, theme: str) -> None:
         """Switches the active slideshow theme."""
-        self.current_theme = str(theme)
+        t = str(theme)
+        if t == "contemporary":
+            t = "polaroid"
+        self.current_theme = t
         if self.hud is not None:
             self.hud.set_theme(self.current_theme)
         self.theme_changed.emit(self.current_theme)
@@ -868,23 +872,34 @@ class FullscreenSlideshowDialog(QDialog):
                 self._bw_cache.pop(k, None)
                 self._sepia_cache.pop(k, None)
 
-        # Update Contemporary table scatter stack
+        # Update Polaroid scattering collage stack
         if self._current_pixmap is not None:
-            tilt = (((mid * 29) % 70) - 35) / 10.0  # -3.5 deg to +3.5 deg
+            tilt = (((mid * 47) % 220) - 110) / 10.0  # -11.0 to +11.0 deg
             caption = self._get_caption_or_date(rec)
-            ox = (((mid * 13) % 40) - 20)  # -20px to +20px
-            oy = (((mid * 19) % 30) - 15)  # -15px to +15px
+            # 6 organic collage scatter zones across the table
+            scatter_slots = [
+                (0.36, 0.42),
+                (0.64, 0.46),
+                (0.48, 0.58),
+                (0.34, 0.62),
+                (0.66, 0.38),
+                (0.50, 0.42),
+            ]
+            slot_idx = len(self._contemporary_stack) % len(scatter_slots)
+            base_x, base_y = scatter_slots[slot_idx]
+            jitter_x = (((mid * 23) % 40) - 20) / 1000.0
+            jitter_y = (((mid * 31) % 40) - 20) / 1000.0
             card = {
                 "media_id": mid,
                 "pixmap": self._current_pixmap,
                 "tilt": tilt,
                 "caption": caption,
-                "offset_x": ox,
-                "offset_y": oy,
+                "norm_x": max(0.24, min(0.76, base_x + jitter_x)),
+                "norm_y": max(0.26, min(0.74, base_y + jitter_y)),
             }
             self._contemporary_stack.append(card)
-            if len(self._contemporary_stack) > 3:
-                self._contemporary_stack = self._contemporary_stack[-3:]
+            if len(self._contemporary_stack) > 6:
+                self._contemporary_stack = self._contemporary_stack[-6:]
 
         self.slide_changed.emit(mid)
         self.update()
@@ -1117,7 +1132,7 @@ class FullscreenSlideshowDialog(QDialog):
                 alpha = 1.0
 
             theme = self.current_theme
-            if theme == "contemporary":
+            if theme in ("polaroid", "contemporary"):
                 self._paint_contemporary(painter, t, alpha)
             elif theme == "cinematic":
                 self._paint_cinematic(painter, t, alpha)
@@ -1201,7 +1216,7 @@ class FullscreenSlideshowDialog(QDialog):
         painter.setOpacity(1.0)
 
     def _paint_contemporary(self, painter: QPainter, t: float, alpha: float) -> None:
-        """Polaroid Table Scatter on dark slate canvas with tilt, drop shadow, and caption stamps."""
+        """Polaroid Scattering Collage on dark slate canvas with tilts, realistic shadows, and captions."""
         # 1. Warm dark slate table canvas background
         sw_w, sw_h = self.width(), self.height()
         grad = QRadialGradient(sw_w / 2.0, sw_h / 2.0, max(sw_w, sw_h) * 0.7)
@@ -1212,39 +1227,41 @@ class FullscreenSlideshowDialog(QDialog):
         if not self._contemporary_stack:
             return
 
-        # Draw previous 2 cards underneath if available
-        cards_to_draw = self._contemporary_stack[-3:]
+        # Draw up to 6 polaroids scattered across the collage canvas
+        cards_to_draw = self._contemporary_stack[-6:]
         for idx, card in enumerate(cards_to_draw):
             is_current = (idx == len(cards_to_draw) - 1)
             pix: QPixmap = card["pixmap"]
             tilt: float = card["tilt"]
             caption: str = card["caption"]
-            ox: float = card["offset_x"]
-            oy: float = card["offset_y"]
+            norm_x: float = card.get("norm_x", 0.5)
+            norm_y: float = card.get("norm_y", 0.5)
 
-            # Polaroid dimensions
+            # Polaroid dimensions scaled to allow multi-photo scattering
             pw, ph = pix.width(), pix.height()
-            inner_w = max(260, min(int(sw_w * 0.52), 620))
+            inner_w = max(240, min(int(sw_w * 0.38), 480))
             inner_h = int(inner_w * (ph / float(pw)))
-            if inner_h > int(sw_h * 0.62):
-                inner_h = int(sw_h * 0.62)
+            if inner_h > int(sw_h * 0.52):
+                inner_h = int(sw_h * 0.52)
                 inner_w = int(inner_h * (pw / float(ph)))
 
-            card_w = inner_w + 28
-            card_h = inner_h + 14 + 48
+            card_w = inner_w + 24
+            card_h = inner_h + 12 + 42
 
-            card_cx = (sw_w / 2.0) + ox
-            card_cy = (sw_h / 2.0) + oy
+            margin_x = card_w / 2.0 + 20
+            margin_y = card_h / 2.0 + 20
+            card_cx = max(margin_x, min(sw_w - margin_x, sw_w * norm_x))
+            card_cy = max(margin_y, min(sw_h - margin_y, sw_h * norm_y))
 
-            # Entry animation for current card (first 0.7s)
+            # Entry animation for current card (first 0.65s)
             card_alpha = 1.0
             card_scale = 1.0
             card_y_offset = 0.0
             if is_current:
-                entry_t = min(1.0, self._slide_elapsed_ms / 700.0)
+                entry_t = min(1.0, self._slide_elapsed_ms / 650.0)
                 ease = 1.0 - math.pow(1.0 - entry_t, 3)
-                card_y_offset = (1.0 - ease) * 50.0
-                card_scale = 0.94 + 0.06 * ease
+                card_y_offset = (1.0 - ease) * 45.0
+                card_scale = 1.06 - 0.06 * ease
                 card_alpha = alpha * ease
 
             painter.save()
@@ -1253,27 +1270,31 @@ class FullscreenSlideshowDialog(QDialog):
             painter.rotate(tilt)
             painter.scale(card_scale, card_scale)
 
-            # Drop shadow
-            shadow_rect = QRectF(-card_w / 2.0 + 4, -card_h / 2.0 + 7, card_w, card_h)
-            painter.fillRect(shadow_rect, QColor(0, 0, 0, 75))
+            # Realistic multi-layer drop shadow
+            shadow_rect1 = QRectF(-card_w / 2.0 + 3, -card_h / 2.0 + 5, card_w + 2, card_h + 3)
+            painter.fillRect(shadow_rect1, QColor(0, 0, 0, 55))
+            shadow_rect2 = QRectF(-card_w / 2.0 + 7, -card_h / 2.0 + 10, card_w + 4, card_h + 4)
+            painter.fillRect(shadow_rect2, QColor(0, 0, 0, 30))
 
             # White Polaroid Card
             card_rect = QRectF(-card_w / 2.0, -card_h / 2.0, card_w, card_h)
-            painter.fillRect(card_rect, QColor("#FFFFFF"))
+            painter.fillRect(card_rect, QColor("#FAF9F6"))
             painter.setPen(QPen(QColor("#E2E8F0"), 1.0))
             painter.drawRect(card_rect)
 
             # Photo
-            photo_rect = QRectF(-card_w / 2.0 + 14, -card_h / 2.0 + 14, inner_w, inner_h)
+            photo_rect = QRectF(-card_w / 2.0 + 12, -card_h / 2.0 + 12, inner_w, inner_h)
             painter.drawPixmap(photo_rect, pix, QRectF(0, 0, pw, ph))
 
             # Caption on bottom border
-            caption_rect = QRectF(-card_w / 2.0 + 14, card_h / 2.0 - 44, inner_w, 36)
+            caption_rect = QRectF(-card_w / 2.0 + 12, card_h / 2.0 - 38, inner_w, 30)
             painter.setPen(QColor("#2D3748"))
-            painter.setFont(QFont("Segoe UI", 11))
+            painter.setFont(QFont("Segoe UI", 10))
             painter.drawText(caption_rect, Qt.AlignCenter | Qt.AlignVCenter, caption)
 
             painter.restore()
+
+    _paint_polaroid = _paint_contemporary
 
     def _paint_cinematic(self, painter: QPainter, t: float, alpha: float) -> None:
         """Ambient blurred edge-to-edge backdrop, subtle horizontal drift, film vignette."""
