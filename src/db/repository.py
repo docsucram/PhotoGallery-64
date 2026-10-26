@@ -2803,6 +2803,91 @@ class CatalogRepository:
 
     confirm_face_suggestion = confirm_faces
 
+    def recalculate_person_centroid(self, person_id: int) -> None:
+        """Recalculates ArcFace centroid/sub-centroids for person_id from confirmed faces."""
+        try:
+            conn = self.engine.catalog_conn()
+            rows = conn.execute(
+                "SELECT embedding FROM media_people WHERE person_id = ? AND state = 1 AND embedding IS NOT NULL;",
+                (int(person_id),),
+            ).fetchall()
+            vectors = [deserialize_embedding(r["embedding"]) for r in rows if r["embedding"]]
+            if vectors:
+                if len(vectors) >= 10:
+                    sub_c = FaceVectorMatcher.compute_sub_centroids(np.stack(vectors, axis=0), max_k=5)
+                else:
+                    sub_c = normalize_vector(np.mean(np.stack(vectors, axis=0), axis=0, keepdims=True))
+                self.update_person_centroid(int(person_id), serialize_embedding(sub_c))
+        except Exception:
+            pass
+
+    def assign_face_to_person(self, face_id: int, person_name: str) -> int:
+        """
+        Names/assigns an unknown or suggested face region (media_people.id) to a person.
+        Promotes state = 1, updates person's centroid embedding, increments confirmed count,
+        and marks media dirty for metadata sync.
+        """
+        clean_name = str(person_name).strip()
+        if not clean_name:
+            raise ValueError("person_name cannot be empty")
+        person_id = self.upsert_person(clean_name)
+        self.confirm_faces(int(face_id), person_id)
+        with self.engine.write_lock:
+            conn = self.engine.catalog_conn()
+            row = conn.execute(
+                "SELECT media_id, embedding FROM media_people WHERE id = ?;", (int(face_id),)
+            ).fetchone()
+            if row:
+                mid = int(row["media_id"])
+                conn.execute("UPDATE media SET metadata_dirty = 1 WHERE id = ?;", (mid,))
+                conn.commit()
+                if row["embedding"]:
+                    self.recalculate_person_centroid(person_id)
+        return person_id
+
+    def dismiss_face_region(self, face_id: int) -> None:
+        """Dismisses a false-positive detected face box (sets state = -1) and marks media dirty."""
+        with self.engine.write_lock:
+            conn = self.engine.catalog_conn()
+            row = conn.execute("SELECT media_id FROM media_people WHERE id = ?;", (int(face_id),)).fetchone()
+            conn.execute("UPDATE media_people SET state = -1 WHERE id = ?;", (int(face_id),))
+            if row:
+                conn.execute("UPDATE media SET metadata_dirty = 1 WHERE id = ?;", (int(row["media_id"]),))
+            conn.commit()
+
+    def remove_face_assignment(self, face_id: int) -> None:
+        """Removes person assignment from a face region. If manual, deletes it; if detected, resets to state = 0."""
+        with self.engine.write_lock:
+            conn = self.engine.catalog_conn()
+            row = conn.execute(
+                "SELECT media_id, person_id, is_manual FROM media_people WHERE id = ?;", (int(face_id),)
+            ).fetchone()
+            if not row:
+                return
+            pid = row["person_id"]
+            mid = int(row["media_id"])
+            if row["is_manual"]:
+                conn.execute("DELETE FROM media_people WHERE id = ?;", (int(face_id),))
+            else:
+                conn.execute(
+                    "UPDATE media_people SET person_id = NULL, state = 0, suggested_person_id = NULL WHERE id = ?;",
+                    (int(face_id),),
+                )
+            if pid is not None:
+                conn.execute(
+                    """
+                    UPDATE people
+                    SET confirmed_count = (
+                        SELECT COUNT(*) FROM media_people WHERE person_id = people.id AND state = 1
+                    )
+                    WHERE id = ?;
+                    """,
+                    (int(pid),),
+                )
+                self.recalculate_person_centroid(int(pid))
+            conn.execute("UPDATE media SET metadata_dirty = 1 WHERE id = ?;", (mid,))
+            conn.commit()
+
     def update_face_rect(
         self,
         media_people_id: int,
@@ -3517,59 +3602,68 @@ class CatalogRepository:
                 (media_id,),
             ).fetchall()
         ]
-        confirmed_people = [
-            {
-                **dict(r),
-                "person_id": int(r["id"]),
-                "face_id": int(r["face_id"]),
-                "is_unconfirmed": False,
-                "rect": (
-                    float(r["rect_x"] or 0.0),
-                    float(r["rect_y"] or 0.0),
-                    float(r["rect_w"] or 0.0),
-                    float(r["rect_h"] or 0.0),
-                ),
+        # Query all non-rejected face regions (state >= 0: confirmed, unconfirmed suggestion, unknown)
+        face_rows = conn.execute(
+            """
+            SELECT mp.id AS face_id,
+                   mp.id AS region_id,
+                   COALESCE(mp.person_id, mp.suggested_person_id) AS person_id,
+                   p.name AS person_name,
+                   p.thumbnail_blob AS person_thumbnail_blob,
+                   mp.state,
+                   mp.similarity_score AS confidence,
+                   mp.rect_x, mp.rect_y, mp.rect_w, mp.rect_h,
+                   mp.is_manual
+            FROM media_people mp
+            LEFT JOIN people p ON p.id = COALESCE(mp.person_id, mp.suggested_person_id)
+            WHERE mp.media_id = ? AND mp.state >= 0
+            ORDER BY mp.state DESC, mp.rect_x ASC;
+            """,
+            (media_id,),
+        ).fetchall()
+
+        face_ids = [int(r["face_id"]) for r in face_rows]
+        thumb_repo = ThumbnailRepository(self.engine)
+        face_thumbs = thumb_repo.get_face_thumbnails_batch(face_ids) if face_ids else {}
+
+        all_regions: list[dict[str, Any]] = []
+        for r in face_rows:
+            fid = int(r["face_id"])
+            pid = int(r["person_id"]) if r["person_id"] is not None else None
+            pname = str(r["person_name"]) if r["person_name"] else None
+            st = int(r["state"])
+            blob = face_thumbs.get(fid) or r["person_thumbnail_blob"]
+            rect = (
+                float(r["rect_x"] or 0.0),
+                float(r["rect_y"] or 0.0),
+                float(r["rect_w"] or 0.0),
+                float(r["rect_h"] or 0.0),
+            )
+            reg_dict = {
+                "id": pid if pid is not None else fid,
+                "region_id": fid,
+                "face_id": fid,
+                "person_id": pid,
+                "person_name": pname,
+                "name": pname or "",
+                "state": st,
+                "is_unconfirmed": bool(st == 0),
+                "confidence": float(r["confidence"]) if r["confidence"] is not None else None,
+                "rect": rect,
+                "rect_x": rect[0],
+                "rect_y": rect[1],
+                "rect_w": rect[2],
+                "rect_h": rect[3],
+                "is_manual": bool(r["is_manual"]),
+                "thumbnail_blob": blob,
             }
-            for r in conn.execute(
-                """
-                SELECT p.id, p.name, p.thumbnail_blob, mp.id AS face_id,
-                       mp.rect_x, mp.rect_y, mp.rect_w, mp.rect_h
-                FROM people p
-                JOIN media_people mp ON mp.person_id = p.id
-                WHERE mp.media_id = ? AND mp.state = 1
-                ORDER BY p.name COLLATE NOCASE;
-                """,
-                (media_id,),
-            ).fetchall()
-        ]
-        unconfirmed_people = [
-            {
-                **dict(r),
-                "person_id": int(r["id"]),
-                "face_id": int(r["face_id"]),
-                "is_unconfirmed": True,
-                "rect": (
-                    float(r["rect_x"] or 0.0),
-                    float(r["rect_y"] or 0.0),
-                    float(r["rect_w"] or 0.0),
-                    float(r["rect_h"] or 0.0),
-                ),
-            }
-            for r in conn.execute(
-                """
-                SELECT p.id, p.name, p.thumbnail_blob, mp.id AS face_id,
-                       mp.rect_x, mp.rect_y, mp.rect_w, mp.rect_h
-                FROM people p
-                JOIN media_people mp ON mp.suggested_person_id = p.id
-                WHERE mp.media_id = ? AND mp.state = 0 AND mp.suggested_person_id IS NOT NULL
-                ORDER BY COALESCE(mp.similarity_score, 0.0) DESC;
-                """,
-                (media_id,),
-            ).fetchall()
-        ]
-        detail["people"] = confirmed_people + unconfirmed_people
-        detail["confirmed_people"] = confirmed_people
-        detail["unconfirmed_people"] = unconfirmed_people
+            all_regions.append(reg_dict)
+
+        detail["face_regions"] = all_regions
+        detail["confirmed_people"] = [reg for reg in all_regions if reg["state"] == 1]
+        detail["unconfirmed_people"] = [reg for reg in all_regions if reg["state"] == 0 and reg["person_name"]]
+        detail["unknown_people"] = [reg for reg in all_regions if reg["state"] == 0 and not reg["person_name"]]
+        detail["people"] = all_regions
 
         # Video properties (Duration / Frame rate / Bitrate)
         detail["is_video"] = bool(detail.get("is_video"))

@@ -10,13 +10,16 @@ import argparse
 import sys
 from pathlib import Path
 
-from PySide6.QtCore import QLoggingCategory, Qt
+from PySide6.QtCore import QEvent, QLoggingCategory, QObject, Qt
 from PySide6.QtGui import QColor, QPalette
-from PySide6.QtWidgets import QApplication, QToolTip
+from PySide6.QtWidgets import QApplication, QToolTip, QWidget
 
 from src.db.connection import DualDatabaseEngine
 from src.ui.main_window import PhotoGalleryMainWindow
-from src.utils.scan_logger import install_global_crash_logger
+from src.utils.scan_logger import (
+    install_global_crash_logger,
+    install_universal_tooltip_filter,
+)
 
 
 def create_app(argv: list[str] | None = None) -> QApplication:
@@ -45,7 +48,7 @@ def create_app(argv: list[str] | None = None) -> QApplication:
     app.setPalette(palette)
     QToolTip.setPalette(palette)
     app.setStyleSheet(
-        "QToolTip { "
+        "QToolTip, QLabel#qtooltip_label { "
         "background-color: #FFFFFF; "
         "color: #1E395B; "
         "border: 1px solid #7DA2CE; "
@@ -55,6 +58,7 @@ def create_app(argv: list[str] | None = None) -> QApplication:
         "font-size: 9pt; "
         "}"
     )
+    install_universal_tooltip_filter(app)
     return app
 
 

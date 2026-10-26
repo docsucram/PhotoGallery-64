@@ -244,6 +244,8 @@ class PersonHeaderBar(QFrame):
         self.setObjectName("PersonHeaderBar")
         self.setStyleSheet(
             "#PersonHeaderBar { background-color: #F8FAFC; border-bottom: 1px solid #DDE4ED; }"
+            "QToolTip { background-color: #FFFFFF; color: #1E395B; border: 1px solid #7DA2CE; "
+            "border-radius: 2px; padding: 3px 6px; font-family: 'Segoe UI', sans-serif; font-size: 9pt; }"
         )
 
         main_layout = QVBoxLayout(self)
@@ -342,6 +344,8 @@ class PersonHeaderBar(QFrame):
         self.banner_frame.setObjectName("SuggestionBanner")
         self.banner_frame.setStyleSheet(
             "#SuggestionBanner { background-color: #F0F6FF; border: 1px solid #C7D9EE; border-radius: 6px; padding: 4px; }"
+            "QToolTip { background-color: #FFFFFF; color: #1E395B; border: 1px solid #7DA2CE; "
+            "border-radius: 2px; padding: 3px 6px; font-family: 'Segoe UI', sans-serif; font-size: 9pt; }"
         )
         self.banner_frame.hide()
 

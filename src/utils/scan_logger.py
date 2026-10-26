@@ -3,6 +3,7 @@ import os
 import sys
 import traceback
 from pathlib import Path
+from typing import Any
 
 
 def log_scan_error(worker_name: str, file_path: str | Path, error: Exception | str) -> None:
@@ -49,3 +50,57 @@ def install_global_crash_logger(log_dir: Path | str | None = None) -> None:
         sys.stderr.flush()
 
     sys.excepthook = _crash_handler
+
+
+class UniversalToolTipFilter:
+    """Placeholder to be initialized after PySide6 imports."""
+    pass
+
+
+def install_universal_tooltip_filter(app: Any = None) -> Any:
+    """
+    Installs a universal event filter intercepting all QTipLabel / ToolTip widgets across the app.
+    Guarantees tooltips never render with system dark mode / black backgrounds regardless
+    of local widget stylesheets or child hierarchy overrides.
+    """
+    from PySide6.QtCore import QEvent, QObject, Qt
+    from PySide6.QtGui import QColor, QPalette
+    from PySide6.QtWidgets import QApplication, QWidget
+
+    class _ToolTipFilter(QObject):
+        def eventFilter(self, obj: QObject, event: QEvent) -> bool:
+            if getattr(obj, "objectName", lambda: "")() == "qtooltip_label" or (
+                isinstance(obj, QWidget) and obj.windowType() == Qt.WindowType.ToolTip
+            ):
+                if not getattr(obj, "_styled_universal", False):
+                    obj._styled_universal = True
+                    try:
+                        pal = obj.palette()
+                        pal.setColor(QPalette.ColorRole.Window, QColor("#FFFFFF"))
+                        pal.setColor(QPalette.ColorRole.WindowText, QColor("#1E395B"))
+                        pal.setColor(QPalette.ColorRole.ToolTipBase, QColor("#FFFFFF"))
+                        pal.setColor(QPalette.ColorRole.ToolTipText, QColor("#1E395B"))
+                        obj.setPalette(pal)
+                        obj.setStyleSheet(
+                            "background-color: #FFFFFF !important; "
+                            "color: #1E395B !important; "
+                            "border: 1px solid #7DA2CE !important; "
+                            "border-radius: 2px !important; "
+                            "padding: 3px 6px !important; "
+                            "font-family: 'Segoe UI', sans-serif !important; "
+                            "font-size: 9pt !important;"
+                        )
+                    except Exception:
+                        pass
+            return False
+
+    if app is None:
+        app = QApplication.instance()
+    if app is None:
+        return None
+    if not hasattr(app, "_universal_tooltip_filter"):
+        filt = _ToolTipFilter(app)
+        app.installEventFilter(filt)
+        app._universal_tooltip_filter = filt
+    return getattr(app, "_universal_tooltip_filter", None)
+

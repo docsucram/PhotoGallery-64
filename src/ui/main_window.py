@@ -1104,6 +1104,13 @@ class PhotoGalleryMainWindow(QMainWindow):
         self.right_tag_dock.person_confirm_requested.connect(self._on_dock_person_confirm_requested)
         self.right_tag_dock.person_reject_suggestion_requested.connect(self._on_dock_person_reject_suggestion_requested)
         self.right_tag_dock.person_tag_mode_requested.connect(self._on_dock_person_tag_mode_requested)
+        self.right_tag_dock.face_region_hovered.connect(self._on_dock_face_region_hovered)
+        self.right_tag_dock.assign_face_requested.connect(self._on_assign_face_requested)
+        self.right_tag_dock.dismiss_face_requested.connect(self._on_dismiss_face_requested)
+        self.right_tag_dock.remove_face_requested.connect(self._on_remove_face_requested)
+        self.media_viewer.face_region_named.connect(self._on_assign_face_requested)
+        self.media_viewer.face_suggestion_confirmed.connect(self._on_dock_person_confirm_requested)
+        self.media_viewer.face_suggestion_rejected.connect(self._on_dock_person_reject_suggestion_requested)
         self.right_tag_dock.change_time_requested.connect(self.open_change_time_taken_dialog)
         self.right_tag_dock.filename_committed.connect(self.on_selection_filename_committed)
         self.right_tag_dock.date_taken_edited.connect(self.on_selection_date_taken_edited)
@@ -2689,6 +2696,72 @@ class PhotoGalleryMainWindow(QMainWindow):
                 self.person_header_bar.load_person(person_id)
         self.grid_view.viewport().update()
         self.lbl_sync_status.setText("Face suggestion dismissed")
+
+    def _on_dock_face_region_hovered(self, region_id: int | None) -> None:
+        if self.central_stack.currentWidget() == self.media_viewer:
+            self.media_viewer.highlight_face_region(region_id)
+
+    def _on_assign_face_requested(self, face_id: int, person_name: str) -> None:
+        target_ids = (
+            [self.media_viewer.current_media_id]
+            if self.central_stack.currentWidget() == self.media_viewer
+            and self.media_viewer.current_media_id is not None
+            else list(self._selected_ids)
+        )
+        self.catalog_repo.assign_face_to_person(int(face_id), person_name)
+        self.refresh_navigation_and_autocomplete()
+        if target_ids:
+            summary = self.catalog_repo.get_selection_summary(target_ids)
+            self.right_tag_dock.bind_selection(target_ids, summary)
+        if (
+            self.central_stack.currentWidget() == self.media_viewer
+            and self.media_viewer.current_media_id is not None
+        ):
+            detail = self.catalog_repo.get_media_detail(self.media_viewer.current_media_id)
+            self.media_viewer.render_face_regions(detail.get("face_regions") or detail.get("people", []))
+        self.grid_view.viewport().update()
+        self.lbl_sync_status.setText(f"✓ Assigned face to '{person_name}'")
+
+    def _on_dismiss_face_requested(self, face_id: int) -> None:
+        target_ids = (
+            [self.media_viewer.current_media_id]
+            if self.central_stack.currentWidget() == self.media_viewer
+            and self.media_viewer.current_media_id is not None
+            else list(self._selected_ids)
+        )
+        self.catalog_repo.dismiss_face_region(int(face_id))
+        if target_ids:
+            summary = self.catalog_repo.get_selection_summary(target_ids)
+            self.right_tag_dock.bind_selection(target_ids, summary)
+        if (
+            self.central_stack.currentWidget() == self.media_viewer
+            and self.media_viewer.current_media_id is not None
+        ):
+            detail = self.catalog_repo.get_media_detail(self.media_viewer.current_media_id)
+            self.media_viewer.render_face_regions(detail.get("face_regions") or detail.get("people", []))
+        self.grid_view.viewport().update()
+        self.lbl_sync_status.setText("Dismissed face box")
+
+    def _on_remove_face_requested(self, face_id: int) -> None:
+        target_ids = (
+            [self.media_viewer.current_media_id]
+            if self.central_stack.currentWidget() == self.media_viewer
+            and self.media_viewer.current_media_id is not None
+            else list(self._selected_ids)
+        )
+        self.catalog_repo.remove_face_assignment(int(face_id))
+        self.refresh_navigation_and_autocomplete()
+        if target_ids:
+            summary = self.catalog_repo.get_selection_summary(target_ids)
+            self.right_tag_dock.bind_selection(target_ids, summary)
+        if (
+            self.central_stack.currentWidget() == self.media_viewer
+            and self.media_viewer.current_media_id is not None
+        ):
+            detail = self.catalog_repo.get_media_detail(self.media_viewer.current_media_id)
+            self.media_viewer.render_face_regions(detail.get("face_regions") or detail.get("people", []))
+        self.grid_view.viewport().update()
+        self.lbl_sync_status.setText("Removed person from face")
 
     def _on_face_crop_set_display_pic(
         self, media_id: int, person_id: int, face_id: int | None = None
@@ -5514,6 +5587,11 @@ class PhotoGalleryMainWindow(QMainWindow):
                 app.setPalette(pal)
                 QToolTip.setPalette(pal)
                 app.setStyleSheet(qss)
+                try:
+                    from src.utils.scan_logger import install_universal_tooltip_filter
+                    install_universal_tooltip_filter(app)
+                except Exception:
+                    pass
 
     def keyPressEvent(self, event: QKeyEvent) -> None:
         focus_w = QApplication.focusWidget() or self.focusWidget()

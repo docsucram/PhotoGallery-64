@@ -419,11 +419,131 @@ class _AddPersonLineEdit(QLineEdit):
             self.clicked.emit()
 
 
+class _UnknownFaceCardWidget(QFrame):
+    """
+    Card for an unassigned detected face (state = 0, person_id IS NULL) in RightTagDock.
+    - 30x30 square face avatar thumbnail on the left
+    - Clickable 'Who is this?' line edit with QCompleter of known people
+    - '✕' button to dismiss false-positive box (state = -1)
+    """
+
+    assign_requested = Signal(int, str)       # (face_id, name)
+    dismiss_requested = Signal(int)          # (face_id)
+    hovered_changed = Signal(int, bool)       # (face_id, is_hovered)
+
+    def __init__(
+        self,
+        face_id: int,
+        icon_pixmap: QPixmap | None = None,
+        completer: QCompleter | None = None,
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.face_id = int(face_id)
+        self.setObjectName("UnknownFaceCard")
+        self.setMouseTracking(True)
+        self.setFixedHeight(36)
+        self.setProperty("hovered", "false")
+        self.setStyleSheet(
+            """
+            QFrame#UnknownFaceCard {
+                background: transparent;
+                border: 1px dashed #A4C2E8;
+                border-radius: 3px;
+            }
+            QFrame#UnknownFaceCard[hovered="true"] {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #F6FAFE, stop:1 #E5F1FB);
+                border: 1px solid #2979CC;
+            }
+            """
+        )
+        hbox = QHBoxLayout(self)
+        hbox.setContentsMargins(3, 2, 2, 2)
+        hbox.setSpacing(4)
+
+        self.icon_lbl = QLabel(self)
+        self.icon_lbl.setFixedSize(30, 30)
+        self.icon_lbl.setStyleSheet("border: 1px solid #8A9BA8; background: #EAECEE;")
+        if icon_pixmap is not None and not icon_pixmap.isNull():
+            self.icon_lbl.setPixmap(
+                icon_pixmap.scaled(30, 30, Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation)
+            )
+        hbox.addWidget(self.icon_lbl)
+
+        self.txt_who = QLineEdit(self)
+        self.txt_who.setPlaceholderText("Who is this?")
+        if completer is not None:
+            self.txt_who.setCompleter(completer)
+        self.txt_who.setStyleSheet(
+            """
+            QLineEdit {
+                background: #FFFFFF;
+                border: 1px solid #CBD5E1;
+                border-radius: 2px;
+                padding: 1px 4px;
+                font-family: 'Segoe UI';
+                font-size: 8.5pt;
+                color: #1E395B;
+            }
+            QLineEdit:hover, QLineEdit:focus {
+                border-color: #2979CC;
+            }
+            """
+        )
+        self.txt_who.returnPressed.connect(self._on_return)
+        hbox.addWidget(self.txt_who, 1)
+
+        self.btn_del = QPushButton("✕", self)
+        self.btn_del.setFixedSize(18, 18)
+        self.btn_del.setCursor(Qt.PointingHandCursor)
+        self.btn_del.setToolTip("Dismiss face")
+        self.btn_del.setStyleSheet(
+            """
+            QPushButton {
+                border: none;
+                background: transparent;
+                color: #7B8B9B;
+                font-family: 'Segoe UI';
+                font-size: 8.5pt;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                color: #C50F1F;
+                background: #F8D7DA;
+                border-radius: 2px;
+            }
+            """
+        )
+        self.btn_del.clicked.connect(lambda: self.dismiss_requested.emit(self.face_id))
+        hbox.addWidget(self.btn_del)
+
+    def _on_return(self) -> None:
+        text = self.txt_who.text().strip()
+        if text:
+            self.assign_requested.emit(self.face_id, text)
+
+    def enterEvent(self, event: Any) -> None:
+        super().enterEvent(event)
+        self.setProperty("hovered", "true")
+        self.style().unpolish(self)
+        self.style().polish(self)
+        self.hovered_changed.emit(self.face_id, True)
+
+    def leaveEvent(self, event: Any) -> None:
+        super().leaveEvent(event)
+        self.setProperty("hovered", "false")
+        self.style().unpolish(self)
+        self.style().polish(self)
+        self.hovered_changed.emit(self.face_id, False)
+
+
 class _PersonTagCardWidget(QFrame):
     """
     WLPG-style person tag split-button card in the right pane (media_1792269887974_67460900.png):
     - 30x30 square face avatar thumbnail on the left
     - Person name label in the middle (clicking searches for photos of this person)
+    - If unconfirmed suggestion: inline [✓] Confirm and [✗] Reject buttons
+    - If confirmed: [✕] Delete button
     - Split dropdown arrow '▾' on the right opening the WLPG context menu:
       * Search for photos of this person
       * View all suggestions
@@ -524,10 +644,44 @@ class _PersonTagCardWidget(QFrame):
         self.lbl_name.setToolTip(f"Search for photos of {self.person_name}")
         hbox.addWidget(self.lbl_name, 1)
 
+        if self.is_unconfirmed:
+            self.btn_confirm = QPushButton("✓", self)
+            self.btn_confirm.setFixedSize(18, 18)
+            self.btn_confirm.setCursor(Qt.PointingHandCursor)
+            self.btn_confirm.setToolTip("Confirm this suggestion")
+            self.btn_confirm.setStyleSheet(
+                "QPushButton { background: #2E8B57; color: white; border-radius: 2px; font-size: 10px; font-weight: bold; border: none; }"
+                "QPushButton:hover { background: #236B43; }"
+            )
+            self.btn_confirm.clicked.connect(lambda: self.confirm_clicked.emit(self.person_id, self.face_id or 0))
+            hbox.addWidget(self.btn_confirm)
+
+            self.btn_reject = QPushButton("✗", self)
+            self.btn_reject.setFixedSize(18, 18)
+            self.btn_reject.setCursor(Qt.PointingHandCursor)
+            self.btn_reject.setToolTip("Not this person")
+            self.btn_reject.setStyleSheet(
+                "QPushButton { background: #DC2626; color: white; border-radius: 2px; font-size: 10px; font-weight: bold; border: none; }"
+                "QPushButton:hover { background: #B91C1C; }"
+            )
+            self.btn_reject.clicked.connect(lambda: self.reject_suggestion_clicked.emit(self.person_id, self.face_id or 0))
+            hbox.addWidget(self.btn_reject)
+        else:
+            self.btn_del = QPushButton("✕", self)
+            self.btn_del.setFixedSize(18, 18)
+            self.btn_del.setCursor(Qt.PointingHandCursor)
+            self.btn_del.setToolTip(f"Remove tag '{self.person_name}'")
+            self.btn_del.setStyleSheet(
+                "QPushButton { border: none; background: transparent; color: #7B8B9B; font-family: 'Segoe UI'; font-size: 8.5pt; font-weight: bold; }"
+                "QPushButton:hover { color: #C50F1F; background: #F8D7DA; border-radius: 2px; }"
+            )
+            self.btn_del.clicked.connect(lambda: self.remove_clicked.emit(self.person_id))
+            hbox.addWidget(self.btn_del)
+
         self.btn_menu = QToolButton(self)
         self.btn_menu.setObjectName("PersonMenuBtn")
         self.btn_menu.setText("▾")
-        self.btn_menu.setFixedSize(20, 30)
+        self.btn_menu.setFixedSize(16, 26)
         self.btn_menu.setCursor(Qt.PointingHandCursor)
         self.btn_menu.setToolTip("Options")
         self.btn_menu.clicked.connect(self._show_dropdown_menu)
@@ -1292,6 +1446,10 @@ class TagAndCaptionDock(QDockWidget):
     person_confirm_requested = Signal(int, int)  # (person_id, face_id)
     person_reject_suggestion_requested = Signal(int, int)  # (person_id, face_id)
     person_tag_mode_requested = Signal()    # user clicked 'Add people tags'
+    face_region_hovered = Signal(object)    # face_id / region_id: int | None
+    assign_face_requested = Signal(int, str) # (face_id, person_name)
+    dismiss_face_requested = Signal(int)     # (face_id)
+    remove_face_requested = Signal(int)      # (face_id)
 
     # Signals for Fine-Tune adjustments
     fine_tune_exposure_changed = Signal(int, int, int, int, int)   # brightness, contrast, shadows, highlights, clarity
@@ -2245,29 +2403,58 @@ class TagAndCaptionDock(QDockWidget):
             self.lbl_view_items_count.setVisible(False)
             self.info_form_frame.setVisible(True)
 
-            for p in summary.get("people", []):
-                pname = str(p["name"])
+            # Face regions & people tags (confirmed, unconfirmed suggestions, unknown detected faces)
+            face_regions = summary.get("face_regions") or summary.get("people", [])
+            for p in face_regions:
+                pname = str(p.get("person_name") or p.get("name") or "").strip()
+                fid = int(p.get("face_id") or p.get("region_id") or p.get("id") or 0)
+                pid = int(p.get("person_id") or p.get("id") or 0) if (p.get("person_id") or (p.get("id") and pname)) else None
+                st = int(p.get("state", 1 if (pid and not p.get("is_unconfirmed")) else 0))
                 blob = p.get("thumbnail_blob")
-                pix = make_person_avatar_pixmap(pname, blob, size=30, circular=False)
-                chip = _PersonTagCardWidget(
-                    int(p["id"]),
-                    pname,
-                    icon_pixmap=pix,
-                    is_unconfirmed=bool(p.get("is_unconfirmed")),
-                    face_id=p.get("face_id"),
-                    parent=self.people_chips_container,
-                )
-                chip.remove_clicked.connect(self.person_removed.emit)
-                chip.search_clicked.connect(self.person_search_requested.emit)
-                chip.view_suggestions_clicked.connect(self.person_view_suggestions_requested.emit)
-                chip.tag_as_other_clicked.connect(self.person_tag_as_other_requested.emit)
-                chip.set_display_pic_clicked.connect(self.person_set_display_pic_requested.emit)
-                chip.merge_clicked.connect(self.person_merge_requested.emit)
-                chip.rename_clicked.connect(self.person_rename_requested.emit)
-                chip.confirm_clicked.connect(self.person_confirm_requested.emit)
-                chip.reject_suggestion_clicked.connect(self.person_reject_suggestion_requested.emit)
-                chip.hovered_changed.connect(self.person_hovered.emit)
-                self.people_chips_layout.addWidget(chip)
+                pix = make_person_avatar_pixmap(pname or "Unknown", blob, size=30, circular=False)
+
+                if st == 0 and not pname:
+                    # Detected unknown face ("Who is this?")
+                    unknown_chip = _UnknownFaceCardWidget(
+                        face_id=fid,
+                        icon_pixmap=pix,
+                        completer=self._people_completer,
+                        parent=self.people_chips_container,
+                    )
+                    unknown_chip.assign_requested.connect(self.assign_face_requested.emit)
+                    unknown_chip.dismiss_requested.connect(self.dismiss_face_requested.emit)
+                    unknown_chip.hovered_changed.connect(
+                        lambda fid_val, hov: self.face_region_hovered.emit(fid_val if hov else None)
+                    )
+                    self.people_chips_layout.addWidget(unknown_chip)
+                else:
+                    # Confirmed person (state == 1) or unconfirmed suggestion (state == 0 with person_name)
+                    chip = _PersonTagCardWidget(
+                        pid or fid,
+                        pname,
+                        icon_pixmap=pix,
+                        is_unconfirmed=bool(st == 0 or p.get("is_unconfirmed")),
+                        face_id=fid,
+                        parent=self.people_chips_container,
+                    )
+                    chip.remove_clicked.connect(lambda pid_val, fid_val=fid: (
+                        self.remove_face_requested.emit(fid_val) if fid_val else self.person_removed.emit(pid_val)
+                    ))
+                    chip.search_clicked.connect(self.person_search_requested.emit)
+                    chip.view_suggestions_clicked.connect(self.person_view_suggestions_requested.emit)
+                    chip.tag_as_other_clicked.connect(self.person_tag_as_other_requested.emit)
+                    chip.set_display_pic_clicked.connect(self.person_set_display_pic_requested.emit)
+                    chip.merge_clicked.connect(self.person_merge_requested.emit)
+                    chip.rename_clicked.connect(self.person_rename_requested.emit)
+                    chip.confirm_clicked.connect(self.person_confirm_requested.emit)
+                    chip.reject_suggestion_clicked.connect(self.person_reject_suggestion_requested.emit)
+                    chip.hovered_changed.connect(
+                        lambda fid_val, hov: self.face_region_hovered.emit(fid_val if hov else None)
+                    )
+                    chip.hovered_changed.connect(
+                        lambda pid_val, hov: self.person_hovered.emit(pid_val, hov)
+                    )
+                    self.people_chips_layout.addWidget(chip)
 
             # Display-level tag deduplication: if both 'Subject/Occasions/Christmas' and 'Christmas' exist, keep only the hierarchical one
             raw_tags = summary.get("tags", [])

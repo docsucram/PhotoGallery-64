@@ -2233,6 +2233,7 @@ class _RibbonGroupBox(QFrame):
         super().__init__(parent)
         self.setObjectName("RibbonGroupBox")
         self.setAttribute(Qt.WA_StyledBackground, True)
+        self.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Fixed)
         self.setStyleSheet(
             """
             QFrame#RibbonGroupBox {
@@ -2248,6 +2249,7 @@ class _RibbonGroupBox(QFrame):
 
         self.content_widget = QWidget(self)
         self.content_widget.setFixedHeight(70)
+        self.content_widget.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Fixed)
         self.content_layout = QHBoxLayout(self.content_widget)
         self.content_layout.setContentsMargins(0, 0, 0, 0)
         self.content_layout.setSpacing(1)
@@ -2264,6 +2266,18 @@ class _RibbonGroupBox(QFrame):
 
     def setTitle(self, title: str) -> None:
         self.lbl_title.setText(title)
+
+    def sizeHint(self) -> QSize:
+        cw = self.content_layout.sizeHint().width()
+        tw = self.lbl_title.sizeHint().width()
+        w = max(cw, tw) + 2
+        return QSize(w, 86)
+
+    def minimumSizeHint(self) -> QSize:
+        cw = self.content_layout.minimumSize().width()
+        tw = self.lbl_title.minimumSizeHint().width()
+        w = max(cw, tw) + 2
+        return QSize(w, 86)
 
 
 class _RibbonPage(QWidget):
@@ -5370,37 +5384,36 @@ class RibbonToolbar(QWidget):
         hbox.addWidget(grp_details)
 
         # ---------------------------------------------------------------------
-        # Group 3: Zoom Group (two large buttons matching WLPG)
+        # Group 3: Zoom Group (two large buttons matching WLPG in Grid, four in Viewer)
         # ---------------------------------------------------------------------
         grp_zoom = _RibbonGroupBox("Zoom", page)
         self.grp_zoom = grp_zoom
-        z_hbox = QHBoxLayout()
-        z_hbox.setContentsMargins(0, 0, 0, 0)
-        z_hbox.setSpacing(3)
+        grp_zoom.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Fixed)
+        grp_zoom.content_layout.setSpacing(3)
 
         self.btn_zoom_in = self._make_btn("Zoom\nin", "zoom_in", grp_zoom, large=True)
         self.btn_zoom_in.setToolTip("Zoom in (+)")
         self.btn_zoom_in._tooltip_override = "Zoom in (+)"
         self.btn_zoom_in.clicked.connect(lambda: self.action_triggered.emit("zoom_in"))
-        z_hbox.addWidget(self.btn_zoom_in)
+        grp_zoom.content_layout.addWidget(self.btn_zoom_in)
 
         self.btn_zoom_out = self._make_btn("Zoom\nout", "zoom_out", grp_zoom, large=True)
         self.btn_zoom_out.setToolTip("Zoom out (-)")
         self.btn_zoom_out._tooltip_override = "Zoom out (-)"
         self.btn_zoom_out.clicked.connect(lambda: self.action_triggered.emit("zoom_out"))
-        z_hbox.addWidget(self.btn_zoom_out)
+        grp_zoom.content_layout.addWidget(self.btn_zoom_out)
 
         self.btn_zoom_actual = self._make_btn("Actual\nsize", "actual_size", grp_zoom, large=True)
         self.btn_zoom_actual.setToolTip("Actual size (Ctrl+0)")
         self.btn_zoom_actual._tooltip_override = "Actual size (Ctrl+0)"
         self.btn_zoom_actual.clicked.connect(lambda: self.action_triggered.emit("viewer_zoom_actual"))
         self.btn_zoom_actual.setVisible(False)
-        z_hbox.addWidget(self.btn_zoom_actual)
+        grp_zoom.content_layout.addWidget(self.btn_zoom_actual)
 
         self.btn_zoom_fit = self._make_btn("Fit to\nwindow", "fit_window", grp_zoom, large=True)
         self.btn_zoom_fit.clicked.connect(lambda: self.action_triggered.emit("viewer_zoom_fit"))
         self.btn_zoom_fit.setVisible(False)
-        z_hbox.addWidget(self.btn_zoom_fit)
+        grp_zoom.content_layout.addWidget(self.btn_zoom_fit)
 
         # Thumbnail zoom slider kept for API/status bar compatibility, hidden from ribbon to match WLPG
         self.slider_zoom = QSlider(Qt.Horizontal, grp_zoom)
@@ -5410,7 +5423,6 @@ class RibbonToolbar(QWidget):
         self.slider_zoom.valueChanged.connect(self.zoom_size_changed.emit)
         self.slider_zoom.setVisible(False)
 
-        grp_zoom.content_layout.addLayout(z_hbox)
         hbox.addWidget(grp_zoom)
 
         # ---------------------------------------------------------------------
@@ -5772,6 +5784,10 @@ class RibbonToolbar(QWidget):
                 self.btn_zoom_actual.setVisible(True)
             if hasattr(self, "btn_zoom_fit"):
                 self.btn_zoom_fit.setVisible(True)
+            if hasattr(self, "grp_zoom"):
+                self.grp_zoom.content_widget.adjustSize()
+                self.grp_zoom.adjustSize()
+                self.grp_zoom.updateGeometry()
         elif mode == "map":
             self.tab_widget.tabBar().setTabVisible(0, True)
             self.tab_widget.tabBar().setTabVisible(2, True)
@@ -5805,6 +5821,10 @@ class RibbonToolbar(QWidget):
                 self.btn_zoom_actual.setVisible(False)
             if hasattr(self, "btn_zoom_fit"):
                 self.btn_zoom_fit.setVisible(False)
+            if hasattr(self, "grp_zoom"):
+                self.grp_zoom.content_widget.adjustSize()
+                self.grp_zoom.adjustSize()
+                self.grp_zoom.updateGeometry()
 
 
     def _apply_aero_stylesheet(self) -> None:
