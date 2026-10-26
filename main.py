@@ -16,6 +16,7 @@ from PySide6.QtWidgets import QApplication, QToolTip
 
 from src.db.connection import DualDatabaseEngine
 from src.ui.main_window import PhotoGalleryMainWindow
+from src.utils.scan_logger import install_global_crash_logger
 
 
 def create_app(argv: list[str] | None = None) -> QApplication:
@@ -58,8 +59,17 @@ def create_app(argv: list[str] | None = None) -> QApplication:
 
 
 def main(argv: list[str] | None = None) -> int:
+    install_global_crash_logger()
+
     parser = argparse.ArgumentParser(
         description="Essentials Photo Gallery — Windows Live Photo Gallery 64-Bit Clone"
+    )
+    parser.add_argument(
+        "file_path",
+        nargs="?",
+        type=Path,
+        default=None,
+        help="Optional initial image or video file path (e.g. from Explorer 'Open with...')",
     )
     parser.add_argument(
         "--db-dir",
@@ -94,7 +104,13 @@ def main(argv: list[str] | None = None) -> int:
         window.apply_theme(args.theme)
     window.show()
 
-    if args.scan_folder is not None and args.scan_folder.exists():
+    # If a file was passed via Explorer 'Open with...' or CLI positional argument
+    if args.file_path is not None and args.file_path.exists():
+        if args.file_path.is_file():
+            window.open_file_on_startup(args.file_path)
+        elif args.file_path.is_dir():
+            window.scan_folder(args.file_path, include_subfolders=True)
+    elif args.scan_folder is not None and args.scan_folder.exists():
         window.scan_folder(args.scan_folder, include_subfolders=True)
 
     return app.exec()

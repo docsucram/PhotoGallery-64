@@ -2216,7 +2216,10 @@ class CatalogRepository:
         """
         Merges `source_person_id` into `target_person_id`:
         - Reassigns all confirmed and suggested face regions to `target_person_id`
+        - Reassigns rejected suggestions and face rejections without constraint collisions
         - Preserves avatar thumbnail if target has none
+        - Deduplicates any double-assigned face regions on shared photos
+        - Updates running vector centroid for target person
         - Marks affected media dirty and deletes `source_person_id`
         """
         src_id = int(source_person_id)
@@ -2244,6 +2247,18 @@ class CatalogRepository:
                 "UPDATE media_people SET suggested_person_id = ? WHERE suggested_person_id = ?;",
                 (dst_id, src_id),
             )
+            # Reassign rejections without UNIQUE constraint collisions
+            conn.execute(
+                "UPDATE OR IGNORE face_rejections SET person_id = ? WHERE person_id = ?;",
+                (dst_id, src_id),
+            )
+            conn.execute("DELETE FROM face_rejections WHERE person_id = ?;", (src_id,))
+            conn.execute(
+                "UPDATE OR IGNORE face_rejected_suggestions SET person_id = ? WHERE person_id = ?;",
+                (dst_id, src_id),
+            )
+            conn.execute("DELETE FROM face_rejected_suggestions WHERE person_id = ?;", (src_id,))
+
             conn.execute(
                 """
                 UPDATE people
@@ -2263,6 +2278,41 @@ class CatalogRepository:
             )
             conn.execute("DELETE FROM people WHERE id = ?;", (src_id,))
             conn.commit()
+
+        # Deduplicate any duplicate person face tags on photos where both people were tagged
+        try:
+            self.deduplicate_media_people()
+        except Exception:
+            pass
+
+        # Recalculate target person centroid / sub-centroids
+        try:
+            conn = self.engine.catalog_conn()
+            all_emb_rows = conn.execute(
+                "SELECT embedding FROM media_people WHERE person_id = ? AND state = 1 AND embedding IS NOT NULL;",
+                (dst_id,),
+            ).fetchall()
+            if all_emb_rows:
+                from src.core.face_matcher import (
+                    FaceVectorMatcher,
+                    deserialize_embedding,
+                    normalize_vector,
+                    serialize_embedding,
+                )
+                import numpy as np
+                all_vectors = [
+                    deserialize_embedding(bytes(r["embedding"]))
+                    for r in all_emb_rows
+                    if r["embedding"] and len(bytes(r["embedding"])) >= 2048
+                ]
+                if all_vectors:
+                    if len(all_vectors) >= 10:
+                        sub_c = FaceVectorMatcher.compute_sub_centroids(np.stack(all_vectors, axis=0), max_k=5)
+                    else:
+                        sub_c = normalize_vector(np.mean(np.stack(all_vectors, axis=0), axis=0, keepdims=True))
+                    self.update_person_centroid(dst_id, serialize_embedding(sub_c))
+        except Exception:
+            pass
 
     def set_person_display_picture(self, person_id: int, media_id: int) -> bool:
         """
@@ -3421,6 +3471,24 @@ class CatalogRepository:
             (min_lat, max_lat, min_lon, max_lon),
         ).fetchall()
         return [dict(r) for r in rows]
+
+    def get_media_id_by_file_path(self, file_path: Path | str) -> int | None:
+        """Finds media id by full file path."""
+        p = Path(file_path).resolve()
+        norm_f1 = str(p.parent).replace("\\", "/")
+        norm_f2 = str(p.parent)
+        filename = p.name
+        conn = self.engine.catalog_conn()
+        row = conn.execute(
+            """
+            SELECT m.id
+            FROM media m
+            JOIN folders f ON f.id = m.folder_id
+            WHERE (f.path = ? OR f.path = ?) AND m.filename = ? COLLATE NOCASE;
+            """,
+            (norm_f1, norm_f2, filename),
+        ).fetchone()
+        return int(row[0]) if row else None
 
     def get_media_detail(self, media_id: int) -> dict[str, Any]:
         conn = self.engine.catalog_conn()

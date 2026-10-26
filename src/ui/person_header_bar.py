@@ -422,6 +422,9 @@ class PersonHeaderBar(QFrame):
         cnt_text = f"{cnt:,} photo{'s' if cnt != 1 else ''} • Find them quickly by name with search"
         self.lbl_photo_count.setText(cnt_text)
         self.lbl_avatar.setPixmap(make_circular_avatar(thumb_blob, "?", size=48))
+        self.btn_full_photos.setChecked(True)
+        self.btn_face_crops.setChecked(False)
+        self.current_view_mode = "photos"
         self.banner_frame.hide()
         self.updateGeometry()
         self.geometry_changed.emit()
@@ -441,6 +444,9 @@ class PersonHeaderBar(QFrame):
         if not self.repo:
             return
         self.current_person_id = person_id
+        self.btn_full_photos.setChecked(True)
+        self.btn_face_crops.setChecked(False)
+        self.current_view_mode = "photos"
         conn = self.repo.engine.catalog_conn()
         p_row = conn.execute(
             """
@@ -566,17 +572,17 @@ class PersonHeaderBar(QFrame):
         if not self.current_person_id or new_name == self.current_person_name:
             return
         try:
-            self.repo.rename_person(self.current_person_id, new_name)
+            actual_id = self.repo.rename_person(self.current_person_id, new_name)
+            self.current_person_id = actual_id
             self.current_person_name = new_name
-            self.person_renamed.emit(self.current_person_id, new_name)
-            self.load_person(self.current_person_id)
+            self.person_renamed.emit(actual_id, new_name)
+            self.load_person(actual_id)
         except Exception as e:
             QMessageBox.warning(self, "Rename Person", f"Failed to rename person: {e}")
 
     def _set_view_mode(self, mode: str) -> None:
-        if self.current_view_mode != mode:
-            self.current_view_mode = mode
-            self.view_mode_changed.emit(mode)
+        self.current_view_mode = mode
+        self.view_mode_changed.emit(mode)
 
     def _on_avatar_clicked(self, event: Any) -> None:
         if not self.current_person_id or not self.repo:

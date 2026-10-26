@@ -2862,6 +2862,12 @@ class PhotoGalleryMainWindow(QMainWindow):
             return
         self.catalog_repo.merge_people(source_person_id, target_id)
         self.refresh_navigation_and_autocomplete()
+        if hasattr(self, "left_nav_dock"):
+            curr_pids = self.left_nav_dock.current_filter_state().get("person_ids", ())
+            if source_person_id in curr_pids:
+                self.left_nav_dock.select_person(target_id)
+        if hasattr(self, "person_header_bar") and self.person_header_bar.current_person_id == source_person_id:
+            self.person_header_bar.load_person(target_id)
         target_ids = (
             [self.media_viewer.current_media_id]
             if self.central_stack.currentWidget() == self.media_viewer
@@ -2888,8 +2894,15 @@ class PhotoGalleryMainWindow(QMainWindow):
         )
         if not ok or not new_name.strip() or new_name.strip() == old_name:
             return
-        self.catalog_repo.rename_person(person_id, new_name.strip())
+        actual_id = self.catalog_repo.rename_person(person_id, new_name.strip())
         self.refresh_navigation_and_autocomplete()
+        if actual_id != person_id:
+            if hasattr(self, "left_nav_dock"):
+                curr_pids = self.left_nav_dock.current_filter_state().get("person_ids", ())
+                if person_id in curr_pids:
+                    self.left_nav_dock.select_person(actual_id)
+            if hasattr(self, "person_header_bar") and self.person_header_bar.current_person_id == person_id:
+                self.person_header_bar.load_person(actual_id)
         target_ids = (
             [self.media_viewer.current_media_id]
             if self.central_stack.currentWidget() == self.media_viewer
@@ -3126,6 +3139,51 @@ class PhotoGalleryMainWindow(QMainWindow):
                 else:
                     self._push_nav_state({"view": "viewer", "media_id": media_id})
         return ok
+
+    def open_file_on_startup(self, file_path: Path | str) -> bool:
+        """
+        Handles Windows 'Open with...' command-line invocation:
+        1. Resolves path and parent directory.
+        2. Fast-ingests or retrieves media_id from catalog.db with zero lag.
+        3. Opens SingleMediaViewer directly displaying the photo or video.
+        4. Queues background scan on parent folder so Next/Previous arrow navigation works.
+        """
+        target_file = Path(file_path).resolve()
+        if not target_file.is_file():
+            return False
+
+        parent_dir = target_file.parent
+        mid = self.catalog_repo.get_media_id_by_file_path(target_file)
+
+        if mid is None:
+            try:
+                from src.workers.scanner_thumb_worker import extract_media_metadata
+                is_vid = target_file.suffix.lower() in {".mp4", ".mov", ".avi", ".mkv", ".wmv", ".m4v"}
+                meta = extract_media_metadata(target_file, is_video=is_vid)
+                folder_id = self.catalog_repo.upsert_folder(
+                    str(parent_dir).replace("\\", "/"),
+                    parent_dir.name,
+                    None,
+                    int(parent_dir.stat().st_mtime) if parent_dir.exists() else 0,
+                )
+                meta["folder_id"] = folder_id
+                meta["filename"] = target_file.name
+                meta["ext"] = target_file.suffix.lstrip(".").lower()
+                meta["size"] = target_file.stat().st_size
+                meta["mtime"] = int(target_file.stat().st_mtime)
+                mids = self.catalog_repo.bulk_upsert_media([meta])
+                if mids:
+                    mid = mids[0]
+            except Exception as e:
+                logger.warning("Error fast-ingesting startup file '%s': %s", target_file, e)
+
+        # Trigger folder scan in background so neighboring photos load for next/prev navigation
+        if parent_dir.exists():
+            self.scan_folder(parent_dir, include_subfolders=False)
+
+        if mid is not None:
+            return self.open_single_viewer(mid)
+        return False
 
     def show_grid_view(self) -> None:
         if self.media_viewer.has_unsaved_adjustments():
@@ -5454,6 +5512,20 @@ class PhotoGalleryMainWindow(QMainWindow):
                 return
             if self.central_stack.currentWidget() == self.map_view:
                 self.show_grid_view()
+                event.accept()
+                return
+            if hasattr(self, "person_header_bar") and self.person_header_bar.isVisible():
+                if self._nav_index > 0:
+                    self.navigate_history_back()
+                else:
+                    self.open_people_directory_view()
+                event.accept()
+                return
+            if hasattr(self, "people_directory_view") and self.central_stack.currentWidget() == self.people_directory_view:
+                if self._nav_index > 0:
+                    self.navigate_history_back()
+                else:
+                    self.show_grid_view()
                 event.accept()
                 return
             if hasattr(self, "scope_bar") and self.scope_bar.isVisible() and not self.scope_bar.is_pinned():

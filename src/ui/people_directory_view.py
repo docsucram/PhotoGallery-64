@@ -995,25 +995,35 @@ class PeopleDirectoryView(QWidget):
         self.repo.confirm_faces(face_ids, p_id)
 
         # Update centroid / sub-centroids
-        conn = self.repo.engine.catalog_conn()
-        all_emb_rows = conn.execute(
-            "SELECT embedding FROM media_people WHERE person_id = ? AND state = 1 AND embedding IS NOT NULL;",
-            (p_id,),
-        ).fetchall()
-        if all_emb_rows:
-            all_vectors = [deserialize_embedding(bytes(r["embedding"])) for r in all_emb_rows if r["embedding"]]
-            if all_vectors:
-                if len(all_vectors) >= 10:
-                    sub_c = FaceVectorMatcher.compute_sub_centroids(np.stack(all_vectors, axis=0), max_k=5)
-                else:
-                    sub_c = normalize_vector(np.mean(np.stack(all_vectors, axis=0), axis=0, keepdims=True))
-                self.repo.update_person_centroid(p_id, serialize_embedding(sub_c))
+        try:
+            conn = self.repo.engine.catalog_conn()
+            all_emb_rows = conn.execute(
+                "SELECT embedding FROM media_people WHERE person_id = ? AND state = 1 AND embedding IS NOT NULL;",
+                (p_id,),
+            ).fetchall()
+            if all_emb_rows:
+                all_vectors = [
+                    deserialize_embedding(bytes(r["embedding"]))
+                    for r in all_emb_rows
+                    if r["embedding"] and len(bytes(r["embedding"])) >= 2048
+                ]
+                if all_vectors:
+                    if len(all_vectors) >= 10:
+                        sub_c = FaceVectorMatcher.compute_sub_centroids(np.stack(all_vectors, axis=0), max_k=5)
+                    else:
+                        sub_c = normalize_vector(np.mean(np.stack(all_vectors, axis=0), axis=0, keepdims=True))
+                    self.repo.update_person_centroid(p_id, serialize_embedding(sub_c))
+        except Exception:
+            pass
 
         # Set cover face if person has none
-        if matched_person is None or not matched_person.get("thumbnail_blob"):
-            thumb = self.thumb_repo.get_face_thumbnail(face_ids[0])
-            if thumb:
-                self.repo.set_person_thumbnail_blob(p_id, thumb)
+        try:
+            if matched_person is None or not matched_person.get("thumbnail_blob"):
+                thumb = self.thumb_repo.get_face_thumbnail(face_ids[0]) if (self.thumb_repo and face_ids) else None
+                if thumb:
+                    self.repo.set_person_thumbnail_blob(p_id, thumb)
+        except Exception:
+            pass
 
         self.refresh_directory()
         self.directory_updated.emit()
