@@ -15,7 +15,7 @@ from typing import Any
 import cv2
 import numpy as np
 
-from PySide6.QtCore import Qt, QThread, Signal, QRectF, QPointF, QPoint, QTimer
+from PySide6.QtCore import Qt, QThread, Signal, QRectF, QPointF, QPoint, QTimer, QSize
 from PySide6.QtGui import (
     QImage,
     QPixmap,
@@ -141,6 +141,235 @@ def prompt_save_new_file(
 
 
 # =============================================================================
+# Reusable WLPG Studio UI Components (Fine-Tune Style)
+# =============================================================================
+
+class _FineTuneGroup(QFrame):
+    """Clean WLPG white rounded card matching right_tag_dock."""
+    def __init__(self, title: str, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("FineTuneGroup")
+        self.setStyleSheet("""
+            QFrame#FineTuneGroup {
+                background: #FFFFFF;
+                border: 1px solid #D2DFEE;
+                border-radius: 4px;
+            }
+        """)
+        self.vbox = QVBoxLayout(self)
+        self.vbox.setContentsMargins(10, 8, 10, 10)
+        self.vbox.setSpacing(6)
+        if title:
+            lbl = QLabel(title, self)
+            lbl.setStyleSheet("color: #29588C; font-family: 'Segoe UI'; font-size: 9.5pt; font-weight: 600; border: none;")
+            self.vbox.addWidget(lbl)
+
+
+class _AeroFineTuneSlider(QSlider):
+    """High-fidelity Aero horizontal slider with double-click to reset."""
+    def __init__(
+        self,
+        min_val: int = 0,
+        max_val: int = 100,
+        default_val: int = 50,
+        parent: QWidget | None = None,
+        default_value: int | None = None,
+    ) -> None:
+        super().__init__(Qt.Horizontal, parent)
+        if default_value is not None:
+            default_val = default_value
+        self.default_val = default_val
+        self.setRange(min_val, max_val)
+        self.setValue(default_val)
+        self.setFixedHeight(18)
+        self.setStyleSheet("""
+            QSlider::groove:horizontal {
+                height: 4px;
+                background: #D8DFE6;
+                border-radius: 2px;
+            }
+            QSlider::handle:horizontal {
+                background: #0078D7;
+                border: 1px solid #005A9E;
+                width: 10px;
+                margin: -5px 0;
+                border-radius: 2px;
+            }
+            QSlider::handle:horizontal:hover {
+                background: #2B88D8;
+            }
+        """)
+
+    def mouseDoubleClickEvent(self, event) -> None:
+        self.setValue(self.default_val)
+        event.accept()
+
+
+class CreateStudioZoomBar(QFrame):
+    """
+    Standard Windows Live Photo Gallery zoom status bar component:
+    Matches main_window bottom status bar controls exactly (Fit/100%, Zoom Out, Slider, Zoom In, Pct).
+    """
+    zoom_in_clicked = Signal()
+    zoom_out_clicked = Signal()
+    fit_toggle_clicked = Signal()
+    zoom_slider_moved = Signal(int)
+
+    # Aliases
+    fitRequested = fit_toggle_clicked
+    zoomInRequested = zoom_in_clicked
+    zoomOutRequested = zoom_out_clicked
+    zoomSliderMoved = zoom_slider_moved
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setFixedHeight(24)
+        self.setStyleSheet("""
+            QFrame {
+                background: transparent;
+                border: none;
+            }
+            QPushButton {
+                background: transparent;
+                border: 1px solid transparent;
+                border-radius: 2px;
+                padding: 1px;
+            }
+            QPushButton:hover {
+                background: #E5F1FB;
+                border: 1px solid #70C0E7;
+            }
+            QPushButton:pressed {
+                background: #CCE4F7;
+                border: 1px solid #0078D7;
+            }
+            QSlider::groove:horizontal {
+                height: 4px;
+                background: #B4B4B4;
+                border-radius: 2px;
+            }
+            QSlider::handle:horizontal {
+                background: #0078D7;
+                border: 1px solid #005A9E;
+                width: 10px;
+                margin: -5px 0;
+                border-radius: 2px;
+            }
+            QSlider::handle:horizontal:hover {
+                background: #2B88D8;
+            }
+        """)
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(4)
+
+        self.btn_fit = QPushButton(self)
+        self.btn_fit.setFixedSize(22, 22)
+        self.btn_fit.setIcon(make_wlpg_icon("actual_size", 16))
+        self.btn_fit.setToolTip("Fit to window / Actual size (Ctrl+0)")
+        self.btn_fit.clicked.connect(self.fit_toggle_clicked.emit)
+        layout.addWidget(self.btn_fit)
+
+        self.btn_zoom_out = QPushButton(self)
+        self.btn_zoom_out.setFixedSize(22, 22)
+        self.btn_zoom_out.setIcon(make_wlpg_icon("zoom_out", 16))
+        self.btn_zoom_out.setToolTip("Zoom out (-)")
+        self.btn_zoom_out.clicked.connect(self.zoom_out_clicked.emit)
+        layout.addWidget(self.btn_zoom_out)
+
+        self.slider = QSlider(Qt.Horizontal, self)
+        self.slider.setRange(20, 300)
+        self.slider.setValue(100)
+        self.slider.setFixedWidth(95)
+        self.slider.setToolTip("Zoom level")
+        self.slider.valueChanged.connect(self.zoom_slider_moved.emit)
+        layout.addWidget(self.slider)
+
+        self.btn_zoom_in = QPushButton(self)
+        self.btn_zoom_in.setFixedSize(22, 22)
+        self.btn_zoom_in.setIcon(make_wlpg_icon("zoom_in", 16))
+        self.btn_zoom_in.setToolTip("Zoom in (+)")
+        self.btn_zoom_in.clicked.connect(self.zoom_in_clicked.emit)
+        layout.addWidget(self.btn_zoom_in)
+
+        self.lbl_pct = QLabel("100%", self)
+        self.lbl_pct.setStyleSheet("font-size: 11px; font-weight: 600; color: #444; min-width: 38px; padding-left: 2px;")
+        layout.addWidget(self.lbl_pct)
+
+    def set_zoom_level(self, percent: int) -> None:
+        self.slider.blockSignals(True)
+        self.slider.setValue(max(20, min(300, percent)))
+        self.slider.blockSignals(False)
+        self.lbl_pct.setText(f"{percent}%")
+
+    def update_zoom_display(self, scale_val: float) -> None:
+        pct = int(round(scale_val * 100))
+        self.set_zoom_level(pct)
+
+    def set_is_fit(self, is_fit: bool) -> None:
+        if is_fit:
+            self.btn_fit.setToolTip("Switch to 100% actual size (Ctrl+0)")
+        else:
+            self.btn_fit.setToolTip("Fit photo to canvas window (Ctrl+0)")
+
+
+class ZoomablePreviewCanvas(QGraphicsView):
+    """
+    Interactive zoomable/pannable canvas for creative tools previews:
+    - Wheel zoom with zoom_changed signal.
+    - Space+Drag and Middle-button drag for fluid panning.
+    """
+    zoom_changed = Signal(float)
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setRenderHint(QPainter.Antialiasing, True)
+        self.setRenderHint(QPainter.SmoothPixmapTransform, True)
+        self.setTransformationAnchor(QGraphicsView.AnchorUnderMouse)
+        self.setResizeAnchor(QGraphicsView.AnchorViewCenter)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.setStyleSheet("background: #1C1C1E; border: 1px solid #555558; border-radius: 4px;")
+        self._space_pressed: bool = False
+
+    def wheelEvent(self, event) -> None:
+        factor = 1.15 if event.angleDelta().y() > 0 else 1.0 / 1.15
+        self.scale(factor, factor)
+        self.zoom_changed.emit(self.transform().m11())
+        event.accept()
+
+    def mousePressEvent(self, event) -> None:
+        if event.button() in (Qt.MiddleButton, Qt.LeftButton) and (self._space_pressed or event.button() == Qt.MiddleButton):
+            self.setDragMode(QGraphicsView.ScrollHandDrag)
+            super().mousePressEvent(event)
+            return
+        super().mousePressEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:
+        if event.button() in (Qt.MiddleButton, Qt.LeftButton):
+            if not self._space_pressed:
+                self.setDragMode(QGraphicsView.NoDrag)
+        super().mouseReleaseEvent(event)
+
+    def keyPressEvent(self, event) -> None:
+        if event.key() == Qt.Key_Space and not self._space_pressed:
+            self._space_pressed = True
+            self.setDragMode(QGraphicsView.ScrollHandDrag)
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+    def keyReleaseEvent(self, event) -> None:
+        if event.key() == Qt.Key_Space:
+            self._space_pressed = False
+            self.setDragMode(QGraphicsView.NoDrag)
+            event.accept()
+            return
+        super().keyReleaseEvent(event)
+
+
+# =============================================================================
 # 1. Panorama Stitcher Dialog (Microsoft ICE-Style)
 # =============================================================================
 
@@ -188,112 +417,194 @@ class PanoramaDialog(QDialog):
         self.current_stitched_bgr: np.ndarray | None = None
         self.raw_stitched_bgr: np.ndarray | None = None
         self._worker: PanoramaWorker | None = None
+        self._is_fit_mode: bool = True
 
         self.setWindowTitle("Create Panorama — Windows Live Photo Gallery")
         self.setWindowIcon(make_wlpg_icon("panoramic", 24))
-        self.resize(1000, 680)
+        self.resize(1240, 800)
+        self.setMinimumSize(960, 620)
         self._init_ui()
         self._load_and_stitch()
 
     def _init_ui(self) -> None:
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(16, 12, 16, 16)
-        layout.setSpacing(10)
+        main_layout = QHBoxLayout(self)
+        main_layout.setContentsMargins(10, 10, 10, 10)
+        main_layout.setSpacing(10)
 
-        # Header
-        lbl_title = QLabel("Microsoft Image Composite Editor (ICE) Panorama Stitcher")
-        lbl_title.setStyleSheet("font-size: 16px; font-weight: bold; color: #1e395b;")
-        lbl_subtitle = QLabel(f"Stitching {len(self.photo_paths)} overlapping photos into a seamless wide-angle panorama.")
-        lbl_subtitle.setStyleSheet("color: #555555; font-size: 12px;")
-        layout.addWidget(lbl_title)
-        layout.addWidget(lbl_subtitle)
+        # ---------------- Left: Canvas & Status / Zoom Bar ----------------
+        left_widget = QWidget(self)
+        left_layout = QVBoxLayout(left_widget)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+        left_layout.setSpacing(6)
 
-        # Settings bar
-        bar_frame = QFrame()
-        bar_frame.setStyleSheet("background: #f4f6fa; border: 1px solid #d0d7e5; border-radius: 4px; padding: 4px;")
-        bar_layout = QHBoxLayout(bar_frame)
-        bar_layout.setContentsMargins(8, 4, 8, 4)
-        bar_layout.setSpacing(12)
+        self.preview_view = ZoomablePreviewCanvas(self)
+        self.preview_scene = QGraphicsScene(self)
+        self.preview_view.setScene(self.preview_scene)
+        self.preview_view.setStyleSheet("background: #1C1C1E; border: 1px solid #555558; border-radius: 4px;")
+        self.preview_pixmap_item = QGraphicsPixmapItem()
+        self.preview_scene.addItem(self.preview_pixmap_item)
+        self.preview_view.zoom_changed.connect(self._on_zoom_changed)
+        left_layout.addWidget(self.preview_view, 1)
 
-        bar_layout.addWidget(QLabel("Projection Mode:"))
-        self.cmb_projection = QComboBox()
+        # Status & Zoom Controls Bar
+        status_bar = QHBoxLayout()
+        status_bar.setContentsMargins(4, 2, 4, 2)
+        status_bar.setSpacing(8)
+
+        self.progress_bar = QProgressBar(self)
+        self.progress_bar.setRange(0, 0)
+        self.progress_bar.setFixedSize(110, 12)
+        self.progress_bar.setStyleSheet(
+            "QProgressBar { height: 12px; border: 1px solid #c0c0c0; border-radius: 2px; background: #e0e0e0; } "
+            "QProgressBar::chunk { background: #2D72BC; }"
+        )
+        self.progress_bar.setVisible(False)
+        status_bar.addWidget(self.progress_bar)
+
+        self.lbl_status = QLabel("Ready", self)
+        self.lbl_status.setStyleSheet("color: #444; font-size: 11px;")
+        status_bar.addWidget(self.lbl_status)
+
+        status_bar.addStretch(1)
+
+        self.lbl_dims = QLabel("", self)
+        self.lbl_dims.setStyleSheet("color: #666; font-size: 11px; margin-right: 8px;")
+        status_bar.addWidget(self.lbl_dims)
+
+        self.zoom_bar = CreateStudioZoomBar(self)
+        self.zoom_bar.fitRequested.connect(self._toggle_fit_zoom)
+        self.zoom_bar.zoomInRequested.connect(lambda: self._apply_zoom(1.25))
+        self.zoom_bar.zoomOutRequested.connect(lambda: self._apply_zoom(1.0 / 1.25))
+        self.zoom_bar.zoomSliderMoved.connect(self._on_slider_zoom_moved)
+        status_bar.addWidget(self.zoom_bar)
+
+        left_layout.addLayout(status_bar)
+        main_layout.addWidget(left_widget, 1)
+
+        # ---------------- Right: Settings Sidebar ----------------
+        sidebar_scroll = QScrollArea(self)
+        sidebar_scroll.setFixedWidth(280)
+        sidebar_scroll.setWidgetResizable(True)
+        sidebar_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        sidebar_scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
+
+        sidebar_content = QWidget()
+        sidebar_layout = QVBoxLayout(sidebar_content)
+        sidebar_layout.setContentsMargins(0, 0, 4, 0)
+        sidebar_layout.setSpacing(8)
+
+        # 1. Projection Mode
+        grp_proj = _FineTuneGroup("Projection Mode")
+        self.cmb_projection = QComboBox(self)
         self.cmb_projection.addItems([
             "Cylindrical (Standard Wide)",
             "Spherical (360 / Multi-Row)",
             "Planar / Perspective (Document / Whiteboard Scan)",
         ])
         self.cmb_projection.currentIndexChanged.connect(self._on_settings_changed)
-        bar_layout.addWidget(self.cmb_projection)
+        grp_proj.layout().addWidget(self.cmb_projection)
 
-        self.chk_autocrop = QCheckBox("Auto-crop wavy black edges (Signature ICE)")
+        self.btn_restitch = QPushButton(" Re-Stitch Panorama", self)
+        self.btn_restitch.setIcon(make_wlpg_icon("refresh", 16))
+        self.btn_restitch.setStyleSheet("padding: 5px 10px; border: 1px solid #7a96df; border-radius: 3px; background: #eef3fa;")
+        self.btn_restitch.clicked.connect(self._load_and_stitch)
+        grp_proj.layout().addWidget(self.btn_restitch)
+        sidebar_layout.addWidget(grp_proj)
+
+        # 2. Border & Edge Treatment
+        grp_border = _FineTuneGroup("Border & Edge Treatment")
+        self.chk_autocrop = QCheckBox("Auto-crop black edges (ICE)")
         self.chk_autocrop.setChecked(True)
         self.chk_autocrop.setToolTip("Computes the largest axis-aligned interior rectangle containing zero black border pixels.")
         self.chk_autocrop.toggled.connect(self._on_crop_or_inpaint_toggled)
-        bar_layout.addWidget(self.chk_autocrop)
+        grp_border.layout().addWidget(self.chk_autocrop)
 
         self.chk_inpaint = QCheckBox("Fill minor border gaps (Inpaint)")
         self.chk_inpaint.setChecked(False)
         self.chk_inpaint.setToolTip("Inpaints minor sky/grass corner gaps using Telea diffusion before cropping.")
         self.chk_inpaint.toggled.connect(self._on_crop_or_inpaint_toggled)
-        bar_layout.addWidget(self.chk_inpaint)
+        grp_border.layout().addWidget(self.chk_inpaint)
+        sidebar_layout.addWidget(grp_border)
 
-        bar_layout.addStretch(1)
+        # 3. Source Info
+        grp_info = _FineTuneGroup("Source Photos")
+        lbl_info = QLabel(f"Combining {len(self.photo_paths)} overlapping photos into a wide-angle composite.", self)
+        lbl_info.setWordWrap(True)
+        lbl_info.setStyleSheet("color: #555; font-size: 11px;")
+        grp_info.layout().addWidget(lbl_info)
+        sidebar_layout.addWidget(grp_info)
 
-        self.btn_restitch = QPushButton("Re-Stitch")
-        self.btn_restitch.setStyleSheet("background: #e1e7f0; border: 1px solid #7a96df; padding: 4px 12px; border-radius: 3px;")
-        self.btn_restitch.clicked.connect(self._load_and_stitch)
-        bar_layout.addWidget(self.btn_restitch)
+        sidebar_layout.addStretch(1)
 
-        layout.addWidget(bar_frame)
+        # Save and Cancel
+        btn_box = QHBoxLayout()
+        btn_box.setSpacing(6)
 
-        # Interactive Preview Canvas
-        self.preview_view = QGraphicsView()
-        self.preview_scene = QGraphicsScene(self)
-        self.preview_view.setScene(self.preview_scene)
-        self.preview_view.setStyleSheet("background: #252528; border: 1px solid #a0a0a0; border-radius: 4px;")
-        self.preview_pixmap_item = QGraphicsPixmapItem()
-        self.preview_scene.addItem(self.preview_pixmap_item)
-        layout.addWidget(self.preview_view, 1)
-
-        # Progress bar
-        self.progress_bar = QProgressBar()
-        self.progress_bar.setRange(0, 0)
-        self.progress_bar.setStyleSheet("QProgressBar { height: 6px; border: none; background: #e0e0e0; } QProgressBar::chunk { background: #2D72BC; }")
-        self.lbl_status = QLabel("Ready")
-        self.lbl_status.setStyleSheet("color: #666; font-size: 11px;")
-
-        prog_layout = QHBoxLayout()
-        prog_layout.addWidget(self.progress_bar)
-        prog_layout.addWidget(self.lbl_status)
-        layout.addLayout(prog_layout)
-
-        # Bottom Buttons
-        btn_layout = QHBoxLayout()
-        self.lbl_dims = QLabel("")
-        self.lbl_dims.setStyleSheet("color: #444; font-size: 11px;")
-        btn_layout.addWidget(self.lbl_dims)
-        btn_layout.addStretch(1)
-
-        self.btn_save = QPushButton("Save New Panorama...")
+        self.btn_save = QPushButton("Save New...", self)
         self.btn_save.setEnabled(False)
         self.btn_save.setStyleSheet("""
             QPushButton {
                 background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #3c82e6, stop:1 #1c52ba);
                 color: white; font-weight: bold; border: 1px solid #143e8c;
-                border-radius: 4px; padding: 6px 18px; min-width: 110px;
+                border-radius: 4px; padding: 6px 14px; min-width: 90px;
             }
             QPushButton:hover { background: #4d8ff2; }
             QPushButton:disabled { background: #cccccc; color: #888888; border: 1px solid #aaaaaa; }
         """)
         self.btn_save.clicked.connect(self._save_panorama)
-        btn_layout.addWidget(self.btn_save)
+        btn_box.addWidget(self.btn_save, 1)
 
-        self.btn_cancel = QPushButton("Cancel")
-        self.btn_cancel.setStyleSheet("padding: 6px 14px; border-radius: 4px; border: 1px solid #ccc; background: #f0f0f0;")
+        self.btn_cancel = QPushButton("Cancel", self)
+        self.btn_cancel.setStyleSheet("padding: 6px 12px; border-radius: 4px; border: 1px solid #ccc; background: #f0f0f0;")
         self.btn_cancel.clicked.connect(self.reject)
-        btn_layout.addWidget(self.btn_cancel)
+        btn_box.addWidget(self.btn_cancel)
 
-        layout.addLayout(btn_layout)
+        sidebar_layout.addLayout(btn_box)
+
+        sidebar_scroll.setWidget(sidebar_content)
+        main_layout.addWidget(sidebar_scroll)
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        if getattr(self, "_is_fit_mode", True) and hasattr(self, "preview_view") and hasattr(self, "preview_scene"):
+            if self.preview_scene.sceneRect().isValid() and self.preview_scene.sceneRect().width() > 0:
+                self.preview_view.fitInView(self.preview_scene.sceneRect(), Qt.KeepAspectRatio)
+
+    def _toggle_fit_zoom(self) -> None:
+        if not hasattr(self, "preview_scene") or not self.preview_scene.sceneRect().isValid() or self.preview_scene.sceneRect().width() == 0:
+            return
+        if self._is_fit_mode:
+            self._is_fit_mode = False
+            self.preview_view.resetTransform()
+            self._on_zoom_changed(1.0)
+            self.zoom_bar.set_is_fit(False)
+        else:
+            self._is_fit_mode = True
+            self.preview_view.fitInView(self.preview_scene.sceneRect(), Qt.KeepAspectRatio)
+            current_scale = self.preview_view.transform().m11()
+            self._on_zoom_changed(current_scale)
+            self.zoom_bar.set_is_fit(True)
+
+    def _apply_zoom(self, factor: float) -> None:
+        self._is_fit_mode = False
+        self.zoom_bar.set_is_fit(False)
+        self.preview_view.scale(factor, factor)
+        current_scale = self.preview_view.transform().m11()
+        self._on_zoom_changed(current_scale)
+
+    def _on_slider_zoom_moved(self, pct: int) -> None:
+        self._is_fit_mode = False
+        self.zoom_bar.set_is_fit(False)
+        target_scale = max(0.1, min(5.0, pct / 100.0))
+        current_scale = self.preview_view.transform().m11()
+        if abs(current_scale) > 1e-4:
+            factor = target_scale / current_scale
+            self.preview_view.scale(factor, factor)
+        self._on_zoom_changed(target_scale)
+
+    def _on_zoom_changed(self, scale_val: float) -> None:
+        if hasattr(self, "zoom_bar"):
+            self.zoom_bar.update_zoom_display(scale_val)
 
     def _load_and_stitch(self) -> None:
         self.progress_bar.setVisible(True)
@@ -351,13 +662,15 @@ class PanoramaDialog(QDialog):
         self.btn_save.setEnabled(True)
 
         h, w = self.current_stitched_bgr.shape[:2]
-        self.lbl_dims.setText(f"Dimensions: {w} × {h} px ({w * h // 1_000_000} MP)")
+        self.lbl_dims.setText(f"{w} × {h} px ({w * h // 1_000_000} MP)")
 
         # Render preview pixmap
         pm = _cv2_to_qpixmap(self.current_stitched_bgr)
         self.preview_pixmap_item.setPixmap(pm)
         self.preview_scene.setSceneRect(QRectF(pm.rect()))
-        self.preview_view.fitInView(self.preview_scene.sceneRect(), Qt.KeepAspectRatio)
+        if self._is_fit_mode:
+            self.preview_view.fitInView(self.preview_scene.sceneRect(), Qt.KeepAspectRatio)
+            self._on_zoom_changed(self.preview_view.transform().m11())
 
     def _on_settings_changed(self) -> None:
         # Re-stitch when projection mode changes
@@ -405,152 +718,220 @@ class CollageDialog(QDialog):
         self.output_dir = Path(photos_data[0]["file_path"]).parent if photos_data and photos_data[0].get("file_path") else Path.home()
         self.saved_file_path: Path | None = None
         self.rendered_bgr: np.ndarray | None = None
+        self._is_fit_mode: bool = True
 
         self.bg_color = QColor(245, 245, 248)
         self.bg_texture = "dark_wood"
 
         self.setWindowTitle("Create Collage — Windows Live Photo Gallery")
         self.setWindowIcon(make_wlpg_icon("collage", 24))
-        self.resize(1060, 720)
+        self.resize(1240, 800)
+        self.setMinimumSize(960, 620)
         self._init_ui()
         self._render_preview()
 
     def _init_ui(self) -> None:
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(12, 12, 12, 12)
-        layout.setSpacing(12)
+        main_layout = QHBoxLayout(self)
+        main_layout.setContentsMargins(10, 10, 10, 10)
+        main_layout.setSpacing(10)
 
-        # Left Controls Panel
-        ctrl_panel = QFrame()
-        ctrl_panel.setFixedWidth(280)
-        ctrl_panel.setStyleSheet("background: #f7f9fc; border: 1px solid #d4dae6; border-radius: 6px; padding: 6px;")
-        ctrl_layout = QVBoxLayout(ctrl_panel)
-        ctrl_layout.setContentsMargins(8, 8, 8, 8)
-        ctrl_layout.setSpacing(10)
+        # ---------------- Left: Canvas & Status / Zoom Bar ----------------
+        left_widget = QWidget(self)
+        left_layout = QVBoxLayout(left_widget)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+        left_layout.setSpacing(6)
 
-        lbl_header = QLabel("Collage Studio")
-        lbl_header.setStyleSheet("font-size: 15px; font-weight: bold; color: #1e395b;")
-        ctrl_layout.addWidget(lbl_header)
+        self.preview_view = ZoomablePreviewCanvas(self)
+        self.preview_scene = QGraphicsScene(self)
+        self.preview_view.setScene(self.preview_scene)
+        self.preview_view.setStyleSheet("background: #1C1C1E; border: 1px solid #555558; border-radius: 4px;")
+        self.preview_pixmap_item = QGraphicsPixmapItem()
+        self.preview_scene.addItem(self.preview_pixmap_item)
+        self.preview_view.zoom_changed.connect(self._on_zoom_changed)
+        left_layout.addWidget(self.preview_view, 1)
 
-        # Style Tabs/Buttons
-        ctrl_layout.addWidget(QLabel("Layout Style:"))
-        self.cmb_style = QComboBox()
+        # Status & Zoom bar
+        status_bar = QHBoxLayout()
+        status_bar.setContentsMargins(4, 2, 4, 2)
+        status_bar.setSpacing(8)
+
+        self.lbl_info = QLabel("Interactive Preview", self)
+        self.lbl_info.setStyleSheet("color: #555; font-size: 11px;")
+        status_bar.addWidget(self.lbl_info)
+
+        status_bar.addStretch(1)
+
+        self.zoom_bar = CreateStudioZoomBar(self)
+        self.zoom_bar.fitRequested.connect(self._toggle_fit_zoom)
+        self.zoom_bar.zoomInRequested.connect(lambda: self._apply_zoom(1.25))
+        self.zoom_bar.zoomOutRequested.connect(lambda: self._apply_zoom(1.0 / 1.25))
+        self.zoom_bar.zoomSliderMoved.connect(self._on_slider_zoom_moved)
+        status_bar.addWidget(self.zoom_bar)
+
+        left_layout.addLayout(status_bar)
+        main_layout.addWidget(left_widget, 1)
+
+        # ---------------- Right: Settings Sidebar ----------------
+        sidebar_scroll = QScrollArea(self)
+        sidebar_scroll.setFixedWidth(280)
+        sidebar_scroll.setWidgetResizable(True)
+        sidebar_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        sidebar_scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
+
+        sidebar_content = QWidget()
+        sidebar_layout = QVBoxLayout(sidebar_content)
+        sidebar_layout.setContentsMargins(0, 0, 4, 0)
+        sidebar_layout.setSpacing(8)
+
+        # 1. Layout Style
+        grp_style = _FineTuneGroup("Layout Style")
+        self.cmb_style = QComboBox(self)
         self.cmb_style.addItems([
             "Modern Grid / Masonry",
             "Polaroid Table Scatter",
             "Then & Now Comparison Card",
         ])
         self.cmb_style.currentIndexChanged.connect(self._on_style_changed)
-        ctrl_layout.addWidget(self.cmb_style)
+        grp_style.layout().addWidget(self.cmb_style)
 
-        # Grid-specific controls
-        self.frame_grid_opts = QFrame()
-        grid_opts_layout = QVBoxLayout(self.frame_grid_opts)
-        grid_opts_layout.setContentsMargins(0, 0, 0, 0)
-        grid_opts_layout.setSpacing(8)
+        self.btn_shuffle = QPushButton(" Shuffle Photo Order", self)
+        self.btn_shuffle.setIcon(make_wlpg_icon("shuffle", 16))
+        self.btn_shuffle.setStyleSheet("padding: 5px 10px; border: 1px solid #7a96df; border-radius: 3px; background: #eef3fa;")
+        self.btn_shuffle.clicked.connect(self._shuffle_photos)
+        grp_style.layout().addWidget(self.btn_shuffle)
+        sidebar_layout.addWidget(grp_style)
 
-        grid_opts_layout.addWidget(QLabel("Grid Arrangement:"))
-        self.cmb_grid_layout = QComboBox()
+        # 2. Grid Options
+        self.grp_grid = _FineTuneGroup("Grid Arrangement & Border")
+        self.cmb_grid_layout = QComboBox(self)
         self.cmb_grid_layout.addItems(["2x2", "2x1", "3x2", "Center Hero", "Masonry"])
         self.cmb_grid_layout.currentIndexChanged.connect(self._render_preview)
-        grid_opts_layout.addWidget(self.cmb_grid_layout)
+        self.grp_grid.layout().addWidget(self.cmb_grid_layout)
 
-        grid_opts_layout.addWidget(QLabel("Border Thickness (0..40px):"))
-        self.sld_border = QSlider(Qt.Horizontal)
+        lbl_b = QLabel("Border Thickness:")
+        lbl_b.setStyleSheet("font-size: 11px; color: #444; margin-top: 4px;")
+        self.grp_grid.layout().addWidget(lbl_b)
+        self.sld_border = _AeroFineTuneSlider(default_value=12)
         self.sld_border.setRange(0, 40)
         self.sld_border.setValue(12)
         self.sld_border.valueChanged.connect(self._render_preview)
-        grid_opts_layout.addWidget(self.sld_border)
+        self.grp_grid.layout().addWidget(self.sld_border)
 
-        grid_opts_layout.addWidget(QLabel("Corner Rounding (0..24px):"))
-        self.sld_corner = QSlider(Qt.Horizontal)
+        lbl_c = QLabel("Corner Rounding:")
+        lbl_c.setStyleSheet("font-size: 11px; color: #444; margin-top: 4px;")
+        self.grp_grid.layout().addWidget(lbl_c)
+        self.sld_corner = _AeroFineTuneSlider(default_value=8)
         self.sld_corner.setRange(0, 24)
         self.sld_corner.setValue(8)
         self.sld_corner.valueChanged.connect(self._render_preview)
-        grid_opts_layout.addWidget(self.sld_corner)
+        self.grp_grid.layout().addWidget(self.sld_corner)
 
-        self.btn_bg_color = QPushButton("Pick Background Colour")
+        self.btn_bg_color = QPushButton(" Pick Background Colour", self)
+        self.btn_bg_color.setIcon(make_wlpg_icon("pipette", 16))
+        self.btn_bg_color.setStyleSheet("padding: 4px 8px; border: 1px solid #c0c0c0; border-radius: 3px; background: #ffffff;")
         self.btn_bg_color.clicked.connect(self._pick_bg_color)
-        grid_opts_layout.addWidget(self.btn_bg_color)
-        ctrl_layout.addWidget(self.frame_grid_opts)
+        self.grp_grid.layout().addWidget(self.btn_bg_color)
+        sidebar_layout.addWidget(self.grp_grid)
 
-        # Polaroid-specific controls
-        self.frame_polaroid_opts = QFrame()
-        self.frame_polaroid_opts.setVisible(False)
-        pol_layout = QVBoxLayout(self.frame_polaroid_opts)
-        pol_layout.setContentsMargins(0, 0, 0, 0)
-        pol_layout.setSpacing(8)
-
-        pol_layout.addWidget(QLabel("Canvas Texture:"))
-        self.cmb_texture = QComboBox()
+        # 3. Polaroid Options
+        self.grp_polaroid = _FineTuneGroup("Polaroid Settings")
+        self.grp_polaroid.setVisible(False)
+        self.cmb_texture = QComboBox(self)
         self.cmb_texture.addItems(["Mahogany Wood", "Clean Linen", "Modern Slate"])
         self.cmb_texture.currentIndexChanged.connect(self._render_preview)
-        pol_layout.addWidget(self.cmb_texture)
+        self.grp_polaroid.layout().addWidget(self.cmb_texture)
 
         self.chk_captions = QCheckBox("Print Date / Caption on Border")
         self.chk_captions.setChecked(True)
         self.chk_captions.toggled.connect(self._render_preview)
-        pol_layout.addWidget(self.chk_captions)
-        ctrl_layout.addWidget(self.frame_polaroid_opts)
+        self.grp_polaroid.layout().addWidget(self.chk_captions)
+        sidebar_layout.addWidget(self.grp_polaroid)
 
-        # Export Resolution
-        ctrl_layout.addSpacing(10)
-        ctrl_layout.addWidget(QLabel("Export Resolution:"))
-        self.cmb_resolution = QComboBox()
+        # 4. Export Resolution
+        grp_res = _FineTuneGroup("Export Resolution")
+        self.cmb_resolution = QComboBox(self)
         self.cmb_resolution.addItems([
             "4K UHD (3840 × 2160)",
             "Full HD (1920 × 1080)",
             "A4 Print 300 DPI (3508 × 2480)",
         ])
         self.cmb_resolution.currentIndexChanged.connect(self._render_preview)
-        ctrl_layout.addWidget(self.cmb_resolution)
+        grp_res.layout().addWidget(self.cmb_resolution)
+        sidebar_layout.addWidget(grp_res)
 
-        ctrl_layout.addStretch(1)
-
-        # Shuffle Button
-        self.btn_shuffle = QPushButton("🔀 Shuffle Photo Order")
-        self.btn_shuffle.setStyleSheet("background: #ffffff; border: 1px solid #b0c2de; border-radius: 3px; padding: 5px;")
-        self.btn_shuffle.clicked.connect(self._shuffle_photos)
-        ctrl_layout.addWidget(self.btn_shuffle)
+        sidebar_layout.addStretch(1)
 
         # Save and Cancel
-        self.btn_save = QPushButton("Save New Collage...")
+        btn_box = QHBoxLayout()
+        btn_box.setSpacing(6)
+
+        self.btn_save = QPushButton("Save New...", self)
         self.btn_save.setStyleSheet("""
             QPushButton {
                 background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #3c82e6, stop:1 #1c52ba);
                 color: white; font-weight: bold; border: 1px solid #143e8c;
-                border-radius: 4px; padding: 7px 18px;
+                border-radius: 4px; padding: 6px 14px; min-width: 90px;
             }
             QPushButton:hover { background: #4d8ff2; }
         """)
         self.btn_save.clicked.connect(self._save_collage)
-        ctrl_layout.addWidget(self.btn_save)
+        btn_box.addWidget(self.btn_save, 1)
 
-        btn_cancel = QPushButton("Cancel")
+        btn_cancel = QPushButton("Cancel", self)
+        btn_cancel.setStyleSheet("padding: 6px 12px; border-radius: 4px; border: 1px solid #ccc; background: #f0f0f0;")
         btn_cancel.clicked.connect(self.reject)
-        ctrl_layout.addWidget(btn_cancel)
+        btn_box.addWidget(btn_cancel)
 
-        layout.addWidget(ctrl_panel)
+        sidebar_layout.addLayout(btn_box)
 
-        # Right Preview Area
-        right_panel = QVBoxLayout()
-        self.preview_view = QGraphicsView()
-        self.preview_scene = QGraphicsScene(self)
-        self.preview_view.setScene(self.preview_scene)
-        self.preview_view.setStyleSheet("background: #1e1e20; border: 1px solid #999; border-radius: 6px;")
-        self.preview_pixmap_item = QGraphicsPixmapItem()
-        self.preview_scene.addItem(self.preview_pixmap_item)
-        right_panel.addWidget(self.preview_view, 1)
+        sidebar_scroll.setWidget(sidebar_content)
+        main_layout.addWidget(sidebar_scroll)
 
-        self.lbl_info = QLabel("Interactive Preview")
-        self.lbl_info.setStyleSheet("color: #555; font-size: 11px;")
-        right_panel.addWidget(self.lbl_info)
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        if getattr(self, "_is_fit_mode", True) and hasattr(self, "preview_view") and hasattr(self, "preview_scene"):
+            if self.preview_scene.sceneRect().isValid() and self.preview_scene.sceneRect().width() > 0:
+                self.preview_view.fitInView(self.preview_scene.sceneRect(), Qt.KeepAspectRatio)
 
-        layout.addLayout(right_panel, 1)
+    def _toggle_fit_zoom(self) -> None:
+        if not hasattr(self, "preview_scene") or not self.preview_scene.sceneRect().isValid() or self.preview_scene.sceneRect().width() == 0:
+            return
+        if self._is_fit_mode:
+            self._is_fit_mode = False
+            self.preview_view.resetTransform()
+            self._on_zoom_changed(1.0)
+            self.zoom_bar.set_is_fit(False)
+        else:
+            self._is_fit_mode = True
+            self.preview_view.fitInView(self.preview_scene.sceneRect(), Qt.KeepAspectRatio)
+            current_scale = self.preview_view.transform().m11()
+            self._on_zoom_changed(current_scale)
+            self.zoom_bar.set_is_fit(True)
+
+    def _apply_zoom(self, factor: float) -> None:
+        self._is_fit_mode = False
+        self.zoom_bar.set_is_fit(False)
+        self.preview_view.scale(factor, factor)
+        current_scale = self.preview_view.transform().m11()
+        self._on_zoom_changed(current_scale)
+
+    def _on_slider_zoom_moved(self, pct: int) -> None:
+        self._is_fit_mode = False
+        self.zoom_bar.set_is_fit(False)
+        target_scale = max(0.1, min(5.0, pct / 100.0))
+        current_scale = self.preview_view.transform().m11()
+        if abs(current_scale) > 1e-4:
+            factor = target_scale / current_scale
+            self.preview_view.scale(factor, factor)
+        self._on_zoom_changed(target_scale)
+
+    def _on_zoom_changed(self, scale_val: float) -> None:
+        if hasattr(self, "zoom_bar"):
+            self.zoom_bar.update_zoom_display(scale_val)
 
     def _on_style_changed(self, idx: int) -> None:
-        self.frame_grid_opts.setVisible(idx == 0)
-        self.frame_polaroid_opts.setVisible(idx == 1)
+        self.grp_grid.setVisible(idx == 0)
+        self.grp_polaroid.setVisible(idx == 1)
         self._render_preview()
 
     def _pick_bg_color(self) -> None:
@@ -642,9 +1023,11 @@ class CollageDialog(QDialog):
         pm = _cv2_to_qpixmap(rendered)
         self.preview_pixmap_item.setPixmap(pm)
         self.preview_scene.setSceneRect(QRectF(pm.rect()))
-        self.preview_view.fitInView(self.preview_scene.sceneRect(), Qt.KeepAspectRatio)
+        if self._is_fit_mode:
+            self.preview_view.fitInView(self.preview_scene.sceneRect(), Qt.KeepAspectRatio)
+            self._on_zoom_changed(self.preview_view.transform().m11())
 
-        self.lbl_info.setText(f"Preview: {pw} × {ph} px (Full export: {full_w} × {full_h} px) • {len(self.photos_data)} photos")
+        self.lbl_info.setText(f"{pw} × {ph} px (Full: {full_w} × {full_h}) • {len(self.photos_data)} photos")
 
     def _save_collage(self) -> None:
         first_path = self.photos_data[0].get("file_path") if self.photos_data else None
@@ -666,16 +1049,6 @@ class CollageDialog(QDialog):
             self.accept()
         except Exception as e:
             QMessageBox.critical(self, "Save Collage Failed", f"Could not save collage file:\n{e}")
-        out_path = prompt_save_new_file(self, first_path, "collage", ".jpg")
-        if not out_path:
-            return
-
-        try:
-            cv2.imwrite(str(out_path), self.rendered_bgr, [int(cv2.IMWRITE_JPEG_QUALITY), 96])
-            self.saved_file_path = out_path
-            self.accept()
-        except Exception as e:
-            QMessageBox.critical(self, "Save Error", f"Could not save collage:\n{e}")
 
 
 # =============================================================================
@@ -723,48 +1096,46 @@ class PhotoFuseDialog(QDialog):
         self.base_fused_bgr: np.ndarray | None = None
         self.face_boxes: list[tuple[int, int, int, int]] = []
         self.selected_face_idx: int = -1
-        self._first_fit: bool = True
+        self._is_fit_mode: bool = True
 
         self.setWindowTitle("Photo Fuse — Best-Face Group Shot Combiner")
         self.setWindowIcon(make_wlpg_icon("photo_fuse", 24))
-        self.resize(1080, 740)
+        self.resize(1240, 800)
+        self.setMinimumSize(960, 620)
         self._init_ui()
         self._align_and_detect()
 
     def _init_ui(self) -> None:
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(14, 12, 14, 14)
-        layout.setSpacing(10)
+        main_layout = QHBoxLayout(self)
+        main_layout.setContentsMargins(10, 10, 10, 10)
+        main_layout.setSpacing(10)
 
-        # Header
-        lbl_title = QLabel("Photo Fuse: Combine the Best Faces from Group Bursts")
-        lbl_title.setStyleSheet("font-size: 16px; font-weight: bold; color: #1e395b;")
-        lbl_sub = QLabel("Click any person's face box on the photo to see and choose their best expression from all burst shots.")
-        lbl_sub.setStyleSheet("color: #555555; font-size: 12px;")
-        layout.addWidget(lbl_title)
-        layout.addWidget(lbl_sub)
+        # ---------------- Left: Canvas + Expression Strip + Zoom Bar ----------------
+        left_widget = QWidget(self)
+        left_layout = QVBoxLayout(left_widget)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+        left_layout.setSpacing(6)
 
-        # Main interactive canvas
-        self.view = QGraphicsView()
+        # Canvas
+        self.view = ZoomablePreviewCanvas(self)
         self.scene = QGraphicsScene(self)
         self.view.setScene(self.scene)
-        self.view.setRenderHint(QPainter.Antialiasing, True)
-        self.view.setRenderHint(QPainter.SmoothPixmapTransform, True)
-        self.view.setStyleSheet("background: #252528; border: 1px solid #777; border-radius: 4px;")
+        self.view.setStyleSheet("background: #1C1C1E; border: 1px solid #555558; border-radius: 4px;")
         self.bg_item = QGraphicsPixmapItem()
         self.scene.addItem(self.bg_item)
-        layout.addWidget(self.view, 1)
+        self.view.zoom_changed.connect(self._on_zoom_changed)
+        left_layout.addWidget(self.view, 1)
 
         # Bottom face replacement strip
         self.strip_frame = QFrame()
-        self.strip_frame.setFixedHeight(140)
-        self.strip_frame.setStyleSheet("background: #f0f3f8; border: 1px solid #c5cfe0; border-radius: 4px;")
+        self.strip_frame.setFixedHeight(125)
+        self.strip_frame.setStyleSheet("background: #F4F6FA; border: 1px solid #D2DFEE; border-radius: 4px;")
         strip_layout = QVBoxLayout(self.strip_frame)
         strip_layout.setContentsMargins(8, 4, 8, 4)
         strip_layout.setSpacing(4)
 
-        self.lbl_strip_info = QLabel("Select a face box above to view expressions from other shots:")
-        self.lbl_strip_info.setStyleSheet("font-weight: bold; font-size: 11px; color: #222;")
+        self.lbl_strip_info = QLabel("Click any highlighted face box above to view expressions from all shots:")
+        self.lbl_strip_info.setStyleSheet("font-weight: bold; font-size: 11px; color: #1e395b;")
         strip_layout.addWidget(self.lbl_strip_info)
 
         self.strip_scroll = QScrollArea()
@@ -776,49 +1147,144 @@ class PhotoFuseDialog(QDialog):
         self.strip_content = QWidget()
         self.strip_content_layout = QHBoxLayout(self.strip_content)
         self.strip_content_layout.setContentsMargins(4, 4, 4, 4)
-        self.strip_content_layout.setSpacing(12)
+        self.strip_content_layout.setSpacing(10)
         self.strip_content_layout.addStretch(1)
         self.strip_scroll.setWidget(self.strip_content)
         strip_layout.addWidget(self.strip_scroll)
 
-        layout.addWidget(self.strip_frame)
+        left_layout.addWidget(self.strip_frame)
 
-        # Bottom buttons
-        btn_layout = QHBoxLayout()
-        self.lbl_status = QLabel("Aligning burst frames...")
+        # Status & Zoom bar
+        status_bar = QHBoxLayout()
+        status_bar.setContentsMargins(4, 2, 4, 2)
+        status_bar.setSpacing(8)
+
+        self.lbl_status = QLabel("Aligning burst frames...", self)
         self.lbl_status.setStyleSheet("color: #444; font-size: 11px;")
-        btn_layout.addWidget(self.lbl_status)
-        btn_layout.addStretch(1)
+        status_bar.addWidget(self.lbl_status)
 
-        self.btn_reset = QPushButton("Reset to Original")
+        status_bar.addStretch(1)
+
+        self.zoom_bar = CreateStudioZoomBar(self)
+        self.zoom_bar.fitRequested.connect(self._toggle_fit_zoom)
+        self.zoom_bar.zoomInRequested.connect(lambda: self._apply_zoom(1.25))
+        self.zoom_bar.zoomOutRequested.connect(lambda: self._apply_zoom(1.0 / 1.25))
+        self.zoom_bar.zoomSliderMoved.connect(self._on_slider_zoom_moved)
+        status_bar.addWidget(self.zoom_bar)
+
+        left_layout.addLayout(status_bar)
+        main_layout.addWidget(left_widget, 1)
+
+        # ---------------- Right: Sidebar ----------------
+        sidebar_scroll = QScrollArea(self)
+        sidebar_scroll.setFixedWidth(280)
+        sidebar_scroll.setWidgetResizable(True)
+        sidebar_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        sidebar_scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
+
+        sidebar_content = QWidget()
+        sidebar_layout = QVBoxLayout(sidebar_content)
+        sidebar_layout.setContentsMargins(0, 0, 4, 0)
+        sidebar_layout.setSpacing(8)
+
+        # Instructions
+        grp_how = _FineTuneGroup("How Photo Fuse Works")
+        lbl_how = QLabel(
+            "1. Click a face box on the photo to preview that person across all burst shots.\n\n"
+            "2. Click an expression thumbnail below to blend it seamlessly into the composite.\n\n"
+            "3. Repeat for any person with blinking eyes or looking away.",
+            self,
+        )
+        lbl_how.setWordWrap(True)
+        lbl_how.setStyleSheet("color: #444; font-size: 11px; line-height: 1.4;")
+        grp_how.layout().addWidget(lbl_how)
+        sidebar_layout.addWidget(grp_how)
+
+        # Status & Reset
+        grp_actions = _FineTuneGroup("Actions")
+        self.lbl_fuse_summary = QLabel(f"Processing {len(self.photo_paths)} burst shots.", self)
+        self.lbl_fuse_summary.setStyleSheet("color: #555; font-size: 11px;")
+        self.lbl_fuse_summary.setWordWrap(True)
+        grp_actions.layout().addWidget(self.lbl_fuse_summary)
+
+        self.btn_reset = QPushButton(" Reset to Base Shot 1", self)
+        self.btn_reset.setIcon(make_wlpg_icon("undo", 16))
+        self.btn_reset.setStyleSheet("padding: 5px 10px; border: 1px solid #7a96df; border-radius: 3px; background: #eef3fa;")
         self.btn_reset.clicked.connect(self._reset_to_base)
-        btn_layout.addWidget(self.btn_reset)
+        grp_actions.layout().addWidget(self.btn_reset)
+        sidebar_layout.addWidget(grp_actions)
 
-        self.btn_save = QPushButton("Save New Fused Photo...")
+        sidebar_layout.addStretch(1)
+
+        # Save and Cancel
+        btn_box = QHBoxLayout()
+        btn_box.setSpacing(6)
+
+        self.btn_save = QPushButton("Save New...", self)
         self.btn_save.setEnabled(False)
         self.btn_save.setStyleSheet("""
             QPushButton {
                 background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #3c82e6, stop:1 #1c52ba);
                 color: white; font-weight: bold; border: 1px solid #143e8c;
-                border-radius: 4px; padding: 6px 18px; min-width: 120px;
+                border-radius: 4px; padding: 6px 14px; min-width: 90px;
             }
             QPushButton:hover { background: #4d8ff2; }
             QPushButton:disabled { background: #ccc; color: #888; }
         """)
         self.btn_save.clicked.connect(self._save_fused_photo)
-        btn_layout.addWidget(self.btn_save)
+        btn_box.addWidget(self.btn_save, 1)
 
-        btn_cancel = QPushButton("Cancel")
+        btn_cancel = QPushButton("Cancel", self)
+        btn_cancel.setStyleSheet("padding: 6px 12px; border-radius: 4px; border: 1px solid #ccc; background: #f0f0f0;")
         btn_cancel.clicked.connect(self.reject)
-        btn_layout.addWidget(btn_cancel)
+        btn_box.addWidget(btn_cancel)
 
-        layout.addLayout(btn_layout)
+        sidebar_layout.addLayout(btn_box)
 
-    def showEvent(self, event) -> None:
-        super().showEvent(event)
-        if self._first_fit and self.scene.sceneRect().width() > 0:
-            self._first_fit = False
+        sidebar_scroll.setWidget(sidebar_content)
+        main_layout.addWidget(sidebar_scroll)
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        if getattr(self, "_is_fit_mode", True) and hasattr(self, "view") and hasattr(self, "scene"):
+            if self.scene.sceneRect().isValid() and self.scene.sceneRect().width() > 0:
+                self.view.fitInView(self.scene.sceneRect(), Qt.KeepAspectRatio)
+
+    def _toggle_fit_zoom(self) -> None:
+        if not hasattr(self, "scene") or not self.scene.sceneRect().isValid() or self.scene.sceneRect().width() == 0:
+            return
+        if self._is_fit_mode:
+            self._is_fit_mode = False
+            self.view.resetTransform()
+            self._on_zoom_changed(1.0)
+            self.zoom_bar.set_is_fit(False)
+        else:
+            self._is_fit_mode = True
             self.view.fitInView(self.scene.sceneRect(), Qt.KeepAspectRatio)
+            current_scale = self.view.transform().m11()
+            self._on_zoom_changed(current_scale)
+            self.zoom_bar.set_is_fit(True)
+
+    def _apply_zoom(self, factor: float) -> None:
+        self._is_fit_mode = False
+        self.zoom_bar.set_is_fit(False)
+        self.view.scale(factor, factor)
+        current_scale = self.view.transform().m11()
+        self._on_zoom_changed(current_scale)
+
+    def _on_slider_zoom_moved(self, pct: int) -> None:
+        self._is_fit_mode = False
+        self.zoom_bar.set_is_fit(False)
+        target_scale = max(0.1, min(5.0, pct / 100.0))
+        current_scale = self.view.transform().m11()
+        if abs(current_scale) > 1e-4:
+            factor = target_scale / current_scale
+            self.view.scale(factor, factor)
+        self._on_zoom_changed(target_scale)
+
+    def _on_zoom_changed(self, scale_val: float) -> None:
+        if hasattr(self, "zoom_bar"):
+            self.zoom_bar.update_zoom_display(scale_val)
 
     def _align_and_detect(self) -> None:
         """Loads and aligns all secondary burst photos to base frame 0."""
@@ -850,10 +1316,12 @@ class PhotoFuseDialog(QDialog):
             self.face_boxes = [(cx - fw // 2, cy - fh // 2, fw, fh)]
 
         self.lbl_status.setText(f"Found {len(self.face_boxes)} faces across {len(self.frames_bgr)} shots. Ready to fuse.")
+        self.lbl_fuse_summary.setText(f"Aligned {len(self.frames_bgr)} burst shots. Detected {len(self.face_boxes)} faces.")
         self.btn_save.setEnabled(True)
         self._update_scene()
-        if self.isVisible():
+        if self._is_fit_mode and self.scene.sceneRect().isValid():
             self.view.fitInView(self.scene.sceneRect(), Qt.KeepAspectRatio)
+            self._on_zoom_changed(self.view.transform().m11())
 
     def _update_scene(self) -> None:
         if self.base_fused_bgr is None:
@@ -1117,67 +1585,13 @@ class ColourPopCanvasView(QGraphicsView):
         event.accept()
 
 
-class ZoomablePreviewCanvas(QGraphicsView):
-    """
-    Interactive zoomable/pannable canvas for creative tools previews:
-    - Wheel zoom with zoom_changed signal.
-    - Space+Drag and Middle-button drag for fluid panning.
-    """
-    zoom_changed = Signal(float)
-
-    def __init__(self, parent: QWidget | None = None) -> None:
-        super().__init__(parent)
-        self.setRenderHint(QPainter.Antialiasing, True)
-        self.setRenderHint(QPainter.SmoothPixmapTransform, True)
-        self.setTransformationAnchor(QGraphicsView.AnchorUnderMouse)
-        self.setResizeAnchor(QGraphicsView.AnchorViewCenter)
-        self.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        self.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        self._space_pressed: bool = False
-
-    def wheelEvent(self, event) -> None:
-        factor = 1.15 if event.angleDelta().y() > 0 else 1.0 / 1.15
-        self.scale(factor, factor)
-        self.zoom_changed.emit(self.transform().m11())
-        event.accept()
-
-    def mousePressEvent(self, event) -> None:
-        if event.button() in (Qt.MiddleButton, Qt.LeftButton) and (self._space_pressed or event.button() == Qt.MiddleButton):
-            self.setDragMode(QGraphicsView.ScrollHandDrag)
-            super().mousePressEvent(event)
-            return
-        super().mousePressEvent(event)
-
-    def mouseReleaseEvent(self, event) -> None:
-        if event.button() in (Qt.MiddleButton, Qt.LeftButton):
-            if not self._space_pressed:
-                self.setDragMode(QGraphicsView.NoDrag)
-        super().mouseReleaseEvent(event)
-
-    def keyPressEvent(self, event) -> None:
-        if event.key() == Qt.Key_Space and not self._space_pressed:
-            self._space_pressed = True
-            self.setDragMode(QGraphicsView.ScrollHandDrag)
-            event.accept()
-            return
-        super().keyPressEvent(event)
-
-    def keyReleaseEvent(self, event) -> None:
-        if event.key() == Qt.Key_Space:
-            self._space_pressed = False
-            self.setDragMode(QGraphicsView.NoDrag)
-            event.accept()
-            return
-        super().keyReleaseEvent(event)
-
-
 class ColourPopDialog(QDialog):
     """
     Google Photos-Style Colour Pop Studio:
     - Subject remains in full vibrant colour while background is converted to dramatic B&W.
     - Seeding via GrabCut segmentation / face detection.
     - Continuous 60 FPS proxy painting with bilateral edge-aware brush snapping.
-    - Full undo/redo history, before/after compare, and live parameter readouts.
+    - Sidebar adjustment controls matching WLPG Fine-Tune layout.
     """
 
     def __init__(
@@ -1187,7 +1601,6 @@ class ColourPopDialog(QDialog):
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
-        # Normalize channels to 3-channel BGR
         if len(image_bgr.shape) == 2:
             image_bgr = cv2.cvtColor(image_bgr, cv2.COLOR_GRAY2BGR)
         elif image_bgr.shape[2] == 4:
@@ -1200,7 +1613,6 @@ class ColourPopDialog(QDialog):
 
         h, w = self.original_bgr.shape[:2]
 
-        # Fast display proxy for instant 60 FPS painting
         max_proxy_dim = 1200
         if max(h, w) > max_proxy_dim:
             self.proxy_scale = max_proxy_dim / float(max(h, w))
@@ -1211,15 +1623,13 @@ class ColourPopDialog(QDialog):
             self.proxy_scale = 1.0
             self.proxy_bgr = self.original_bgr.copy()
 
-        # Subject mask estimation on proxy
         full_mask = estimate_subject_mask(self.original_bgr)
         self.proxy_mask = cv2.resize(full_mask, (self.proxy_bgr.shape[1], self.proxy_bgr.shape[0]), interpolation=cv2.INTER_LINEAR)
 
-        # Undo / Redo history
         self.undo_stack: list[np.ndarray] = [self.proxy_mask.copy()]
         self.redo_stack: list[np.ndarray] = []
 
-        self.brush_mode = "keep_color"  # "keep_color" or "make_bw"
+        self.brush_mode = "keep_color"
         self.brush_radius = 28
         self.bg_contrast = 1.15
         self.bg_brightness = 0.0
@@ -1227,208 +1637,31 @@ class ColourPopDialog(QDialog):
         self.show_mask_overlay = False
         self.last_picked_color: tuple[int, int, int] | None = None
         self._first_fit = True
+        self._is_fit_mode = True
 
         self.proxy_bw: np.ndarray | None = None
         self._precompute_proxy_bw()
 
-        self.setWindowTitle("Colour Pop Studio — Subject Colour Splash")
+        self.setWindowTitle("Colour Pop Studio")
         self.setWindowIcon(make_wlpg_icon("color_spectrum", 24))
-        self.resize(1080, 720)
+        self.resize(1240, 800)
+        self.setMinimumSize(960, 620)
         self._init_ui()
         self._refresh_canvas()
 
     def _init_ui(self) -> None:
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(14, 12, 14, 14)
-        layout.setSpacing(10)
+        main_layout = QHBoxLayout(self)
+        main_layout.setContentsMargins(10, 10, 10, 10)
+        main_layout.setSpacing(10)
 
-        # 1. Aero Header Bar
-        header_frame = QFrame()
-        header_frame.setStyleSheet("""
-            QFrame {
-                background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #fcfdfe, stop:1 #e8eff7);
-                border: 1px solid #c0d0e6;
-                border-radius: 5px;
-                padding: 6px 12px;
-            }
-        """)
-        h_layout = QHBoxLayout(header_frame)
-        h_layout.setContentsMargins(4, 2, 4, 2)
+        # -------------------------------------------------------------
+        # 1. Left Canvas & Zoom Status Bar
+        # -------------------------------------------------------------
+        left_widget = QWidget(self)
+        left_layout = QVBoxLayout(left_widget)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+        left_layout.setSpacing(6)
 
-        lbl_icon = QLabel()
-        lbl_icon.setPixmap(make_wlpg_icon("color_spectrum", 28).pixmap(28, 28))
-        h_layout.addWidget(lbl_icon)
-
-        title_vbox = QVBoxLayout()
-        lbl_title = QLabel("Colour Pop Studio")
-        lbl_title.setStyleSheet("font-size: 15px; font-weight: bold; color: #1e395b;")
-        lbl_sub = QLabel("Keep the main subject in vibrant colour while converting background to dramatic black & white.")
-        lbl_sub.setStyleSheet("color: #555555; font-size: 11px;")
-        title_vbox.addWidget(lbl_title)
-        title_vbox.addWidget(lbl_sub)
-        h_layout.addLayout(title_vbox)
-        h_layout.addStretch(1)
-
-        # Quick Actions in header
-        self.btn_invert = QPushButton("Invert Mask")
-        self.btn_invert.setToolTip("Swap colour subject and B&W background")
-        self.btn_invert.setStyleSheet("padding: 4px 10px; border-radius: 3px; border: 1px solid #b0c2de; background: #ffffff;")
-        self.btn_invert.clicked.connect(self._invert_mask)
-        h_layout.addWidget(self.btn_invert)
-
-        self.btn_auto_detect = QPushButton("Auto Detect")
-        self.btn_auto_detect.setToolTip("Re-run automatic subject detection")
-        self.btn_auto_detect.setStyleSheet("padding: 4px 10px; border-radius: 3px; border: 1px solid #b0c2de; background: #ffffff;")
-        self.btn_auto_detect.clicked.connect(self._auto_detect_mask)
-        h_layout.addWidget(self.btn_auto_detect)
-
-        layout.addWidget(header_frame)
-
-        # 2. Modern Ribbon Toolbar
-        bar = QFrame()
-        bar.setStyleSheet("background: #f4f6fa; border: 1px solid #d0d7e5; border-radius: 4px; padding: 4px;")
-        bar_layout = QHBoxLayout(bar)
-        bar_layout.setContentsMargins(8, 4, 8, 4)
-        bar_layout.setSpacing(10)
-
-        # Brush mode buttons
-        self.btn_group_mode = QButtonGroup(self)
-        self.btn_group_mode.setExclusive(True)
-
-        self.btn_keep = QPushButton("Keep Colour (+)")
-        self.btn_keep.setCheckable(True)
-        self.btn_keep.setChecked(True)
-        self.btn_keep.setStyleSheet("""
-            QPushButton {
-                background: #ffffff; border: 1px solid #b0c0d8;
-                border-radius: 3px; padding: 4px 12px; font-weight: 500;
-            }
-            QPushButton:checked {
-                background: #cce5ff; border: 1px solid #0078d4;
-                font-weight: bold; color: #004578;
-            }
-        """)
-        self.btn_keep.clicked.connect(lambda: self._set_brush_mode("keep_color"))
-        self.btn_group_mode.addButton(self.btn_keep)
-        bar_layout.addWidget(self.btn_keep)
-
-        self.btn_bw = QPushButton("Make B&W (-)")
-        self.btn_bw.setCheckable(True)
-        self.btn_bw.setStyleSheet("""
-            QPushButton {
-                background: #ffffff; border: 1px solid #b0c0d8;
-                border-radius: 3px; padding: 4px 12px; font-weight: 500;
-            }
-            QPushButton:checked {
-                background: #e2e2e6; border: 1px solid #666666;
-                font-weight: bold; color: #222222;
-            }
-        """)
-        self.btn_bw.clicked.connect(lambda: self._set_brush_mode("make_bw"))
-        self.btn_group_mode.addButton(self.btn_bw)
-        bar_layout.addWidget(self.btn_bw)
-
-        self.btn_pick_color = QPushButton("🎯 Pick Colour")
-        self.btn_pick_color.setCheckable(True)
-        self.btn_pick_color.setToolTip("Click any color on the photo to isolate that hue across the photo")
-        self.btn_pick_color.setStyleSheet("""
-            QPushButton {
-                background: #ffffff; border: 1px solid #b0c0d8;
-                border-radius: 3px; padding: 4px 12px; font-weight: 500;
-            }
-            QPushButton:checked {
-                background: #ffe0b2; border: 1px solid #e65100;
-                font-weight: bold; color: #b73800;
-            }
-        """)
-        self.btn_pick_color.clicked.connect(self._toggle_eyedropper)
-        self.btn_group_mode.addButton(self.btn_pick_color)
-        bar_layout.addWidget(self.btn_pick_color)
-
-        # Brush size slider
-        bar_layout.addSpacing(6)
-        bar_layout.addWidget(QLabel("Brush:"))
-        self.sld_radius = QSlider(Qt.Horizontal)
-        self.sld_radius.setRange(8, 100)
-        self.sld_radius.setValue(self.brush_radius)
-        self.sld_radius.setFixedWidth(80)
-        self.sld_radius.valueChanged.connect(self._on_radius_changed)
-        bar_layout.addWidget(self.sld_radius)
-
-        self.lbl_radius_val = QLabel(f"{self.brush_radius} px")
-        self.lbl_radius_val.setStyleSheet("font-weight: bold; color: #333; min-width: 36px;")
-        bar_layout.addWidget(self.lbl_radius_val)
-
-        # Eyedropper Tolerance slider
-        self.lbl_tol_name = QLabel("Tol:")
-        bar_layout.addWidget(self.lbl_tol_name)
-        self.sld_tol = QSlider(Qt.Horizontal)
-        self.sld_tol.setRange(5, 80)
-        self.sld_tol.setValue(25)
-        self.sld_tol.setFixedWidth(70)
-        self.sld_tol.setToolTip("Colour selection tolerance (5% to 80%)")
-        self.sld_tol.valueChanged.connect(self._on_tolerance_changed)
-        bar_layout.addWidget(self.sld_tol)
-
-        self.chk_overlay = QCheckBox("Mask (Red)")
-        self.chk_overlay.setToolTip("Show semi-transparent red rubylith overlay on masked background")
-        self.chk_overlay.toggled.connect(self._on_overlay_toggled)
-        bar_layout.addWidget(self.chk_overlay)
-
-        # B&W Contrast slider
-        bar_layout.addSpacing(6)
-        bar_layout.addWidget(QLabel("B&W Contrast:"))
-        self.sld_contrast = QSlider(Qt.Horizontal)
-        self.sld_contrast.setRange(80, 180)
-        self.sld_contrast.setValue(115)
-        self.sld_contrast.setFixedWidth(100)
-        self.sld_contrast.valueChanged.connect(self._on_contrast_changed)
-        bar_layout.addWidget(self.sld_contrast)
-
-        self.lbl_contrast_val = QLabel("+15%")
-        self.lbl_contrast_val.setStyleSheet("font-weight: bold; color: #333; min-width: 36px;")
-        bar_layout.addWidget(self.lbl_contrast_val)
-
-        # B&W Brightness slider
-        bar_layout.addSpacing(6)
-        bar_layout.addWidget(QLabel("Brightness:"))
-        self.sld_bright = QSlider(Qt.Horizontal)
-        self.sld_bright.setRange(-40, 40)
-        self.sld_bright.setValue(0)
-        self.sld_bright.setFixedWidth(80)
-        self.sld_bright.valueChanged.connect(self._on_bright_changed)
-        bar_layout.addWidget(self.sld_bright)
-
-        self.lbl_bright_val = QLabel("0")
-        self.lbl_bright_val.setStyleSheet("font-weight: bold; color: #333; min-width: 25px;")
-        bar_layout.addWidget(self.lbl_bright_val)
-
-        bar_layout.addStretch(1)
-
-        # Undo / Redo
-        self.btn_undo = QPushButton("Undo")
-        self.btn_undo.setEnabled(False)
-        self.btn_undo.setShortcut("Ctrl+Z")
-        self.btn_undo.clicked.connect(self._undo_mask)
-        bar_layout.addWidget(self.btn_undo)
-
-        self.btn_redo = QPushButton("Redo")
-        self.btn_redo.setEnabled(False)
-        self.btn_redo.setShortcut("Ctrl+Y")
-        self.btn_redo.clicked.connect(self._redo_mask)
-        bar_layout.addWidget(self.btn_redo)
-
-        # Hold to Compare button
-        self.btn_compare = QPushButton("Hold to Compare")
-        self.btn_compare.setToolTip("Press and hold to preview original photo")
-        self.btn_compare.setStyleSheet("background: #f0f4fa; border: 1px solid #7a96df; font-weight: bold; padding: 4px 10px; border-radius: 3px;")
-        self.btn_compare.pressed.connect(self._show_original)
-        self.btn_compare.released.connect(self._restore_color_pop)
-        bar_layout.addWidget(self.btn_compare)
-
-        layout.addWidget(bar)
-
-        # 3. Interactive Canvas
         self.view = ColourPopCanvasView(self)
         self.scene = QGraphicsScene(self)
         self.view.setScene(self.scene)
@@ -1437,100 +1670,256 @@ class ColourPopDialog(QDialog):
         self.view.color_picked.connect(self._on_color_picked)
         self.view.stroke_started.connect(self._on_stroke_started)
         self.view.zoom_changed.connect(self._on_zoom_changed)
-        self.view.setStyleSheet("background: #252528; border: 1px solid #777; border-radius: 4px;")
+        self.view.setStyleSheet("background: #1C1C1E; border: 1px solid #555558; border-radius: 4px;")
 
         self.bg_item = QGraphicsPixmapItem()
         self.scene.addItem(self.bg_item)
-        layout.addWidget(self.view, 1)
+        left_layout.addWidget(self.view, 1)
 
-        # 4. Bottom Footer & Status
-        btn_layout = QHBoxLayout()
-        self.lbl_status = QLabel("✓ Paint over photo to add or remove colour • Space to Pan • Wheel to Zoom")
+        # Bottom Bar: Status on Left, Dims, and Zoom on Right
+        bottom_bar = QHBoxLayout()
+        bottom_bar.setContentsMargins(4, 2, 4, 2)
+        bottom_bar.setSpacing(12)
+
+        self.lbl_status = QLabel("Paint over photo to add or remove colour • Click to pick hue")
         self.lbl_status.setStyleSheet("color: #444; font-size: 11px;")
-        btn_layout.addWidget(self.lbl_status)
-        btn_layout.addStretch(1)
+        bottom_bar.addWidget(self.lbl_status, 1)
 
-        # Zoom Controls
-        zoom_frame = QFrame()
-        zoom_frame.setStyleSheet("background: #f4f6fa; border: 1px solid #c0c8d8; border-radius: 3px; padding: 1px;")
-        z_layout = QHBoxLayout(zoom_frame)
-        z_layout.setContentsMargins(4, 1, 4, 1)
-        z_layout.setSpacing(4)
+        h, w = self.original_bgr.shape[:2]
+        self.lbl_dims = QLabel(f"{w} × {h} px")
+        self.lbl_dims.setStyleSheet("color: #666; font-size: 11px;")
+        bottom_bar.addWidget(self.lbl_dims)
 
-        self.btn_zoom_out = QPushButton("−")
-        self.btn_zoom_out.setFixedSize(24, 22)
-        self.btn_zoom_out.setToolTip("Zoom Out (-)")
-        self.btn_zoom_out.setStyleSheet("font-size: 13px; font-weight: bold; padding: 0;")
-        self.btn_zoom_out.clicked.connect(lambda: self._apply_zoom(1.0 / 1.25))
-        z_layout.addWidget(self.btn_zoom_out)
+        self.zoom_bar = CreateStudioZoomBar(self)
+        self.zoom_bar.fit_toggle_clicked.connect(self._toggle_fit_zoom)
+        self.zoom_bar.zoom_in_clicked.connect(lambda: self._apply_zoom(1.25))
+        self.zoom_bar.zoom_out_clicked.connect(lambda: self._apply_zoom(1.0 / 1.25))
+        self.zoom_bar.zoom_slider_moved.connect(self._on_slider_zoom_moved)
+        bottom_bar.addWidget(self.zoom_bar)
 
-        self.btn_zoom_in = QPushButton("+")
-        self.btn_zoom_in.setFixedSize(24, 22)
-        self.btn_zoom_in.setToolTip("Zoom In (+)")
-        self.btn_zoom_in.setStyleSheet("font-size: 13px; font-weight: bold; padding: 0;")
-        self.btn_zoom_in.clicked.connect(lambda: self._apply_zoom(1.25))
-        z_layout.addWidget(self.btn_zoom_in)
+        left_layout.addLayout(bottom_bar)
+        main_layout.addWidget(left_widget, 1)
 
-        self.btn_fit = QPushButton("Fit")
-        self.btn_fit.setFixedHeight(22)
-        self.btn_fit.setToolTip("Fit photo to canvas window")
-        self.btn_fit.clicked.connect(self._fit_to_view)
-        z_layout.addWidget(self.btn_fit)
+        # -------------------------------------------------------------
+        # 2. Right Sidebar (WLPG Fine-Tune Style Cards)
+        # -------------------------------------------------------------
+        sidebar_scroll = QScrollArea(self)
+        sidebar_scroll.setFixedWidth(280)
+        sidebar_scroll.setWidgetResizable(True)
+        sidebar_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        sidebar_scroll.setStyleSheet("QScrollArea { border: 1px solid #D2DFEE; border-radius: 4px; background: #F4F6FA; }")
 
-        self.btn_100 = QPushButton("100%")
-        self.btn_100.setFixedHeight(22)
-        self.btn_100.setToolTip("View at actual 100% pixel size (Ctrl+0)")
-        self.btn_100.clicked.connect(self._reset_zoom_100)
-        z_layout.addWidget(self.btn_100)
+        sidebar = QWidget()
+        sidebar_layout = QVBoxLayout(sidebar)
+        sidebar_layout.setContentsMargins(8, 8, 8, 8)
+        sidebar_layout.setSpacing(8)
 
-        self.lbl_zoom_val = QLabel("100%")
-        self.lbl_zoom_val.setStyleSheet("font-size: 11px; font-weight: bold; color: #333; min-width: 40px; padding-left: 2px;")
-        z_layout.addWidget(self.lbl_zoom_val)
+        # Mode Selection Card
+        grp_mode = _FineTuneGroup("Colour Selection Mode", sidebar)
+        self.btn_group_mode = QButtonGroup(self)
+        self.btn_group_mode.setExclusive(True)
 
-        btn_layout.addWidget(zoom_frame)
-        btn_layout.addSpacing(12)
+        mode_btn_style = """
+            QPushButton {
+                background: #FFFFFF; border: 1px solid #B0C0D8;
+                border-radius: 3px; padding: 6px 12px; font-weight: 500; text-align: left;
+            }
+            QPushButton:hover { background: #EAF2FB; border-color: #70C0E7; }
+            QPushButton:checked {
+                background: #CCE5FF; border: 1px solid #0078D4;
+                font-weight: bold; color: #004578;
+            }
+        """
 
-        # Save & Cancel
-        btn_save = QPushButton("Save New Colour Pop Photo...")
+        self.btn_keep = QPushButton("Keep Vibrant Colour (+)", grp_mode)
+        self.btn_keep.setIcon(make_wlpg_icon("brush", 18))
+        self.btn_keep.setIconSize(QSize(18, 18))
+        self.btn_keep.setCheckable(True)
+        self.btn_keep.setChecked(True)
+        self.btn_keep.setStyleSheet(mode_btn_style)
+        self.btn_keep.clicked.connect(lambda: self._set_brush_mode("keep_color"))
+        self.btn_group_mode.addButton(self.btn_keep)
+        grp_mode.vbox.addWidget(self.btn_keep)
+
+        self.btn_bw = QPushButton("Make Dramatic B&W (-)", grp_mode)
+        self.btn_bw.setIcon(make_wlpg_icon("eraser", 18))
+        self.btn_bw.setIconSize(QSize(18, 18))
+        self.btn_bw.setCheckable(True)
+        self.btn_bw.setStyleSheet(mode_btn_style)
+        self.btn_bw.clicked.connect(lambda: self._set_brush_mode("make_bw"))
+        self.btn_group_mode.addButton(self.btn_bw)
+        grp_mode.vbox.addWidget(self.btn_bw)
+
+        self.btn_pick_color = QPushButton("Pick Colour from Photo", grp_mode)
+        self.btn_pick_color.setIcon(make_wlpg_icon("eyedropper", 18))
+        self.btn_pick_color.setIconSize(QSize(18, 18))
+        self.btn_pick_color.setCheckable(True)
+        self.btn_pick_color.setStyleSheet(mode_btn_style)
+        self.btn_pick_color.clicked.connect(self._toggle_eyedropper)
+        self.btn_group_mode.addButton(self.btn_pick_color)
+        grp_mode.vbox.addWidget(self.btn_pick_color)
+
+        sidebar_layout.addWidget(grp_mode)
+
+        # Brush & Mask Settings Card
+        grp_brush = _FineTuneGroup("Brush & Mask Settings", sidebar)
+        self.lbl_radius_val = QLabel(f"Brush Size: {self.brush_radius} px", grp_brush)
+        self.lbl_radius_val.setStyleSheet("color: #333; font-size: 11px;")
+        grp_brush.vbox.addWidget(self.lbl_radius_val)
+
+        self.sld_radius = _AeroFineTuneSlider(8, 120, 28, grp_brush)
+        self.sld_radius.setValue(self.brush_radius)
+        self.sld_radius.valueChanged.connect(self._on_radius_changed)
+        grp_brush.vbox.addWidget(self.sld_radius)
+
+        self.lbl_tol_val = QLabel("Colour Tolerance: 25%", grp_brush)
+        self.lbl_tol_val.setStyleSheet("color: #333; font-size: 11px;")
+        grp_brush.vbox.addWidget(self.lbl_tol_val)
+
+        self.sld_tol = _AeroFineTuneSlider(5, 80, 25, grp_brush)
+        self.sld_tol.setValue(int(self.color_tolerance * 100))
+        self.sld_tol.valueChanged.connect(self._on_tolerance_changed)
+        grp_brush.vbox.addWidget(self.sld_tol)
+
+        self.chk_overlay = QCheckBox("Show Mask Overlay (Red)", grp_brush)
+        self.chk_overlay.setStyleSheet("font-size: 11px; color: #333; margin-top: 4px;")
+        self.chk_overlay.toggled.connect(self._on_overlay_toggled)
+        grp_brush.vbox.addWidget(self.chk_overlay)
+
+        # Action Buttons Row
+        action_row = QHBoxLayout()
+        action_row.setSpacing(6)
+        self.btn_invert = QPushButton("Invert", grp_brush)
+        self.btn_invert.setIcon(make_wlpg_icon("invert", 16))
+        self.btn_invert.setToolTip("Swap colour subject and B&W background")
+        self.btn_invert.setStyleSheet("background: #FFFFFF; border: 1px solid #B0C0D8; border-radius: 3px; padding: 4px;")
+        self.btn_invert.clicked.connect(self._invert_mask)
+        action_row.addWidget(self.btn_invert)
+
+        self.btn_auto_detect = QPushButton("Auto-Detect", grp_brush)
+        self.btn_auto_detect.setIcon(make_wlpg_icon("refresh", 16))
+        self.btn_auto_detect.setToolTip("Re-run AI face and subject segmentation")
+        self.btn_auto_detect.setStyleSheet("background: #FFFFFF; border: 1px solid #B0C0D8; border-radius: 3px; padding: 4px;")
+        self.btn_auto_detect.clicked.connect(self._auto_detect_mask)
+        action_row.addWidget(self.btn_auto_detect)
+        grp_brush.vbox.addLayout(action_row)
+
+        sidebar_layout.addWidget(grp_brush)
+
+        # Background Adjustments Card
+        grp_tone = _FineTuneGroup("Background Tone", sidebar)
+        self.lbl_contrast_val = QLabel("Contrast: +15%", grp_tone)
+        self.lbl_contrast_val.setStyleSheet("color: #333; font-size: 11px;")
+        grp_tone.vbox.addWidget(self.lbl_contrast_val)
+
+        self.sld_contrast = _AeroFineTuneSlider(80, 180, 115, grp_tone)
+        self.sld_contrast.setValue(115)
+        self.sld_contrast.valueChanged.connect(self._on_contrast_changed)
+        grp_tone.vbox.addWidget(self.sld_contrast)
+
+        self.lbl_bright_val = QLabel("Brightness: 0", grp_tone)
+        self.lbl_bright_val.setStyleSheet("color: #333; font-size: 11px;")
+        grp_tone.vbox.addWidget(self.lbl_bright_val)
+
+        self.sld_bright = _AeroFineTuneSlider(-40, 40, 0, grp_tone)
+        self.sld_bright.setValue(0)
+        self.sld_bright.valueChanged.connect(self._on_bright_changed)
+        grp_tone.vbox.addWidget(self.sld_bright)
+
+        sidebar_layout.addWidget(grp_tone)
+
+        # History & Preview Card
+        grp_hist = _FineTuneGroup("History & Preview", sidebar)
+        hist_row = QHBoxLayout()
+        self.btn_undo = QPushButton("Undo", grp_hist)
+        self.btn_undo.setIcon(make_wlpg_icon("undo", 16))
+        self.btn_undo.setEnabled(False)
+        self.btn_undo.setStyleSheet("background: #FFFFFF; border: 1px solid #B0C0D8; border-radius: 3px; padding: 4px;")
+        self.btn_undo.clicked.connect(self._undo_mask)
+        hist_row.addWidget(self.btn_undo)
+
+        self.btn_redo = QPushButton("Redo", grp_hist)
+        self.btn_redo.setIcon(make_wlpg_icon("redo", 16))
+        self.btn_redo.setEnabled(False)
+        self.btn_redo.setStyleSheet("background: #FFFFFF; border: 1px solid #B0C0D8; border-radius: 3px; padding: 4px;")
+        self.btn_redo.clicked.connect(self._redo_mask)
+        hist_row.addWidget(self.btn_redo)
+        grp_hist.vbox.addLayout(hist_row)
+
+        self.btn_compare = QPushButton("Hold to Compare", grp_hist)
+        self.btn_compare.setIcon(make_wlpg_icon("compare", 16))
+        self.btn_compare.setToolTip("Press and hold to preview original photo")
+        self.btn_compare.setStyleSheet("background: #F0F4FA; border: 1px solid #7A96DF; font-weight: bold; padding: 5px; border-radius: 3px;")
+        self.btn_compare.pressed.connect(self._show_original)
+        self.btn_compare.released.connect(self._restore_color_pop)
+        grp_hist.vbox.addWidget(self.btn_compare)
+
+        sidebar_layout.addWidget(grp_hist)
+        sidebar_layout.addStretch(1)
+
+        # Save and Cancel Buttons
+        btn_save = QPushButton("Save New Photo...")
         btn_save.setStyleSheet("""
             QPushButton {
                 background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #3c82e6, stop:1 #1c52ba);
                 color: white; font-weight: bold; border: 1px solid #143e8c;
-                border-radius: 4px; padding: 6px 20px; min-width: 140px;
+                border-radius: 4px; padding: 8px 16px; font-size: 11px;
             }
             QPushButton:hover { background: #4d8ff2; }
         """)
         btn_save.clicked.connect(self._save_photo)
-        btn_layout.addWidget(btn_save)
+        sidebar_layout.addWidget(btn_save)
 
         btn_cancel = QPushButton("Cancel")
+        btn_cancel.setStyleSheet("background: #FFFFFF; border: 1px solid #B0C0D8; border-radius: 4px; padding: 6px;")
         btn_cancel.clicked.connect(self.reject)
-        btn_layout.addWidget(btn_cancel)
+        sidebar_layout.addWidget(btn_cancel)
 
-        layout.addLayout(btn_layout)
+        sidebar_scroll.setWidget(sidebar)
+        main_layout.addWidget(sidebar_scroll)
 
     def showEvent(self, event) -> None:
         super().showEvent(event)
         if self._first_fit and self.scene.sceneRect().width() > 0:
             self._first_fit = False
             self.view.fitInView(self.scene.sceneRect(), Qt.KeepAspectRatio)
+            self._is_fit_mode = True
             self._on_zoom_changed(self.view.transform().m11())
 
-    def _on_zoom_changed(self, scale_val: float) -> None:
-        self.lbl_zoom_val.setText(f"{int(round(scale_val * 100))}%")
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        if getattr(self, "_is_fit_mode", True) and hasattr(self, "view") and hasattr(self, "scene"):
+            if self.scene.sceneRect().isValid() and self.scene.sceneRect().width() > 0:
+                self.view.fitInView(self.scene.sceneRect(), Qt.KeepAspectRatio)
+
+    def _toggle_fit_zoom(self) -> None:
+        if self._is_fit_mode:
+            self.view.resetTransform()
+            self._is_fit_mode = False
+            self._on_zoom_changed(1.0)
+        else:
+            self.view.fitInView(self.scene.sceneRect(), Qt.KeepAspectRatio)
+            self._is_fit_mode = True
+            self._on_zoom_changed(self.view.transform().m11())
 
     def _apply_zoom(self, factor: float) -> None:
+        self._is_fit_mode = False
         self.view.scale(factor, factor)
         self._on_zoom_changed(self.view.transform().m11())
 
-    def _reset_zoom_100(self) -> None:
-        self.view.resetTransform()
-        self._on_zoom_changed(1.0)
+    def _on_slider_zoom_moved(self, val: int) -> None:
+        self._is_fit_mode = False
+        target_scale = val / 100.0
+        current_scale = self.view.transform().m11()
+        if abs(current_scale) > 1e-4:
+            factor = target_scale / current_scale
+            self.view.scale(factor, factor)
+            self._on_zoom_changed(target_scale)
 
-    def _fit_to_view(self) -> None:
-        if self.scene.sceneRect().isValid() and self.scene.sceneRect().width() > 0:
-            self.view.fitInView(self.scene.sceneRect(), Qt.KeepAspectRatio)
-            self._on_zoom_changed(self.view.transform().m11())
+    def _on_zoom_changed(self, scale_val: float) -> None:
+        pct = int(round(scale_val * 100))
+        if hasattr(self, "zoom_bar"):
+            self.zoom_bar.set_zoom_level(pct)
 
     def _precompute_proxy_bw(self) -> None:
         gray = cv2.cvtColor(self.proxy_bgr, cv2.COLOR_BGR2GRAY).astype(np.float32)
@@ -1540,15 +1929,11 @@ class ColourPopDialog(QDialog):
     def _toggle_eyedropper(self) -> None:
         self.brush_mode = "eyedropper"
         self.view.set_eyedropper_mode(True)
-        self.lbl_tol_name.setVisible(True)
-        self.sld_tol.setVisible(True)
-        self.lbl_status.setText("🎯 Eyedropper Active: Click any pixel on the photo to isolate that colour.")
+        self.lbl_status.setText("Eyedropper Active: Click any pixel on the photo to isolate that colour.")
 
     def _set_brush_mode(self, mode: str) -> None:
         self.brush_mode = mode
         self.view.set_eyedropper_mode(False)
-        self.lbl_tol_name.setVisible(False)
-        self.sld_tol.setVisible(False)
         self.btn_keep.setChecked(mode == "keep_color")
         self.btn_bw.setChecked(mode == "make_bw")
         self.btn_pick_color.setChecked(False)
@@ -1567,10 +1952,11 @@ class ColourPopDialog(QDialog):
             tolerance=self.color_tolerance,
         )
         self._fast_refresh_proxy()
-        self.lbl_status.setText(f"✓ Isolated colour at ({sx}, {sy}) with tolerance {int(self.color_tolerance * 100)}%.")
+        self.lbl_status.setText(f"Isolated colour at ({sx}, {sy}) with tolerance {int(self.color_tolerance * 100)}%.")
 
     def _on_tolerance_changed(self, val: int) -> None:
         self.color_tolerance = val / 100.0
+        self.lbl_tol_val.setText(f"Colour Tolerance: {val}%")
         if self.last_picked_color is not None and self.brush_mode == "eyedropper":
             self.proxy_mask = compute_color_similarity_mask(
                 self.proxy_bgr,
@@ -1586,21 +1972,21 @@ class ColourPopDialog(QDialog):
 
     def _on_radius_changed(self, val: int) -> None:
         self.brush_radius = val
-        self.lbl_radius_val.setText(f"{val} px")
+        self.lbl_radius_val.setText(f"Brush Size: {val} px")
         self.view.set_brush_radius(val)
 
     def _on_contrast_changed(self, val: int) -> None:
         self.bg_contrast = val / 100.0
         delta = val - 100
         sign = "+" if delta >= 0 else ""
-        self.lbl_contrast_val.setText(f"{sign}{delta}%")
+        self.lbl_contrast_val.setText(f"Contrast: {sign}{delta}%")
         self._precompute_proxy_bw()
         self._refresh_canvas()
 
     def _on_bright_changed(self, val: int) -> None:
         self.bg_brightness = float(val)
         sign = "+" if val > 0 else ""
-        self.lbl_bright_val.setText(f"{sign}{val}")
+        self.lbl_bright_val.setText(f"Brightness: {sign}{val}")
         self._precompute_proxy_bw()
         self._refresh_canvas()
 
@@ -1630,9 +2016,8 @@ class ColourPopDialog(QDialog):
         m3 = self.proxy_mask[:, :, None]
         blended = (self.proxy_bgr.astype(np.float32) * m3 + self.proxy_bw.astype(np.float32) * (1.0 - m3)).astype(np.uint8)
         if self.show_mask_overlay:
-            # Tint unmasked background with semi-transparent red rubylith (40% red)
             red_tint = np.zeros_like(blended)
-            red_tint[:, :, 2] = 230  # Red channel in BGR
+            red_tint[:, :, 2] = 230
             bg_alpha = (1.0 - self.proxy_mask[:, :, None]) * 0.40
             blended = (blended.astype(np.float32) * (1.0 - bg_alpha) + red_tint.astype(np.float32) * bg_alpha).astype(np.uint8)
         self.bg_item.setPixmap(_cv2_to_qpixmap(blended))
@@ -1646,14 +2031,14 @@ class ColourPopDialog(QDialog):
         self._on_stroke_started()
         self.proxy_mask = 1.0 - self.proxy_mask
         self._fast_refresh_proxy()
-        self.lbl_status.setText("✓ Inverted mask: subject and background swapped.")
+        self.lbl_status.setText("Inverted mask: subject and background swapped.")
 
     def _auto_detect_mask(self) -> None:
         self._on_stroke_started()
         full_mask = estimate_subject_mask(self.original_bgr)
         self.proxy_mask = cv2.resize(full_mask, (self.proxy_bgr.shape[1], self.proxy_bgr.shape[0]), interpolation=cv2.INTER_LINEAR)
         self._fast_refresh_proxy()
-        self.lbl_status.setText("✓ Re-detected subject with GrabCut.")
+        self.lbl_status.setText("Re-detected subject segmentation.")
 
     def _undo_mask(self) -> None:
         if len(self.undo_stack) > 1:
@@ -1687,7 +2072,6 @@ class ColourPopDialog(QDialog):
         QApplication.processEvents()
 
         h, w = self.original_bgr.shape[:2]
-        # Upscale proxy mask to full camera resolution and refine with guided filter
         if self.proxy_scale != 1.0:
             full_mask = cv2.resize(self.proxy_mask, (w, h), interpolation=cv2.INTER_LINEAR)
         else:
@@ -1695,7 +2079,6 @@ class ColourPopDialog(QDialog):
 
         full_mask = guided_filter_matte(self.original_bgr, full_mask, radius=16, eps=1e-3)
 
-        # Render full resolution
         full_color_pop = apply_color_pop(
             self.original_bgr,
             full_mask,
@@ -1744,6 +2127,7 @@ class PortraitBokehDialog(QDialog):
         self.file_path = file_path
         self.output_dir = file_path.parent if file_path else Path.home()
         self.saved_file_path: Path | None = None
+        self._is_fit_mode: bool = True
 
         h, w = self.original_bgr.shape[:2]
         max_proxy_dim = 1200
@@ -1760,185 +2144,184 @@ class PortraitBokehDialog(QDialog):
         self.proxy_mask = cv2.resize(full_mask, (self.proxy_bgr.shape[1], self.proxy_bgr.shape[0]), interpolation=cv2.INTER_LINEAR)
         self.proxy_bokeh_pyramid = build_bokeh_pyramid(self.proxy_bgr, max_blur_radius=36.0)
         self.rendered_proxy: np.ndarray | None = None
-        self._first_fit = True
 
         self.setWindowTitle("Portrait Depth Bokeh & Fill Light")
         self.setWindowIcon(make_wlpg_icon("noise_reduction", 24))
-        self.resize(1020, 700)
+        self.resize(1240, 800)
+        self.setMinimumSize(960, 620)
         self._init_ui()
         self._render_proxy()
 
     def _init_ui(self) -> None:
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(14, 12, 14, 14)
-        layout.setSpacing(10)
+        main_layout = QHBoxLayout(self)
+        main_layout.setContentsMargins(10, 10, 10, 10)
+        main_layout.setSpacing(10)
 
-        # Header
-        header_frame = QFrame()
-        header_frame.setStyleSheet("""
-            QFrame {
-                background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #fcfdfe, stop:1 #e8eff7);
-                border: 1px solid #c0d0e6;
-                border-radius: 5px;
-                padding: 6px 12px;
-            }
-        """)
-        h_layout = QHBoxLayout(header_frame)
-        h_layout.setContentsMargins(4, 2, 4, 2)
+        # ---------------- Left: Canvas & Zoom Bar ----------------
+        left_widget = QWidget(self)
+        left_layout = QVBoxLayout(left_widget)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+        left_layout.setSpacing(6)
 
-        lbl_icon = QLabel()
-        lbl_icon.setPixmap(make_wlpg_icon("noise_reduction", 28).pixmap(28, 28))
-        h_layout.addWidget(lbl_icon)
-
-        title_vbox = QVBoxLayout()
-        lbl_title = QLabel("Portrait Depth Bokeh & Subject Fill Light")
-        lbl_title.setStyleSheet("font-size: 15px; font-weight: bold; color: #1e395b;")
-        lbl_sub = QLabel("Simulate shallow depth-of-field lens bokeh behind subject with soft portrait studio fill light.")
-        lbl_sub.setStyleSheet("color: #555555; font-size: 11px;")
-        title_vbox.addWidget(lbl_title)
-        title_vbox.addWidget(lbl_sub)
-        h_layout.addLayout(title_vbox)
-        h_layout.addStretch(1)
-
-        layout.addWidget(header_frame)
-
-        # Controls bar
-        bar = QFrame()
-        bar.setStyleSheet("background: #f4f6fa; border: 1px solid #d0d7e5; border-radius: 4px; padding: 4px;")
-        bar_layout = QHBoxLayout(bar)
-        bar_layout.setContentsMargins(8, 4, 8, 4)
-        bar_layout.setSpacing(14)
-
-        bar_layout.addWidget(QLabel("Bokeh Blur:"))
-        self.sld_blur = QSlider(Qt.Horizontal)
-        self.sld_blur.setRange(0, 40)
-        self.sld_blur.setValue(16)
-        self.sld_blur.setFixedWidth(130)
-        self.sld_blur.valueChanged.connect(self._on_blur_changed)
-        bar_layout.addWidget(self.sld_blur)
-
-        self.lbl_blur_val = QLabel("16 px")
-        self.lbl_blur_val.setStyleSheet("font-weight: bold; color: #333; min-width: 40px;")
-        bar_layout.addWidget(self.lbl_blur_val)
-
-        bar_layout.addSpacing(10)
-        bar_layout.addWidget(QLabel("Subject Fill Light:"))
-        self.sld_fill = QSlider(Qt.Horizontal)
-        self.sld_fill.setRange(0, 50)
-        self.sld_fill.setValue(22)
-        self.sld_fill.setFixedWidth(130)
-        self.sld_fill.valueChanged.connect(self._on_fill_changed)
-        bar_layout.addWidget(self.sld_fill)
-
-        self.lbl_fill_val = QLabel("22%")
-        self.lbl_fill_val.setStyleSheet("font-weight: bold; color: #333; min-width: 40px;")
-        bar_layout.addWidget(self.lbl_fill_val)
-
-        bar_layout.addStretch(1)
-
-        self.btn_compare = QPushButton("Hold to Compare")
-        self.btn_compare.setStyleSheet("background: #f0f4fa; border: 1px solid #7a96df; font-weight: bold; padding: 4px 10px; border-radius: 3px;")
-        self.btn_compare.pressed.connect(self._show_original)
-        self.btn_compare.released.connect(self._restore_bokeh)
-        bar_layout.addWidget(self.btn_compare)
-
-        layout.addWidget(bar)
-
-        # Canvas
         self.view = ZoomablePreviewCanvas(self)
         self.scene = QGraphicsScene(self)
         self.view.setScene(self.scene)
-        self.view.zoom_changed.connect(self._on_zoom_changed)
-        self.view.setStyleSheet("background: #252528; border: 1px solid #777; border-radius: 4px;")
+        self.view.setStyleSheet("background: #1C1C1E; border: 1px solid #555558; border-radius: 4px;")
         self.bg_item = QGraphicsPixmapItem()
         self.scene.addItem(self.bg_item)
-        layout.addWidget(self.view, 1)
+        self.view.zoom_changed.connect(self._on_zoom_changed)
+        left_layout.addWidget(self.view, 1)
 
-        # Bottom buttons
-        btn_layout = QHBoxLayout()
-        btn_layout.addWidget(QLabel(f"Resolution: {self.original_bgr.shape[1]} × {self.original_bgr.shape[0]} px"))
-        btn_layout.addStretch(1)
+        # Status & Zoom bar
+        status_bar = QHBoxLayout()
+        status_bar.setContentsMargins(4, 2, 4, 2)
+        status_bar.setSpacing(8)
 
-        # Zoom Controls
-        zoom_frame = QFrame()
-        zoom_frame.setStyleSheet("background: #f4f6fa; border: 1px solid #c0c8d8; border-radius: 3px; padding: 1px;")
-        z_layout = QHBoxLayout(zoom_frame)
-        z_layout.setContentsMargins(4, 1, 4, 1)
-        z_layout.setSpacing(4)
+        lbl_res = QLabel(f"Resolution: {self.original_bgr.shape[1]} × {self.original_bgr.shape[0]} px", self)
+        lbl_res.setStyleSheet("color: #666; font-size: 11px;")
+        status_bar.addWidget(lbl_res)
 
-        self.btn_zoom_out = QPushButton("−")
-        self.btn_zoom_out.setFixedSize(24, 22)
-        self.btn_zoom_out.setToolTip("Zoom Out (-)")
-        self.btn_zoom_out.setStyleSheet("font-size: 13px; font-weight: bold; padding: 0;")
-        self.btn_zoom_out.clicked.connect(lambda: self._apply_zoom(1.0 / 1.25))
-        z_layout.addWidget(self.btn_zoom_out)
+        status_bar.addStretch(1)
 
-        self.btn_zoom_in = QPushButton("+")
-        self.btn_zoom_in.setFixedSize(24, 22)
-        self.btn_zoom_in.setToolTip("Zoom In (+)")
-        self.btn_zoom_in.setStyleSheet("font-size: 13px; font-weight: bold; padding: 0;")
-        self.btn_zoom_in.clicked.connect(lambda: self._apply_zoom(1.25))
-        z_layout.addWidget(self.btn_zoom_in)
+        self.zoom_bar = CreateStudioZoomBar(self)
+        self.zoom_bar.fitRequested.connect(self._toggle_fit_zoom)
+        self.zoom_bar.zoomInRequested.connect(lambda: self._apply_zoom(1.25))
+        self.zoom_bar.zoomOutRequested.connect(lambda: self._apply_zoom(1.0 / 1.25))
+        self.zoom_bar.zoomSliderMoved.connect(self._on_slider_zoom_moved)
+        status_bar.addWidget(self.zoom_bar)
 
-        self.btn_fit = QPushButton("Fit")
-        self.btn_fit.setFixedHeight(22)
-        self.btn_fit.setToolTip("Fit photo to canvas window")
-        self.btn_fit.clicked.connect(self._fit_to_view)
-        z_layout.addWidget(self.btn_fit)
+        left_layout.addLayout(status_bar)
+        main_layout.addWidget(left_widget, 1)
 
-        self.btn_100 = QPushButton("100%")
-        self.btn_100.setFixedHeight(22)
-        self.btn_100.setToolTip("View at actual 100% pixel size (Ctrl+0)")
-        self.btn_100.clicked.connect(self._reset_zoom_100)
-        z_layout.addWidget(self.btn_100)
+        # ---------------- Right: Settings Sidebar ----------------
+        sidebar_scroll = QScrollArea(self)
+        sidebar_scroll.setFixedWidth(280)
+        sidebar_scroll.setWidgetResizable(True)
+        sidebar_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        sidebar_scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
 
-        self.lbl_zoom_val = QLabel("100%")
-        self.lbl_zoom_val.setStyleSheet("font-size: 11px; font-weight: bold; color: #333; min-width: 40px; padding-left: 2px;")
-        z_layout.addWidget(self.lbl_zoom_val)
+        sidebar_content = QWidget()
+        sidebar_layout = QVBoxLayout(sidebar_content)
+        sidebar_layout.setContentsMargins(0, 0, 4, 0)
+        sidebar_layout.setSpacing(8)
 
-        btn_layout.addWidget(zoom_frame)
-        btn_layout.addSpacing(12)
+        # 1. Depth Bokeh
+        grp_bokeh = _FineTuneGroup("Lens Bokeh Blur")
+        lbl_b_hdr = QHBoxLayout()
+        lbl_b_title = QLabel("Blur Amount:")
+        lbl_b_title.setStyleSheet("font-size: 11px; color: #444;")
+        self.lbl_blur_val = QLabel("16 px")
+        self.lbl_blur_val.setStyleSheet("font-weight: bold; font-size: 11px; color: #1e395b;")
+        lbl_b_hdr.addWidget(lbl_b_title)
+        lbl_b_hdr.addStretch(1)
+        lbl_b_hdr.addWidget(self.lbl_blur_val)
+        grp_bokeh.layout().addLayout(lbl_b_hdr)
 
-        btn_save = QPushButton("Save New Portrait Bokeh Photo...")
-        btn_save.setStyleSheet("""
+        self.sld_blur = _AeroFineTuneSlider(default_value=16)
+        self.sld_blur.setRange(0, 40)
+        self.sld_blur.setValue(16)
+        self.sld_blur.valueChanged.connect(self._on_blur_changed)
+        grp_bokeh.layout().addWidget(self.sld_blur)
+        sidebar_layout.addWidget(grp_bokeh)
+
+        # 2. Portrait Fill Light
+        grp_light = _FineTuneGroup("Portrait Lighting")
+        lbl_l_hdr = QHBoxLayout()
+        lbl_l_title = QLabel("Subject Fill Light:")
+        lbl_l_title.setStyleSheet("font-size: 11px; color: #444;")
+        self.lbl_fill_val = QLabel("22%")
+        self.lbl_fill_val.setStyleSheet("font-weight: bold; font-size: 11px; color: #1e395b;")
+        lbl_l_hdr.addWidget(lbl_l_title)
+        lbl_l_hdr.addStretch(1)
+        lbl_l_hdr.addWidget(self.lbl_fill_val)
+        grp_light.layout().addLayout(lbl_l_hdr)
+
+        self.sld_fill = _AeroFineTuneSlider(default_value=22)
+        self.sld_fill.setRange(0, 50)
+        self.sld_fill.setValue(22)
+        self.sld_fill.valueChanged.connect(self._on_fill_changed)
+        grp_light.layout().addWidget(self.sld_fill)
+        sidebar_layout.addWidget(grp_light)
+
+        # 3. Preview & Compare
+        grp_preview = _FineTuneGroup("Preview")
+        self.btn_compare = QPushButton(" Hold to Compare Original", self)
+        self.btn_compare.setIcon(make_wlpg_icon("compare", 16))
+        self.btn_compare.setStyleSheet("padding: 6px 12px; border: 1px solid #7a96df; border-radius: 3px; background: #eef3fa; font-weight: bold;")
+        self.btn_compare.pressed.connect(self._show_original)
+        self.btn_compare.released.connect(self._restore_bokeh)
+        grp_preview.layout().addWidget(self.btn_compare)
+        sidebar_layout.addWidget(grp_preview)
+
+        sidebar_layout.addStretch(1)
+
+        # Save and Cancel
+        btn_box = QHBoxLayout()
+        btn_box.setSpacing(6)
+
+        self.btn_save = QPushButton("Save New...", self)
+        self.btn_save.setStyleSheet("""
             QPushButton {
                 background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #3c82e6, stop:1 #1c52ba);
                 color: white; font-weight: bold; border: 1px solid #143e8c;
-                border-radius: 4px; padding: 6px 20px; min-width: 130px;
+                border-radius: 4px; padding: 6px 14px; min-width: 90px;
             }
             QPushButton:hover { background: #4d8ff2; }
         """)
-        btn_save.clicked.connect(self._save_photo)
-        btn_layout.addWidget(btn_save)
+        self.btn_save.clicked.connect(self._save_photo)
+        btn_box.addWidget(self.btn_save, 1)
 
-        btn_cancel = QPushButton("Cancel")
+        btn_cancel = QPushButton("Cancel", self)
+        btn_cancel.setStyleSheet("padding: 6px 12px; border-radius: 4px; border: 1px solid #ccc; background: #f0f0f0;")
         btn_cancel.clicked.connect(self.reject)
-        btn_layout.addWidget(btn_cancel)
+        btn_box.addWidget(btn_cancel)
 
-        layout.addLayout(btn_layout)
+        sidebar_layout.addLayout(btn_box)
 
-    def showEvent(self, event) -> None:
-        super().showEvent(event)
-        if self._first_fit and self.scene.sceneRect().width() > 0:
-            self._first_fit = False
+        sidebar_scroll.setWidget(sidebar_content)
+        main_layout.addWidget(sidebar_scroll)
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        if getattr(self, "_is_fit_mode", True) and hasattr(self, "view") and hasattr(self, "scene"):
+            if self.scene.sceneRect().isValid() and self.scene.sceneRect().width() > 0:
+                self.view.fitInView(self.scene.sceneRect(), Qt.KeepAspectRatio)
+
+    def _toggle_fit_zoom(self) -> None:
+        if not hasattr(self, "scene") or not self.scene.sceneRect().isValid() or self.scene.sceneRect().width() == 0:
+            return
+        if self._is_fit_mode:
+            self._is_fit_mode = False
+            self.view.resetTransform()
+            self._on_zoom_changed(1.0)
+            self.zoom_bar.set_is_fit(False)
+        else:
+            self._is_fit_mode = True
             self.view.fitInView(self.scene.sceneRect(), Qt.KeepAspectRatio)
-            self._on_zoom_changed(self.view.transform().m11())
-
-    def _on_zoom_changed(self, scale_val: float) -> None:
-        self.lbl_zoom_val.setText(f"{int(round(scale_val * 100))}%")
+            current_scale = self.view.transform().m11()
+            self._on_zoom_changed(current_scale)
+            self.zoom_bar.set_is_fit(True)
 
     def _apply_zoom(self, factor: float) -> None:
+        self._is_fit_mode = False
+        self.zoom_bar.set_is_fit(False)
         self.view.scale(factor, factor)
-        self._on_zoom_changed(self.view.transform().m11())
+        current_scale = self.view.transform().m11()
+        self._on_zoom_changed(current_scale)
 
-    def _reset_zoom_100(self) -> None:
-        self.view.resetTransform()
-        self._on_zoom_changed(1.0)
+    def _on_slider_zoom_moved(self, pct: int) -> None:
+        self._is_fit_mode = False
+        self.zoom_bar.set_is_fit(False)
+        target_scale = max(0.1, min(5.0, pct / 100.0))
+        current_scale = self.view.transform().m11()
+        if abs(current_scale) > 1e-4:
+            factor = target_scale / current_scale
+            self.view.scale(factor, factor)
+        self._on_zoom_changed(target_scale)
 
-    def _fit_to_view(self) -> None:
-        if self.scene.sceneRect().isValid() and self.scene.sceneRect().width() > 0:
-            self.view.fitInView(self.scene.sceneRect(), Qt.KeepAspectRatio)
-            self._on_zoom_changed(self.view.transform().m11())
+    def _on_zoom_changed(self, scale_val: float) -> None:
+        if hasattr(self, "zoom_bar"):
+            self.zoom_bar.update_zoom_display(scale_val)
 
     def _on_blur_changed(self, val: int) -> None:
         self.lbl_blur_val.setText(f"{val} px")
@@ -1960,6 +2343,18 @@ class PortraitBokehDialog(QDialog):
         )
         pm = _cv2_to_qpixmap(self.rendered_proxy)
         self.bg_item.setPixmap(pm)
+        ph, pw = self.proxy_bgr.shape[:2]
+        self.scene.setSceneRect(QRectF(0, 0, pw, ph))
+        if self._is_fit_mode:
+            self.view.fitInView(self.scene.sceneRect(), Qt.KeepAspectRatio)
+            self._on_zoom_changed(self.view.transform().m11())
+
+    def _show_original(self) -> None:
+        self.bg_item.setPixmap(_cv2_to_qpixmap(self.proxy_bgr))
+
+    def _restore_bokeh(self) -> None:
+        if self.rendered_proxy is not None:
+            self.bg_item.setPixmap(_cv2_to_qpixmap(self.rendered_proxy))
         ph, pw = self.proxy_bgr.shape[:2]
         self.scene.setSceneRect(QRectF(0, 0, pw, ph))
 
@@ -2073,52 +2468,71 @@ class CinematicMotionDialog(QDialog):
 
         self.setWindowTitle("3D Cinematic Motion Video Generator")
         self.setWindowIcon(make_wlpg_icon("slideshow", 24))
-        self.resize(780, 520)
+        self.resize(1240, 800)
+        self.setMinimumSize(960, 620)
         self._init_ui()
         self._build_preview_loop()
 
     def _init_ui(self) -> None:
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(16, 14, 16, 16)
-        layout.setSpacing(12)
+        main_layout = QHBoxLayout(self)
+        main_layout.setContentsMargins(10, 10, 10, 10)
+        main_layout.setSpacing(10)
 
-        # Header
-        header_frame = QFrame()
-        header_frame.setStyleSheet("""
-            QFrame {
-                background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #fcfdfe, stop:1 #e8eff7);
-                border: 1px solid #c0d0e6;
-                border-radius: 5px;
-                padding: 6px 12px;
-            }
-        """)
-        h_layout = QHBoxLayout(header_frame)
-        h_layout.setContentsMargins(4, 2, 4, 2)
+        # ---------------- Left: Live Animated View & Progress / Status ----------------
+        left_widget = QWidget(self)
+        left_layout = QVBoxLayout(left_widget)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+        left_layout.setSpacing(6)
 
-        lbl_icon = QLabel()
-        lbl_icon.setPixmap(make_wlpg_icon("slideshow", 28).pixmap(28, 28))
-        h_layout.addWidget(lbl_icon)
+        self.lbl_thumb = QLabel(self)
+        self.lbl_thumb.setAlignment(Qt.AlignCenter)
+        self.lbl_thumb.setStyleSheet("background: #1C1C1E; border: 1px solid #555558; border-radius: 4px;")
+        left_layout.addWidget(self.lbl_thumb, 1)
 
-        title_vbox = QVBoxLayout()
-        lbl_title = QLabel("3D Cinematic Motion Video Generator")
-        lbl_title.setStyleSheet("font-size: 15px; font-weight: bold; color: #1e395b;")
-        lbl_sub = QLabel("Renders a smooth 3D virtual camera dolly .mp4 video with parallax layer shift (Google Photos style).")
-        lbl_sub.setStyleSheet("color: #555555; font-size: 11px;")
-        title_vbox.addWidget(lbl_title)
-        title_vbox.addWidget(lbl_sub)
-        h_layout.addLayout(title_vbox)
-        h_layout.addStretch(1)
-        layout.addWidget(header_frame)
+        # Progress bar
+        self.progress_bar = QProgressBar(self)
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(0)
+        self.progress_bar.setFixedHeight(8)
+        self.progress_bar.setStyleSheet("QProgressBar { height: 8px; border: none; background: #e0e0e0; border-radius: 4px; } QProgressBar::chunk { background: #2D72BC; border-radius: 4px; }")
+        self.progress_bar.setVisible(False)
+        left_layout.addWidget(self.progress_bar)
 
-        # Settings
-        frame_set = QFrame()
-        frame_set.setStyleSheet("background: #f4f6fa; border: 1px solid #d0d7e5; border-radius: 4px; padding: 6px;")
-        set_layout = QHBoxLayout(frame_set)
-        set_layout.setContentsMargins(8, 6, 8, 6)
-        set_layout.setSpacing(12)
+        # Status bar
+        status_bar = QHBoxLayout()
+        status_bar.setContentsMargins(4, 2, 4, 2)
+        status_bar.setSpacing(8)
 
-        set_layout.addWidget(QLabel("Motion Style:"))
-        self.cmb_motion = QComboBox()
+        self.lbl_status = QLabel("Live 3D Parallax Preview (Interactive Loop)", self)
+        self.lbl_status.setStyleSheet("color: #444; font-size: 11px;")
+        status_bar.addWidget(self.lbl_status)
+
+        status_bar.addStretch(1)
+
+        h_orig, w_orig = self.original_bgr.shape[:2]
+        exp_w, exp_h = compute_target_dimensions(w_orig, h_orig, max_long_edge=1920)
+        lbl_res = QLabel(f"Export: {exp_w} × {exp_h} @ 30fps", self)
+        lbl_res.setStyleSheet("color: #666; font-size: 11px;")
+        status_bar.addWidget(lbl_res)
+
+        left_layout.addLayout(status_bar)
+        main_layout.addWidget(left_widget, 1)
+
+        # ---------------- Right: Settings Sidebar ----------------
+        sidebar_scroll = QScrollArea(self)
+        sidebar_scroll.setFixedWidth(280)
+        sidebar_scroll.setWidgetResizable(True)
+        sidebar_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        sidebar_scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
+
+        sidebar_content = QWidget()
+        sidebar_layout = QVBoxLayout(sidebar_content)
+        sidebar_layout.setContentsMargins(0, 0, 4, 0)
+        sidebar_layout.setSpacing(8)
+
+        # 1. Camera Motion
+        grp_motion = _FineTuneGroup("Camera Trajectory")
+        self.cmb_motion = QComboBox(self)
         self.cmb_motion.addItems([
             "Orbital 3D Parallax",
             "Cinematic Dolly Push-In",
@@ -2126,68 +2540,89 @@ class CinematicMotionDialog(QDialog):
             "Gentle Floating Breathe",
         ])
         self.cmb_motion.currentIndexChanged.connect(self._build_preview_loop)
-        set_layout.addWidget(self.cmb_motion)
+        grp_motion.layout().addWidget(self.cmb_motion)
 
-        set_layout.addWidget(QLabel("Depth 3D:"))
-        self.sld_intensity = QSlider(Qt.Horizontal)
+        lbl_i_hdr = QHBoxLayout()
+        lbl_i_title = QLabel("Parallax Depth:")
+        lbl_i_title.setStyleSheet("font-size: 11px; color: #444;")
+        self.lbl_intensity_val = QLabel("50%")
+        self.lbl_intensity_val.setStyleSheet("font-weight: bold; font-size: 11px; color: #1e395b;")
+        lbl_i_hdr.addWidget(lbl_i_title)
+        lbl_i_hdr.addStretch(1)
+        lbl_i_hdr.addWidget(self.lbl_intensity_val)
+        grp_motion.layout().addLayout(lbl_i_hdr)
+
+        self.sld_intensity = _AeroFineTuneSlider(default_value=50)
         self.sld_intensity.setRange(10, 100)
         self.sld_intensity.setValue(50)
-        self.sld_intensity.setFixedWidth(80)
         self.sld_intensity.setToolTip("Parallax virtual camera displacement intensity")
-        self.sld_intensity.valueChanged.connect(self._build_preview_loop)
-        set_layout.addWidget(self.sld_intensity)
+        self.sld_intensity.valueChanged.connect(self._on_intensity_changed)
+        grp_motion.layout().addWidget(self.sld_intensity)
+        sidebar_layout.addWidget(grp_motion)
 
-        set_layout.addWidget(QLabel("Duration:"))
-        self.cmb_duration = QComboBox()
+        # 2. Video Duration
+        grp_video = _FineTuneGroup("Video Settings")
+        lbl_dur = QLabel("Clip Duration:")
+        lbl_dur.setStyleSheet("font-size: 11px; color: #444;")
+        grp_video.layout().addWidget(lbl_dur)
+        self.cmb_duration = QComboBox(self)
         self.cmb_duration.addItems(["3 seconds (90 frames)", "5 seconds (150 frames)", "8 seconds (240 frames)"])
         self.cmb_duration.setCurrentIndex(1)
-        set_layout.addWidget(self.cmb_duration)
+        grp_video.layout().addWidget(self.cmb_duration)
 
-        h_orig, w_orig = self.original_bgr.shape[:2]
-        exp_w, exp_h = compute_target_dimensions(w_orig, h_orig, max_long_edge=1920)
-        set_layout.addWidget(QLabel(f"Resolution: {exp_w} × {exp_h} @ 30fps"))
-        set_layout.addStretch(1)
-        layout.addWidget(frame_set)
+        lbl_enc = QLabel("Format: H.264 / MP4 (30 FPS)\nSmooth cubic trajectory easing", self)
+        lbl_enc.setStyleSheet("color: #666; font-size: 10px; margin-top: 4px;")
+        grp_video.layout().addWidget(lbl_enc)
+        sidebar_layout.addWidget(grp_video)
 
-        # Live animated preview view
-        self.lbl_thumb = QLabel()
-        self.lbl_thumb.setAlignment(Qt.AlignCenter)
-        self.lbl_thumb.setStyleSheet("background: #1c1c1e; border: 1px solid #666; border-radius: 4px;")
-        layout.addWidget(self.lbl_thumb, 1)
+        sidebar_layout.addStretch(1)
 
-        # Progress bar
-        self.progress_bar = QProgressBar()
-        self.progress_bar.setRange(0, 100)
-        self.progress_bar.setValue(0)
-        self.progress_bar.setStyleSheet("QProgressBar { height: 8px; border: none; background: #e0e0e0; } QProgressBar::chunk { background: #2D72BC; }")
-        layout.addWidget(self.progress_bar)
+        # Save and Cancel
+        btn_box = QHBoxLayout()
+        btn_box.setSpacing(6)
 
-        self.lbl_status = QLabel("Live 3D Parallax Preview (Interactive Loop)")
-        self.lbl_status.setStyleSheet("color: #444; font-size: 11px;")
-        layout.addWidget(self.lbl_status)
-
-        # Bottom buttons
-        btn_layout = QHBoxLayout()
-        btn_layout.addStretch(1)
-
-        self.btn_render = QPushButton("Save New 3D Motion Video (.mp4)...")
+        self.btn_render = QPushButton("Save Video...", self)
         self.btn_render.setStyleSheet("""
             QPushButton {
                 background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #3c82e6, stop:1 #1c52ba);
                 color: white; font-weight: bold; border: 1px solid #143e8c;
-                border-radius: 4px; padding: 7px 22px; min-width: 160px;
+                border-radius: 4px; padding: 6px 14px; min-width: 90px;
             }
             QPushButton:hover { background: #4d8ff2; }
             QPushButton:disabled { background: #ccc; color: #888; }
         """)
         self.btn_render.clicked.connect(self._start_render)
-        btn_layout.addWidget(self.btn_render)
+        btn_box.addWidget(self.btn_render, 1)
 
-        btn_cancel = QPushButton("Cancel")
+        btn_cancel = QPushButton("Cancel", self)
+        btn_cancel.setStyleSheet("padding: 6px 12px; border-radius: 4px; border: 1px solid #ccc; background: #f0f0f0;")
         btn_cancel.clicked.connect(self._on_cancel)
-        btn_layout.addWidget(btn_cancel)
+        btn_box.addWidget(btn_cancel)
 
-        layout.addLayout(btn_layout)
+        sidebar_layout.addLayout(btn_box)
+
+        sidebar_scroll.setWidget(sidebar_content)
+        main_layout.addWidget(sidebar_scroll)
+
+    def _on_intensity_changed(self, val: int) -> None:
+        self.lbl_intensity_val.setText(f"{val}%")
+        self._build_preview_loop()
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._update_current_pixmap()
+
+    def _update_current_pixmap(self) -> None:
+        if not self._preview_frames or self._current_frame_idx >= len(self._preview_frames):
+            return
+        pm = self._preview_frames[self._current_frame_idx]
+        avail_size = self.lbl_thumb.size()
+        if avail_size.width() > 60 and avail_size.height() > 60:
+            target_size = QSize(avail_size.width() - 12, avail_size.height() - 12)
+            scaled = pm.scaled(target_size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            self.lbl_thumb.setPixmap(scaled)
+        else:
+            self.lbl_thumb.setPixmap(pm)
 
     def _build_preview_loop(self) -> None:
         """Precomputes smooth parallax frames preserving native aspect ratio for real-time live preview."""
@@ -2233,18 +2668,18 @@ class CinematicMotionDialog(QDialog):
             self._preview_frames.append(_cv2_to_qpixmap(frame))
 
         if self._preview_frames:
-            self.lbl_thumb.setPixmap(self._preview_frames[0])
+            self._current_frame_idx = 0
+            self._update_current_pixmap()
             if not self._timer:
                 self._timer = QTimer(self)
                 self._timer.timeout.connect(self._advance_preview_frame)
-            self._current_frame_idx = 0
             self._timer.start(55)
 
     def _advance_preview_frame(self) -> None:
         if not self._preview_frames:
             return
         self._current_frame_idx = (self._current_frame_idx + 1) % len(self._preview_frames)
-        self.lbl_thumb.setPixmap(self._preview_frames[self._current_frame_idx])
+        self._update_current_pixmap()
 
     def _start_render(self) -> None:
         out_path = prompt_save_new_file(
@@ -2260,6 +2695,7 @@ class CinematicMotionDialog(QDialog):
         if self._timer:
             self._timer.stop()
         self.btn_render.setEnabled(False)
+        self.progress_bar.setVisible(True)
         self.progress_bar.setValue(0)
         self.lbl_status.setText("Estimating depth layers and inpainting background disocclusion...")
 
@@ -2294,6 +2730,7 @@ class CinematicMotionDialog(QDialog):
         self.lbl_status.setText(f"Encoding 3D virtual camera frames: {val}%")
 
     def _on_finished(self, ok: bool, msg: str, out_path: Path) -> None:
+        self.progress_bar.setVisible(False)
         self.btn_render.setEnabled(True)
         if ok and out_path.exists():
             self.saved_file_path = out_path

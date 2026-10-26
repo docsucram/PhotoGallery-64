@@ -121,6 +121,18 @@ _FLUENT_MAP: dict[str, tuple[str, str]] = {
     "rated_lower": ("msc.arrow-down", "#0078D4"),
     "rated_only": ("ri.equal-line", "#0078D4"),
     "boolean_and": ("ri.add-line", "#0078D4"),
+    # Create Tools & Creative UI
+    "eyedropper": ("ri.sip-line", "#0078D4"),
+    "pipette": ("ri.sip-line", "#0078D4"),
+    "brush": ("fa5s.paint-brush", "#0078D4"),
+    "eraser": ("fa5s.eraser", "#D83B01"),
+    "compare": ("ri.split-cells-horizontal", "#0078D4"),
+    "shuffle": ("ri.shuffle-line", "#0078D4"),
+    "face": ("msc.account", "#0078D4"),
+    "refresh": ("msc.refresh", "#0078D4"),
+    "invert": ("ri.contrast-drop-line", "#0078D4"),
+    "play": ("ri.play-fill", "#0078D4"),
+    "pause": ("ri.pause-fill", "#0078D4"),
 }
 
 

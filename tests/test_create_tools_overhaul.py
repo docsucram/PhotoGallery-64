@@ -209,3 +209,72 @@ def test_panorama_cache_and_photo_fuse_color_match():
     assert fused.shape == (200, 200, 3)
     # The fused face region should match the base lighting without harsh cutoff
     assert abs(int(fused[80, 80, 0]) - int(base[80, 80, 0])) < 40
+
+
+def test_create_studio_dialogs_ui_layout_and_zoom_controls(tmp_path):
+    from PySide6.QtWidgets import QApplication
+    from PySide6.QtCore import QSize
+    from pathlib import Path
+    import cv2
+    from src.ui.create_studio_dialogs import (
+        ColourPopDialog,
+        PanoramaDialog,
+        CollageDialog,
+        PhotoFuseDialog,
+        PortraitBokehDialog,
+        CinematicMotionDialog,
+        CreateStudioZoomBar,
+    )
+
+    app = QApplication.instance() or QApplication([])
+
+    # Create dummy images
+    img_bgr = np.full((300, 400, 3), 120, dtype=np.uint8)
+    p1 = tmp_path / "img1.jpg"
+    p2 = tmp_path / "img2.jpg"
+    cv2.imwrite(str(p1), img_bgr)
+    cv2.imwrite(str(p2), img_bgr)
+
+    # 1. ColourPopDialog
+    dlg_cp = ColourPopDialog(img_bgr, file_path=p1)
+    assert dlg_cp.minimumWidth() >= 960
+    assert dlg_cp.minimumHeight() >= 620
+    assert hasattr(dlg_cp, "zoom_bar")
+    assert isinstance(dlg_cp.zoom_bar, CreateStudioZoomBar)
+    dlg_cp.resize(1300, 850)
+    dlg_cp.close()
+
+    # 2. PanoramaDialog
+    dlg_pano = PanoramaDialog([p1, p2])
+    assert dlg_pano.minimumWidth() >= 960
+    assert hasattr(dlg_pano, "zoom_bar")
+    dlg_pano.resize(1200, 800)
+    dlg_pano.close()
+
+    # 3. CollageDialog
+    dlg_col = CollageDialog([{"file_path": str(p1), "image_bgr": img_bgr}, {"file_path": str(p2), "image_bgr": img_bgr}])
+    assert dlg_col.minimumWidth() >= 960
+    assert hasattr(dlg_col, "zoom_bar")
+    dlg_col.resize(1240, 800)
+    dlg_col.close()
+
+    # 4. PhotoFuseDialog
+    dlg_fuse = PhotoFuseDialog([p1, p2])
+    assert dlg_fuse.minimumWidth() >= 960
+    assert hasattr(dlg_fuse, "zoom_bar")
+    dlg_fuse.resize(1240, 800)
+    dlg_fuse.close()
+
+    # 5. PortraitBokehDialog
+    dlg_bokeh = PortraitBokehDialog(img_bgr, file_path=p1)
+    assert dlg_bokeh.minimumWidth() >= 960
+    assert hasattr(dlg_bokeh, "zoom_bar")
+    dlg_bokeh.resize(1240, 800)
+    dlg_bokeh.close()
+
+    # 6. CinematicMotionDialog
+    dlg_motion = CinematicMotionDialog(img_bgr, file_path=p1)
+    assert dlg_motion.minimumWidth() >= 960
+    dlg_motion.resize(1240, 800)
+    dlg_motion.close()
+
