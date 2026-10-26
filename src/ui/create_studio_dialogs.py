@@ -57,6 +57,8 @@ from PySide6.QtWidgets import (
 
 from src.imaging.create_tools import (
     stitch_panorama,
+    stitch_panorama_raw,
+    postprocess_panorama,
     create_grid_collage,
     create_polaroid_scatter_collage,
     create_then_and_now_card,
@@ -65,10 +67,18 @@ from src.imaging.create_tools import (
     fuse_face,
 )
 from src.imaging.creative_effects import (
+    load_bgr_exif_safe,
+    guided_filter_matte,
     estimate_subject_mask,
+    estimate_depth_map,
+    compute_color_similarity_mask,
     apply_color_pop,
     refine_mask_brush,
+    build_bokeh_pyramid,
+    apply_portrait_bokeh,
     apply_portrait_bokeh_and_fill_light,
+    compute_target_dimensions,
+    render_3d_cinematic_motion_frame,
     render_3d_cinematic_motion_video,
 )
 from src.ui.ribbon_toolbar import make_wlpg_icon
@@ -137,30 +147,24 @@ def prompt_save_new_file(
 class PanoramaWorker(QThread):
     """Background worker for multi-image stitching."""
     progress_updated = Signal(str)
-    stitching_finished = Signal(bool, object, str)
+    raw_stitching_finished = Signal(bool, object, str)
 
     def __init__(
         self,
         images_bgr: list[np.ndarray],
         projection_mode: str,
-        auto_crop: bool,
-        fill_minor_gaps: bool,
     ) -> None:
         super().__init__()
         self.images_bgr = images_bgr
         self.projection_mode = projection_mode
-        self.auto_crop = auto_crop
-        self.fill_minor_gaps = fill_minor_gaps
 
     def run(self) -> None:
         self.progress_updated.emit("Analyzing feature keypoints & camera trajectories...")
-        success, result_bgr, msg = stitch_panorama(
+        success, raw_bgr, msg = stitch_panorama_raw(
             self.images_bgr,
             projection_mode=self.projection_mode,
-            auto_crop=self.auto_crop,
-            fill_minor_gaps=self.fill_minor_gaps,
         )
-        self.stitching_finished.emit(success, result_bgr, msg)
+        self.raw_stitching_finished.emit(success, raw_bgr, msg)
 
 
 class PanoramaDialog(QDialog):
@@ -224,13 +228,13 @@ class PanoramaDialog(QDialog):
         self.chk_autocrop = QCheckBox("Auto-crop wavy black edges (Signature ICE)")
         self.chk_autocrop.setChecked(True)
         self.chk_autocrop.setToolTip("Computes the largest axis-aligned interior rectangle containing zero black border pixels.")
-        self.chk_autocrop.toggled.connect(self._on_settings_changed)
+        self.chk_autocrop.toggled.connect(self._on_crop_or_inpaint_toggled)
         bar_layout.addWidget(self.chk_autocrop)
 
         self.chk_inpaint = QCheckBox("Fill minor border gaps (Inpaint)")
         self.chk_inpaint.setChecked(False)
         self.chk_inpaint.setToolTip("Inpaints minor sky/grass corner gaps using Telea diffusion before cropping.")
-        self.chk_inpaint.toggled.connect(self._on_settings_changed)
+        self.chk_inpaint.toggled.connect(self._on_crop_or_inpaint_toggled)
         bar_layout.addWidget(self.chk_inpaint)
 
         bar_layout.addStretch(1)
@@ -297,10 +301,10 @@ class PanoramaDialog(QDialog):
         self.btn_restitch.setEnabled(False)
         self.lbl_status.setText("Loading photos & initializing stitcher...")
 
-        # Load photos in BGR
+        # Load photos in BGR respecting EXIF orientation
         images_bgr = []
         for p in self.photo_paths:
-            img = cv2.imread(str(p))
+            img = load_bgr_exif_safe(p)
             if img is not None:
                 images_bgr.append(img)
 
@@ -316,38 +320,48 @@ class PanoramaDialog(QDialog):
         self._worker = PanoramaWorker(
             images_bgr=images_bgr,
             projection_mode=proj_mode,
-            auto_crop=self.chk_autocrop.isChecked(),
-            fill_minor_gaps=self.chk_inpaint.isChecked(),
         )
         self._worker.progress_updated.connect(self.lbl_status.setText)
-        self._worker.stitching_finished.connect(self._on_stitch_completed)
+        self._worker.raw_stitching_finished.connect(self._on_raw_stitch_completed)
         self._worker.start()
 
-    def _on_stitch_completed(self, success: bool, result_bgr: np.ndarray, msg: str) -> None:
+    def _on_raw_stitch_completed(self, success: bool, raw_bgr: np.ndarray, msg: str) -> None:
         self.progress_bar.setVisible(False)
         self.btn_restitch.setEnabled(True)
-        self.lbl_status.setText(msg)
 
-        if not success or result_bgr is None or result_bgr.size == 0:
+        if not success or raw_bgr is None or raw_bgr.size == 0:
+            self.lbl_status.setText(msg)
             QMessageBox.warning(self, "Panorama Stitching", f"Could not stitch panorama:\n{msg}")
             return
 
-        self.current_stitched_bgr = result_bgr
+        self.raw_stitched_bgr = raw_bgr
+        self._on_crop_or_inpaint_toggled()
+        self.lbl_status.setText(msg)
+
+    def _on_crop_or_inpaint_toggled(self) -> None:
+        """Fast <50ms cache-based postprocessing without re-stitching."""
+        if self.raw_stitched_bgr is None:
+            return
+
+        self.current_stitched_bgr = postprocess_panorama(
+            self.raw_stitched_bgr,
+            auto_crop=self.chk_autocrop.isChecked(),
+            fill_minor_gaps=self.chk_inpaint.isChecked(),
+        )
         self.btn_save.setEnabled(True)
 
-        h, w = result_bgr.shape[:2]
-        self.lbl_dims.setText(f"Dimensions: {w} × {h} px ({w*h//1_000_000} MP)")
+        h, w = self.current_stitched_bgr.shape[:2]
+        self.lbl_dims.setText(f"Dimensions: {w} × {h} px ({w * h // 1_000_000} MP)")
 
         # Render preview pixmap
-        pm = _cv2_to_qpixmap(result_bgr)
+        pm = _cv2_to_qpixmap(self.current_stitched_bgr)
         self.preview_pixmap_item.setPixmap(pm)
         self.preview_scene.setSceneRect(QRectF(pm.rect()))
         self.preview_view.fitInView(self.preview_scene.sceneRect(), Qt.KeepAspectRatio)
 
     def _on_settings_changed(self) -> None:
-        # Re-stitch when projection or options change
-        if self.current_stitched_bgr is not None:
-            self._load_and_stitch()
+        # Re-stitch when projection mode changes
+        self._load_and_stitch()
 
     def _save_panorama(self) -> None:
         if self.current_stitched_bgr is None:
@@ -493,6 +507,12 @@ class CollageDialog(QDialog):
 
         ctrl_layout.addStretch(1)
 
+        # Shuffle Button
+        self.btn_shuffle = QPushButton("🔀 Shuffle Photo Order")
+        self.btn_shuffle.setStyleSheet("background: #ffffff; border: 1px solid #b0c2de; border-radius: 3px; padding: 5px;")
+        self.btn_shuffle.clicked.connect(self._shuffle_photos)
+        ctrl_layout.addWidget(self.btn_shuffle)
+
         # Save and Cancel
         self.btn_save = QPushButton("Save New Collage...")
         self.btn_save.setStyleSheet("""
@@ -547,26 +567,30 @@ class CollageDialog(QDialog):
             return 3508, 2480
         return 1920, 1080
 
-    def _render_preview(self) -> None:
-        target_size = self._get_target_resolution()
+    def _shuffle_photos(self) -> None:
+        import random
+        random.shuffle(self.photos_data)
+        self._render_preview()
+
+    def _render_canvas(self, target_size: tuple[int, int]) -> np.ndarray:
         style_idx = self.cmb_style.currentIndex()
 
-        # Build list of numpy images
+        # Build list of numpy images respecting EXIF
         images_bgr = []
         for d in self.photos_data:
             img = d.get("image_bgr")
             if img is None and d.get("file_path"):
-                img = cv2.imread(str(d["file_path"]))
+                img = load_bgr_exif_safe(d["file_path"])
+                d["image_bgr"] = img
             if img is not None:
                 images_bgr.append(img)
 
         if not images_bgr:
-            return
+            return np.full((target_size[1], target_size[0], 3), (245, 245, 248), dtype=np.uint8)
 
         if style_idx == 0:
-            # Modern Grid
             layout_name = self.cmb_grid_layout.currentText().lower().replace(" ", "_")
-            rendered = create_grid_collage(
+            return create_grid_collage(
                 images_bgr=images_bgr,
                 layout=layout_name,
                 border_thickness=self.sld_border.value(),
@@ -575,7 +599,6 @@ class CollageDialog(QDialog):
                 target_size=target_size,
             )
         elif style_idx == 1:
-            # Polaroid Scatter
             tex_name = "dark_wood" if "Wood" in self.cmb_texture.currentText() else ("linen" if "Linen" in self.cmb_texture.currentText() else "slate")
             polaroid_data = []
             for i, d in enumerate(self.photos_data):
@@ -585,14 +608,13 @@ class CollageDialog(QDialog):
                         "caption": d.get("caption") or d.get("date_taken") or d.get("filename"),
                         "date_str": str(d.get("date_taken") or ""),
                     })
-            rendered = create_polaroid_scatter_collage(
+            return create_polaroid_scatter_collage(
                 images_data=polaroid_data,
                 target_size=target_size,
                 bg_style=tex_name,
                 print_captions=self.chk_captions.isChecked(),
             )
         else:
-            # Then & Now Comparison Card
             then_now_data = []
             for i, d in enumerate(self.photos_data):
                 if i < len(images_bgr):
@@ -601,11 +623,19 @@ class CollageDialog(QDialog):
                         "date_taken": d.get("date_taken") or d.get("date_str") or "",
                         "caption": d.get("caption") or "",
                     })
-            rendered = create_then_and_now_card(
+            return create_then_and_now_card(
                 images_data=then_now_data,
                 target_size=target_size,
             )
 
+    def _render_preview(self) -> None:
+        full_w, full_h = self._get_target_resolution()
+        # Scale proxy to max 1280px for instant 60 FPS slider response
+        scale = min(1.0, 1280.0 / max(full_w, full_h))
+        pw = max(16, int(round(full_w * scale)))
+        ph = max(16, int(round(full_h * scale)))
+
+        rendered = self._render_canvas(target_size=(pw, ph))
         self.rendered_bgr = rendered
 
         # Display in QGraphicsView
@@ -614,16 +644,28 @@ class CollageDialog(QDialog):
         self.preview_scene.setSceneRect(QRectF(pm.rect()))
         self.preview_view.fitInView(self.preview_scene.sceneRect(), Qt.KeepAspectRatio)
 
-        h, w = rendered.shape[:2]
-        self.lbl_info.setText(f"Canvas size: {w} × {h} px • {len(images_bgr)} photos included")
+        self.lbl_info.setText(f"Preview: {pw} × {ph} px (Full export: {full_w} × {full_h} px) • {len(self.photos_data)} photos")
 
     def _save_collage(self) -> None:
-        if self.rendered_bgr is None:
-            return
-
         first_path = self.photos_data[0].get("file_path") if self.photos_data else None
         if first_path is not None and not isinstance(first_path, Path):
             first_path = Path(first_path)
+        out_path = prompt_save_new_file(self, first_path, "collage", ".jpg")
+        if not out_path:
+            return
+
+        self.lbl_info.setText("Rendering full-resolution collage for export...")
+        QApplication.processEvents()
+
+        full_size = self._get_target_resolution()
+        full_res_bgr = self._render_canvas(target_size=full_size)
+
+        try:
+            cv2.imwrite(str(out_path), full_res_bgr, [int(cv2.IMWRITE_JPEG_QUALITY), 96])
+            self.saved_file_path = out_path
+            self.accept()
+        except Exception as e:
+            QMessageBox.critical(self, "Save Collage Failed", f"Could not save collage file:\n{e}")
         out_path = prompt_save_new_file(self, first_path, "collage", ".jpg")
         if not out_path:
             return
@@ -781,12 +823,8 @@ class PhotoFuseDialog(QDialog):
     def _align_and_detect(self) -> None:
         """Loads and aligns all secondary burst photos to base frame 0."""
         for p in self.photo_paths:
-            img = cv2.imread(str(p))
+            img = load_bgr_exif_safe(p)
             if img is not None:
-                if len(img.shape) == 2:
-                    img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
-                elif img.shape[2] == 4:
-                    img = cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
                 self.frames_bgr.append(img)
 
         if len(self.frames_bgr) < 2:
@@ -932,9 +970,11 @@ class ColourPopCanvasView(QGraphicsView):
     High-performance interactive canvas for Colour Pop brush editing:
     - Real-time circular brush cursor following the pointer.
     - Continuous stroke interpolation between mouse moves so fast drags do not leave gaps.
+    - Eyedropper mode for clicking and sampling colours directly from the image.
     - Middle-click or Space+Drag for panning, mouse wheel for zoom.
     """
     brush_applied = Signal(int, int)
+    color_picked = Signal(int, int)
     stroke_started = Signal()
     stroke_finished = Signal()
     zoom_changed = Signal(float)
@@ -952,6 +992,7 @@ class ColourPopCanvasView(QGraphicsView):
         self.brush_radius: int = 28
         self._is_painting: bool = False
         self._space_pressed: bool = False
+        self.eyedropper_mode: bool = False
         self._last_pt: QPointF | None = None
 
         self._cursor_item = QGraphicsEllipseItem()
@@ -966,7 +1007,22 @@ class ColourPopCanvasView(QGraphicsView):
         rad = self.brush_radius
         self._cursor_item.setRect(QRectF(center.x() - rad, center.y() - rad, 2 * rad, 2 * rad))
 
+    def set_eyedropper_mode(self, enabled: bool) -> None:
+        self.eyedropper_mode = bool(enabled)
+        if self.eyedropper_mode:
+            self._cursor_item.hide()
+            self.setCursor(Qt.CrossCursor)
+        else:
+            self.setCursor(Qt.BlankCursor)
+            self._cursor_item.show()
+
     def mousePressEvent(self, event) -> None:
+        if self.eyedropper_mode and event.button() == Qt.LeftButton:
+            sp = self.mapToScene(event.pos())
+            self.color_picked.emit(int(round(sp.x())), int(round(sp.y())))
+            event.accept()
+            return
+
         if event.button() == Qt.LeftButton and not self._space_pressed:
             self._is_painting = True
             sp = self.mapToScene(event.pos())
@@ -1167,6 +1223,9 @@ class ColourPopDialog(QDialog):
         self.brush_radius = 28
         self.bg_contrast = 1.15
         self.bg_brightness = 0.0
+        self.color_tolerance = 0.25
+        self.show_mask_overlay = False
+        self.last_picked_color: tuple[int, int, int] | None = None
         self._first_fit = True
 
         self.proxy_bw: np.ndarray | None = None
@@ -1269,19 +1328,52 @@ class ColourPopDialog(QDialog):
         self.btn_group_mode.addButton(self.btn_bw)
         bar_layout.addWidget(self.btn_bw)
 
+        self.btn_pick_color = QPushButton("🎯 Pick Colour")
+        self.btn_pick_color.setCheckable(True)
+        self.btn_pick_color.setToolTip("Click any color on the photo to isolate that hue across the photo")
+        self.btn_pick_color.setStyleSheet("""
+            QPushButton {
+                background: #ffffff; border: 1px solid #b0c0d8;
+                border-radius: 3px; padding: 4px 12px; font-weight: 500;
+            }
+            QPushButton:checked {
+                background: #ffe0b2; border: 1px solid #e65100;
+                font-weight: bold; color: #b73800;
+            }
+        """)
+        self.btn_pick_color.clicked.connect(self._toggle_eyedropper)
+        self.btn_group_mode.addButton(self.btn_pick_color)
+        bar_layout.addWidget(self.btn_pick_color)
+
         # Brush size slider
         bar_layout.addSpacing(6)
         bar_layout.addWidget(QLabel("Brush:"))
         self.sld_radius = QSlider(Qt.Horizontal)
         self.sld_radius.setRange(8, 100)
         self.sld_radius.setValue(self.brush_radius)
-        self.sld_radius.setFixedWidth(100)
+        self.sld_radius.setFixedWidth(80)
         self.sld_radius.valueChanged.connect(self._on_radius_changed)
         bar_layout.addWidget(self.sld_radius)
 
         self.lbl_radius_val = QLabel(f"{self.brush_radius} px")
-        self.lbl_radius_val.setStyleSheet("font-weight: bold; color: #333; min-width: 40px;")
+        self.lbl_radius_val.setStyleSheet("font-weight: bold; color: #333; min-width: 36px;")
         bar_layout.addWidget(self.lbl_radius_val)
+
+        # Eyedropper Tolerance slider
+        self.lbl_tol_name = QLabel("Tol:")
+        bar_layout.addWidget(self.lbl_tol_name)
+        self.sld_tol = QSlider(Qt.Horizontal)
+        self.sld_tol.setRange(5, 80)
+        self.sld_tol.setValue(25)
+        self.sld_tol.setFixedWidth(70)
+        self.sld_tol.setToolTip("Colour selection tolerance (5% to 80%)")
+        self.sld_tol.valueChanged.connect(self._on_tolerance_changed)
+        bar_layout.addWidget(self.sld_tol)
+
+        self.chk_overlay = QCheckBox("Mask (Red)")
+        self.chk_overlay.setToolTip("Show semi-transparent red rubylith overlay on masked background")
+        self.chk_overlay.toggled.connect(self._on_overlay_toggled)
+        bar_layout.addWidget(self.chk_overlay)
 
         # B&W Contrast slider
         bar_layout.addSpacing(6)
@@ -1342,6 +1434,7 @@ class ColourPopDialog(QDialog):
         self.view.setScene(self.scene)
         self.view.set_brush_radius(self.brush_radius)
         self.view.brush_applied.connect(self._on_brush_applied)
+        self.view.color_picked.connect(self._on_color_picked)
         self.view.stroke_started.connect(self._on_stroke_started)
         self.view.zoom_changed.connect(self._on_zoom_changed)
         self.view.setStyleSheet("background: #252528; border: 1px solid #777; border-radius: 4px;")
@@ -1444,11 +1537,52 @@ class ColourPopDialog(QDialog):
         gray_adj = np.clip((gray - 128.0) * self.bg_contrast + 128.0 + self.bg_brightness, 0.0, 255.0)
         self.proxy_bw = cv2.cvtColor(gray_adj.astype(np.uint8), cv2.COLOR_GRAY2BGR)
 
+    def _toggle_eyedropper(self) -> None:
+        self.brush_mode = "eyedropper"
+        self.view.set_eyedropper_mode(True)
+        self.lbl_tol_name.setVisible(True)
+        self.sld_tol.setVisible(True)
+        self.lbl_status.setText("🎯 Eyedropper Active: Click any pixel on the photo to isolate that colour.")
+
     def _set_brush_mode(self, mode: str) -> None:
         self.brush_mode = mode
+        self.view.set_eyedropper_mode(False)
+        self.lbl_tol_name.setVisible(False)
+        self.sld_tol.setVisible(False)
         self.btn_keep.setChecked(mode == "keep_color")
         self.btn_bw.setChecked(mode == "make_bw")
+        self.btn_pick_color.setChecked(False)
         self.lbl_status.setText(f"Active Brush: {'Keep Vibrant Colour (+)' if mode == 'keep_color' else 'Make Dramatic B&W (-)'}")
+
+    def _on_color_picked(self, sx: int, sy: int) -> None:
+        ph, pw = self.proxy_bgr.shape[:2]
+        if not (0 <= sx < pw and 0 <= sy < ph):
+            return
+        target_bgr = tuple(int(c) for c in self.proxy_bgr[sy, sx])
+        self.last_picked_color = target_bgr
+        self._on_stroke_started()
+        self.proxy_mask = compute_color_similarity_mask(
+            self.proxy_bgr,
+            target_bgr=target_bgr,
+            tolerance=self.color_tolerance,
+        )
+        self._fast_refresh_proxy()
+        self.lbl_status.setText(f"✓ Isolated colour at ({sx}, {sy}) with tolerance {int(self.color_tolerance * 100)}%.")
+
+    def _on_tolerance_changed(self, val: int) -> None:
+        self.color_tolerance = val / 100.0
+        if self.last_picked_color is not None and self.brush_mode == "eyedropper":
+            self.proxy_mask = compute_color_similarity_mask(
+                self.proxy_bgr,
+                target_bgr=self.last_picked_color,
+                tolerance=self.color_tolerance,
+            )
+            self._fast_refresh_proxy()
+            self.lbl_status.setText(f"Adjusted colour tolerance to {val}%.")
+
+    def _on_overlay_toggled(self, checked: bool) -> None:
+        self.show_mask_overlay = bool(checked)
+        self._fast_refresh_proxy()
 
     def _on_radius_changed(self, val: int) -> None:
         self.brush_radius = val
@@ -1495,6 +1629,12 @@ class ColourPopDialog(QDialog):
             self._precompute_proxy_bw()
         m3 = self.proxy_mask[:, :, None]
         blended = (self.proxy_bgr.astype(np.float32) * m3 + self.proxy_bw.astype(np.float32) * (1.0 - m3)).astype(np.uint8)
+        if self.show_mask_overlay:
+            # Tint unmasked background with semi-transparent red rubylith (40% red)
+            red_tint = np.zeros_like(blended)
+            red_tint[:, :, 2] = 230  # Red channel in BGR
+            bg_alpha = (1.0 - self.proxy_mask[:, :, None]) * 0.40
+            blended = (blended.astype(np.float32) * (1.0 - bg_alpha) + red_tint.astype(np.float32) * bg_alpha).astype(np.uint8)
         self.bg_item.setPixmap(_cv2_to_qpixmap(blended))
 
     def _refresh_canvas(self) -> None:
@@ -1547,11 +1687,13 @@ class ColourPopDialog(QDialog):
         QApplication.processEvents()
 
         h, w = self.original_bgr.shape[:2]
-        # Upscale proxy mask to full camera resolution
+        # Upscale proxy mask to full camera resolution and refine with guided filter
         if self.proxy_scale != 1.0:
             full_mask = cv2.resize(self.proxy_mask, (w, h), interpolation=cv2.INTER_LINEAR)
         else:
-            full_mask = self.proxy_mask
+            full_mask = self.proxy_mask.copy()
+
+        full_mask = guided_filter_matte(self.original_bgr, full_mask, radius=16, eps=1e-3)
 
         # Render full resolution
         full_color_pop = apply_color_pop(
@@ -1616,6 +1758,7 @@ class PortraitBokehDialog(QDialog):
 
         full_mask = estimate_subject_mask(self.original_bgr)
         self.proxy_mask = cv2.resize(full_mask, (self.proxy_bgr.shape[1], self.proxy_bgr.shape[0]), interpolation=cv2.INTER_LINEAR)
+        self.proxy_bokeh_pyramid = build_bokeh_pyramid(self.proxy_bgr, max_blur_radius=36.0)
         self.rendered_proxy: np.ndarray | None = None
         self._first_fit = True
 
@@ -1813,6 +1956,7 @@ class PortraitBokehDialog(QDialog):
             self.proxy_mask,
             bokeh_radius=b_rad,
             fill_light=fill_val,
+            bokeh_pyramid=self.proxy_bokeh_pyramid,
         )
         pm = _cv2_to_qpixmap(self.rendered_proxy)
         self.bg_item.setPixmap(pm)
@@ -1832,7 +1976,13 @@ class PortraitBokehDialog(QDialog):
             return
 
         h, w = self.original_bgr.shape[:2]
-        full_mask = cv2.resize(self.proxy_mask, (w, h), interpolation=cv2.INTER_LINEAR) if self.proxy_scale != 1.0 else self.proxy_mask
+        if self.proxy_scale != 1.0:
+            full_mask = cv2.resize(self.proxy_mask, (w, h), interpolation=cv2.INTER_LINEAR)
+        else:
+            full_mask = self.proxy_mask.copy()
+
+        full_mask = guided_filter_matte(self.original_bgr, full_mask, radius=16, eps=1e-3)
+
         full_bokeh = apply_portrait_bokeh_and_fill_light(
             self.original_bgr,
             full_mask,
@@ -1856,20 +2006,33 @@ class CinematicMotionWorker(QThread):
     progress = Signal(int)
     finished = Signal(bool, str)
 
-    def __init__(self, image_bgr: np.ndarray, out_path: Path, duration: float) -> None:
+    def __init__(
+        self,
+        image_bgr: np.ndarray,
+        out_path: Path,
+        duration: float,
+        motion_style: str = "orbital",
+        intensity: float = 0.5,
+    ) -> None:
         super().__init__()
         self.image_bgr = image_bgr
         self.out_path = out_path
         self.duration = duration
+        self.motion_style = motion_style
+        self.intensity = intensity
 
     def run(self) -> None:
         try:
+            h, w = self.image_bgr.shape[:2]
+            target_res = compute_target_dimensions(w, h, max_long_edge=1920)
             success = render_3d_cinematic_motion_video(
                 self.image_bgr,
                 self.out_path,
                 duration_sec=self.duration,
                 fps=30,
-                resolution=(1920, 1080),
+                resolution=target_res,
+                motion_style=self.motion_style,
+                intensity=self.intensity,
                 progress_callback=self.progress.emit,
             )
             self.finished.emit(success, "Video rendered successfully" if success else "Failed to open video encoder")
@@ -1954,13 +2117,35 @@ class CinematicMotionDialog(QDialog):
         set_layout.setContentsMargins(8, 6, 8, 6)
         set_layout.setSpacing(12)
 
+        set_layout.addWidget(QLabel("Motion Style:"))
+        self.cmb_motion = QComboBox()
+        self.cmb_motion.addItems([
+            "Orbital 3D Parallax",
+            "Cinematic Dolly Push-In",
+            "Horizontal Parallax Drift",
+            "Gentle Floating Breathe",
+        ])
+        self.cmb_motion.currentIndexChanged.connect(self._build_preview_loop)
+        set_layout.addWidget(self.cmb_motion)
+
+        set_layout.addWidget(QLabel("Depth 3D:"))
+        self.sld_intensity = QSlider(Qt.Horizontal)
+        self.sld_intensity.setRange(10, 100)
+        self.sld_intensity.setValue(50)
+        self.sld_intensity.setFixedWidth(80)
+        self.sld_intensity.setToolTip("Parallax virtual camera displacement intensity")
+        self.sld_intensity.valueChanged.connect(self._build_preview_loop)
+        set_layout.addWidget(self.sld_intensity)
+
         set_layout.addWidget(QLabel("Duration:"))
         self.cmb_duration = QComboBox()
         self.cmb_duration.addItems(["3 seconds (90 frames)", "5 seconds (150 frames)", "8 seconds (240 frames)"])
         self.cmb_duration.setCurrentIndex(1)
         set_layout.addWidget(self.cmb_duration)
 
-        set_layout.addWidget(QLabel("Resolution: Full HD 1080p (1920 × 1080 @ 30fps)"))
+        h_orig, w_orig = self.original_bgr.shape[:2]
+        exp_w, exp_h = compute_target_dimensions(w_orig, h_orig, max_long_edge=1920)
+        set_layout.addWidget(QLabel(f"Resolution: {exp_w} × {exp_h} @ 30fps"))
         set_layout.addStretch(1)
         layout.addWidget(frame_set)
 
@@ -2005,36 +2190,60 @@ class CinematicMotionDialog(QDialog):
         layout.addLayout(btn_layout)
 
     def _build_preview_loop(self) -> None:
-        """Precomputes 12 frames on proxy for real-time live preview playback."""
-        small = cv2.resize(self.original_bgr, (480, 270), interpolation=cv2.INTER_AREA)
+        """Precomputes smooth parallax frames preserving native aspect ratio for real-time live preview."""
+        if self._timer:
+            self._timer.stop()
+
+        h, w = self.original_bgr.shape[:2]
+        pw, ph = compute_target_dimensions(w, h, max_long_edge=520)
+        small = cv2.resize(self.original_bgr, (pw, ph), interpolation=cv2.INTER_AREA)
+
         mask = estimate_subject_mask(small)
+        depth_map = estimate_depth_map(small, subject_mask=mask)
         from src.imaging.creative_effects import inpaint_disocclusion_background, render_3d_cinematic_motion_frame
         bg_clean = inpaint_disocclusion_background(small, mask)
 
+        # Map style
+        style_txt = self.cmb_motion.currentText()
+        if "Dolly" in style_txt:
+            style = "dolly_in"
+        elif "Horizontal" in style_txt:
+            style = "pan_lr"
+        elif "Breathe" in style_txt:
+            style = "breathe"
+        else:
+            style = "orbital"
+
+        intensity = self.sld_intensity.value() / 100.0
+
         self._preview_frames.clear()
-        num_frames = 12
+        num_frames = 16
         for i in range(num_frames):
-            t = i / float(num_frames - 1)
-            frame = render_3d_cinematic_motion_frame(small, bg_clean, mask, t=t, canvas_size=(480, 270))
+            t = i / float(num_frames)
+            frame = render_3d_cinematic_motion_frame(
+                small,
+                bg_clean,
+                mask,
+                t=t,
+                canvas_size=(pw, ph),
+                depth_map=depth_map,
+                motion_style=style,
+                intensity=intensity,
+            )
             self._preview_frames.append(_cv2_to_qpixmap(frame))
 
         if self._preview_frames:
             self.lbl_thumb.setPixmap(self._preview_frames[0])
-            self._timer = QTimer(self)
-            self._timer.timeout.connect(self._advance_preview_frame)
-            self._timer.start(50)
+            if not self._timer:
+                self._timer = QTimer(self)
+                self._timer.timeout.connect(self._advance_preview_frame)
+            self._current_frame_idx = 0
+            self._timer.start(55)
 
     def _advance_preview_frame(self) -> None:
         if not self._preview_frames:
             return
-        self._current_frame_idx += self._anim_direction
-        if self._current_frame_idx >= len(self._preview_frames):
-            self._current_frame_idx = len(self._preview_frames) - 2
-            self._anim_direction = -1
-        elif self._current_frame_idx < 0:
-            self._current_frame_idx = 1
-            self._anim_direction = 1
-
+        self._current_frame_idx = (self._current_frame_idx + 1) % len(self._preview_frames)
         self.lbl_thumb.setPixmap(self._preview_frames[self._current_frame_idx])
 
     def _start_render(self) -> None:
@@ -2057,7 +2266,25 @@ class CinematicMotionDialog(QDialog):
         dur_text = self.cmb_duration.currentText()
         duration = 3.0 if "3" in dur_text else (8.0 if "8" in dur_text else 5.0)
 
-        self._worker = CinematicMotionWorker(self.original_bgr, out_path, duration)
+        style_txt = self.cmb_motion.currentText()
+        if "Dolly" in style_txt:
+            style = "dolly_in"
+        elif "Horizontal" in style_txt:
+            style = "pan_lr"
+        elif "Breathe" in style_txt:
+            style = "breathe"
+        else:
+            style = "orbital"
+
+        intensity = self.sld_intensity.value() / 100.0
+
+        self._worker = CinematicMotionWorker(
+            self.original_bgr,
+            out_path,
+            duration,
+            motion_style=style,
+            intensity=intensity,
+        )
         self._worker.progress.connect(self._on_progress)
         self._worker.finished.connect(lambda ok, msg: self._on_finished(ok, msg, out_path))
         self._worker.start()

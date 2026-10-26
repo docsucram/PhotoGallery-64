@@ -16,6 +16,27 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageFont, ImageFilter
 
 
+def _load_scalable_font(pixel_size: int, bold: bool = False) -> ImageFont.FreeTypeFont | Any:
+    """Loads a scalable TrueType font with the specified pixel size."""
+    pixel_size = max(10, int(pixel_size))
+    font_candidates = [
+        "C:/Windows/Fonts/segoeuib.ttf" if bold else "C:/Windows/Fonts/segoeui.ttf",
+        "C:/Windows/Fonts/arialbd.ttf" if bold else "C:/Windows/Fonts/arial.ttf",
+        "C:/Windows/Fonts/calibrib.ttf" if bold else "C:/Windows/Fonts/calibri.ttf",
+        "segoeui.ttf",
+        "arial.ttf",
+    ]
+    for font_path in font_candidates:
+        try:
+            return ImageFont.truetype(font_path, pixel_size)
+        except Exception:
+            continue
+    try:
+        return ImageFont.load_default(size=pixel_size)
+    except Exception:
+        return ImageFont.load_default()
+
+
 # =============================================================================
 # 1. Panorama Stitching & Auto-Crop Algorithms
 # =============================================================================
@@ -226,6 +247,64 @@ def fallback_homography_stitch(images_bgr: list[np.ndarray]) -> np.ndarray:
     return result
 
 
+def stitch_panorama_raw(
+    images_bgr: list[np.ndarray],
+    projection_mode: str = "cylindrical",
+) -> tuple[bool, np.ndarray, str]:
+    """
+    Executes OpenCV Stitcher or fallback homography to generate raw uncropped panorama.
+    Results are cached so postprocessing (auto-crop, inpaint) can be modified in <50ms.
+    """
+    if not images_bgr or len(images_bgr) < 2:
+        return False, np.empty((0, 0, 3), dtype=np.uint8), "Select at least 2 photos to stitch a panorama."
+
+    is_planar = projection_mode.lower() in ("planar", "perspective", "scans", "scan")
+    stitcher_mode = cv2.Stitcher_SCANS if is_planar else cv2.Stitcher_PANORAMA
+
+    stitcher = cv2.Stitcher_create(stitcher_mode)
+    status, stitched = stitcher.stitch(images_bgr)
+
+    used_fallback = False
+    if status != cv2.Stitcher_OK or stitched is None or stitched.size == 0:
+        try:
+            stitched = fallback_homography_stitch(images_bgr)
+            used_fallback = True
+        except Exception as e:
+            return False, np.empty((0, 0, 3), dtype=np.uint8), f"Stitching failed: {e}"
+
+    msg = "Panorama stitched successfully via fallback engine" if used_fallback else "Panorama stitched successfully"
+    return True, stitched, msg
+
+
+def postprocess_panorama(
+    raw_stitched_bgr: np.ndarray,
+    auto_crop: bool = True,
+    fill_minor_gaps: bool = False,
+) -> np.ndarray:
+    """
+    Rapidly applies border inpainting and Microsoft ICE-style auto-crop on raw stitched panorama.
+    Runs in <50ms without re-running the stitcher.
+    """
+    if raw_stitched_bgr is None or raw_stitched_bgr.size == 0:
+        return raw_stitched_bgr
+
+    result = raw_stitched_bgr.copy()
+    gray = cv2.cvtColor(result, cv2.COLOR_BGR2GRAY)
+    mask = (gray > 0).astype(np.uint8) * 255
+
+    if fill_minor_gaps:
+        result = inpaint_minor_border_gaps(result, mask)
+        gray = cv2.cvtColor(result, cv2.COLOR_BGR2GRAY)
+        mask = (gray > 0).astype(np.uint8) * 255
+
+    if auto_crop:
+        rx, ry, rw, rh = find_largest_interior_rectangle(mask)
+        if rw > 20 and rh > 20:
+            result = result[ry : ry + rh, rx : rx + rw]
+
+    return result
+
+
 def stitch_panorama(
     images_bgr: list[np.ndarray],
     projection_mode: str = "cylindrical",
@@ -238,64 +317,45 @@ def stitch_panorama(
     - Auto-crop: removes wavy black edges to clean interior rectangle.
     - Fill minor gaps: Telea inpainting on border gaps.
     """
-    if not images_bgr or len(images_bgr) < 2:
-        return False, np.empty((0, 0, 3), dtype=np.uint8), "Select at least 2 photos to stitch a panorama."
-
-    # Choose OpenCV Stitcher mode
-    is_planar = projection_mode.lower() in ("planar", "perspective", "scans", "scan")
-    stitcher_mode = cv2.Stitcher_SCANS if is_planar else cv2.Stitcher_PANORAMA
-
-    stitcher = cv2.Stitcher_create(stitcher_mode)
-    status, stitched = stitcher.stitch(images_bgr)
-
-    used_fallback = False
-    if status != cv2.Stitcher_OK or stitched is None or stitched.size == 0:
-        # Try fallback homography stitcher
-        try:
-            stitched = fallback_homography_stitch(images_bgr)
-            used_fallback = True
-        except Exception as e:
-            return False, np.empty((0, 0, 3), dtype=np.uint8), f"Stitching failed: {e}"
-
-    # Extract non-black mask
-    gray = cv2.cvtColor(stitched, cv2.COLOR_BGR2GRAY)
-    mask = (gray > 0).astype(np.uint8) * 255
-
-    # Fill minor gaps if requested
-    if fill_minor_gaps:
-        stitched = inpaint_minor_border_gaps(stitched, mask)
-        gray = cv2.cvtColor(stitched, cv2.COLOR_BGR2GRAY)
-        mask = (gray > 0).astype(np.uint8) * 255
-
-    # Auto-crop wavy borders if requested
-    if auto_crop:
-        rx, ry, rw, rh = find_largest_interior_rectangle(mask)
-        if rw > 20 and rh > 20:
-            stitched = stitched[ry : ry + rh, rx : rx + rw]
-
-    msg = "Panorama stitched successfully via fallback engine" if used_fallback else "Panorama stitched successfully"
-    return True, stitched, msg
+    ok, raw_stitched, msg = stitch_panorama_raw(images_bgr, projection_mode=projection_mode)
+    if not ok:
+        return False, raw_stitched, msg
+    final_pano = postprocess_panorama(raw_stitched, auto_crop=auto_crop, fill_minor_gaps=fill_minor_gaps)
+    return True, final_pano, msg
 
 
 # =============================================================================
 # 2. Interactive Collage & 'Then & Now' Studio
 # =============================================================================
 
-def _crop_to_aspect(img_bgr: np.ndarray, target_w: int, target_h: int) -> np.ndarray:
-    """Aspect-fill center crop."""
+def _crop_to_aspect(
+    img_bgr: np.ndarray,
+    target_w: int,
+    target_h: int,
+    focus_center: tuple[float, float] | None = None,
+) -> np.ndarray:
+    """
+    Aspect-fill crop with face/focus awareness:
+    - If focus_center is provided as normalized (cx, cy) in [0..1], centers the crop box around it.
+    - Defaults to (0.5, 0.40) to keep heads and eyes in frame rather than cutting off foreheads.
+    """
     h, w = img_bgr.shape[:2]
     target_aspect = target_w / target_h
     current_aspect = w / h
 
+    fc_x, fc_y = focus_center if focus_center is not None else (0.5, 0.40)
+
     if current_aspect > target_aspect:
         # Crop width
         new_w = int(h * target_aspect)
-        start_x = (w - new_w) // 2
+        desired_x = int(w * fc_x - new_w / 2)
+        start_x = max(0, min(w - new_w, desired_x))
         cropped = img_bgr[:, start_x : start_x + new_w]
     else:
         # Crop height
         new_h = int(w / target_aspect)
-        start_y = (h - new_h) // 2
+        desired_y = int(h * fc_y - new_h / 2)
+        start_y = max(0, min(h - new_h, desired_y))
         cropped = img_bgr[start_y : start_y + new_h, :]
 
     return cv2.resize(cropped, (target_w, target_h), interpolation=cv2.INTER_AREA)
@@ -514,12 +574,13 @@ def create_polaroid_scatter_collage(
             if cap:
                 if len(cap) > 34:
                     cap = cap[:31] + "..."
-                # Use default PIL font with centered alignment
-                bbox = draw_card.textbbox((0, 0), cap)
+                font = _load_scalable_font(max(14, int(card_h * 0.045)))
+                bbox = draw_card.textbbox((0, 0), cap, font=font)
                 text_w = bbox[2] - bbox[0]
+                text_h = bbox[3] - bbox[1]
                 tx = max(16, (card_w - text_w) // 2)
-                ty = 16 + photo_h + 18
-                draw_card.text((tx, ty), cap, fill=(60, 60, 65, 255))
+                ty = 16 + photo_h + max(8, (card_h - (16 + photo_h) - text_h) // 2)
+                draw_card.text((tx, ty), cap, fill=(60, 60, 65, 255), font=font)
 
         # 4. Render soft drop shadow
         shadow_margin = 40
@@ -602,10 +663,11 @@ def create_then_and_now_card(
             badge_text = year_str or f"SHOT {i+1}"
 
         # Draw pill badge in top-left of each photo
-        pill_margin = 20
-        pill_pad_x = 16
-        pill_pad_y = 8
-        bbox = draw_canvas.textbbox((0, 0), badge_text)
+        pill_margin = max(16, int(th * 0.02))
+        pill_pad_x = max(14, int(cell_w * 0.03))
+        pill_pad_y = max(8, int(cell_w * 0.018))
+        badge_font = _load_scalable_font(max(16, int(th * 0.026)), bold=True)
+        bbox = draw_canvas.textbbox((0, 0), badge_text, font=badge_font)
         tw_text = bbox[2] - bbox[0]
         th_text = bbox[3] - bbox[1]
 
@@ -617,12 +679,12 @@ def create_then_and_now_card(
         # Semi-transparent dark pill background
         pill_overlay = Image.new("RGBA", (pill_w, pill_h), (0, 0, 0, 0))
         pill_draw = ImageDraw.Draw(pill_overlay)
-        pill_draw.rounded_rectangle([(0, 0), (pill_w, pill_h)], radius=pill_h // 2, fill=(15, 15, 20, 200))
-        pill_draw.rounded_rectangle([(0, 0), (pill_w, pill_h)], radius=pill_h // 2, outline=(255, 255, 255, 120), width=1)
+        pill_draw.rounded_rectangle([(0, 0), (pill_w, pill_h)], radius=pill_h // 2, fill=(15, 15, 20, 210))
+        pill_draw.rounded_rectangle([(0, 0), (pill_w, pill_h)], radius=pill_h // 2, outline=(255, 255, 255, 140), width=1)
         canvas_pil.paste(pill_overlay, (px, py), pill_overlay)
 
         # Crisp badge text
-        draw_canvas.text((px + pill_pad_x, py + pill_pad_y - 2), badge_text, fill=(255, 255, 255, 255))
+        draw_canvas.text((px + pill_pad_x, py + pill_pad_y - 2), badge_text, fill=(255, 255, 255, 255), font=badge_font)
 
     return cv2.cvtColor(np.array(canvas_pil), cv2.COLOR_RGBA2BGR)
 
@@ -680,11 +742,19 @@ def align_burst_frame(base_bgr: np.ndarray, target_bgr: np.ndarray) -> tuple[boo
 
 def detect_faces_in_image(image_bgr: np.ndarray) -> list[tuple[int, int, int, int]]:
     """
-    Detects faces in image using OpenCV frontal face cascade classifier.
+    Detects faces in image using FaceEngine or Haar cascade fallback.
     Returns list of (x, y, w, h) sorted left-to-right.
     """
     if image_bgr is None or image_bgr.size == 0:
         return []
+
+    try:
+        from src.imaging.creative_effects import _detect_faces_for_mask
+        boxes = _detect_faces_for_mask(image_bgr)
+        if boxes:
+            return sorted(boxes, key=lambda rect: rect[0])
+    except Exception:
+        pass
 
     cascade_path = cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
     if not Path(cascade_path).exists():
@@ -706,9 +776,9 @@ def fuse_face(
     expand_margin: float = 0.25,
 ) -> np.ndarray:
     """
-    Seamlessly clones a face patch from aligned_source_bgr into base_bgr using
-    cv2.seamlessClone (Poisson blending), with feathered Gaussian alpha blending fallback
-    near image boundaries.
+    Seamlessly blends a face patch from aligned_source_bgr into base_bgr:
+    - Pre-matches CIE LAB color mean and std so lighting and skin tones blend naturally.
+    - Uses Poisson clone with smooth feathered fallback near image boundaries.
     """
     if base_bgr is None or aligned_source_bgr is None:
         return base_bgr
@@ -731,6 +801,26 @@ def fuse_face(
     if patch_w <= 10 or patch_h <= 10:
         return base_bgr
 
+    src_patch = aligned_source_bgr[y1:y2, x1:x2].copy()
+    base_patch = base_bgr[y1:y2, x1:x2].copy()
+
+    # Pre-match CIE LAB color mean & std on inner core to avoid Poisson color shifting
+    try:
+        lab_src = cv2.cvtColor(src_patch, cv2.COLOR_BGR2LAB).astype(np.float32)
+        lab_base = cv2.cvtColor(base_patch, cv2.COLOR_BGR2LAB).astype(np.float32)
+        ih, iw = patch_h, patch_w
+        core_src = lab_src[int(ih * 0.2) : int(ih * 0.8), int(iw * 0.2) : int(iw * 0.8)]
+        core_base = lab_base[int(ih * 0.2) : int(ih * 0.8), int(iw * 0.2) : int(iw * 0.8)]
+        if core_src.size > 0 and core_base.size > 0:
+            for ch in range(3):
+                m_s, s_s = float(np.mean(core_src[:, :, ch])), float(np.std(core_src[:, :, ch])) + 1e-4
+                m_b, s_b = float(np.mean(core_base[:, :, ch])), float(np.std(core_base[:, :, ch])) + 1e-4
+                lab_src[:, :, ch] = (lab_src[:, :, ch] - m_s) * (s_b / s_s) + m_b
+            lab_src = np.clip(lab_src, 0.0, 255.0).astype(np.uint8)
+            src_patch = cv2.cvtColor(lab_src, cv2.COLOR_LAB2BGR)
+    except Exception:
+        pass
+
     center_x = (x1 + x2) // 2
     center_y = (y1 + y2) // 2
 
@@ -750,9 +840,13 @@ def fuse_face(
         axes = (patch_w // 2 - 2, patch_h // 2 - 2)
         cv2.ellipse(mask, (center_x, center_y), axes, 0, 0, 360, 255, -1)
 
+        # Place color-matched patch into full source canvas
+        full_src = base_bgr.copy()
+        full_src[y1:y2, x1:x2] = src_patch
+
         try:
             fused = cv2.seamlessClone(
-                aligned_source_bgr,
+                full_src,
                 base_bgr,
                 mask,
                 (center_x, center_y),
@@ -770,7 +864,7 @@ def fuse_face(
 
     result = base_bgr.copy()
     base_roi = result[y1:y2, x1:x2].astype(np.float32)
-    src_roi = aligned_source_bgr[y1:y2, x1:x2].astype(np.float32)
+    src_roi = src_patch.astype(np.float32)
 
     blended_roi = src_roi * blurred_mask[:, :, None] + base_roi * (1.0 - blurred_mask[:, :, None])
     result[y1:y2, x1:x2] = np.clip(blended_roi, 0, 255).astype(np.uint8)
